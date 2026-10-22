@@ -195,6 +195,7 @@
                                     <MenuItem x:Name="NoteMenu" Command="app:Cmd.AddNote" />
                                     <Separator />
                                     <MenuItem x:Name="AttachMenu" Header="Attach a _File…" Click="OnAttachFile" />
+                                    <MenuItem Command="app:Cmd.RecognizeText" />
                                     <Separator />
                                     <MenuItem x:Name="RedactMenu" Command="app:Cmd.Redact" />
                                     <MenuItem x:Name="RedactTextMenu" Header="Mark Selected _Text for Redaction" Click="OnRedactText" />

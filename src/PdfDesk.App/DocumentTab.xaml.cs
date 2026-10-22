@@ -74,6 +74,9 @@ public sealed record Toast(string Message, string? ActionLabel = null, Action? A
 
 public enum NavPaneKind { None, Pages, Bookmarks, Search, Comments, Attachments, Layers, Signatures }
 
+/// <summary>How <see cref="DocumentTab.TryEdit"/> ended.</summary>
+public enum EditOutcome { Done, NoChange, Busy, Declined, Failed }
+
 public partial class DocumentTab : UserControl, IDisposable
 {
     private const double ThumbBox = 130;
@@ -532,8 +535,18 @@ public partial class DocumentTab : UserControl, IDisposable
                 var batch = new Dictionary<string, string>(_formQueue);
                 _formQueue.Clear();
                 var label = batch.Count == 1 ? "Fill form field" : $"Fill {batch.Count} form fields";
-                if (!await RunEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true, contentOnly: true))
+                var outcome = await TryEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true, contentOnly: true);
+                if (outcome == EditOutcome.Busy)
                 {
+                    // Another edit (or its warning prompt) got the tab first: put the values back (newer ones typed
+                    // meanwhile win) and write them once it's done.
+                    foreach (var (name, value) in batch) _formQueue.TryAdd(name, value);
+                    continue;
+                }
+                if (outcome != EditOutcome.Done)
+                {
+                    // Declined the password/signature warning, or the write failed: the fields show the document's
+                    // values again, so nothing on screen claims a change that isn't in the file.
                     _formQueue.Clear();
                     Viewer.ClearPendingValues();
                     break;
@@ -552,19 +565,23 @@ public partial class DocumentTab : UserControl, IDisposable
         BeginWrite();
         try
         {
-            // No await between the idle check and RunEdit, so nothing else can start an edit in between.
-            while (IsBusy)
+            // Retry while another edit (or its warning prompt) holds the tab; a declined warning or a failure ends it
+            // (the stamp only shows once it is in the document, so nothing needs reverting).
+            while (true)
             {
-                await WhenIdle();
-                if (_disposed) return;
+                while (IsBusy)
+                {
+                    await WhenIdle();
+                    if (_disposed) return;
+                }
+                var outcome = e.ReplaceId is { } id && e.Text.Length == 0 && e.Kind == StampKind.Text
+                    ? await TryEdit("Remove text", (d, pw) => TextStamps.Remove(d, pw, id), contentOnly: true)
+                    : e.ReplaceId is { } markId && e.Kind != StampKind.Text
+                        ? await TryEdit(e.Kind == StampKind.Check ? "Remove check mark" : "Remove cross", (d, pw) => TextStamps.Remove(d, pw, markId), contentOnly: true)
+                        : await TryEdit(e.Kind switch { StampKind.Check => "Add check mark", StampKind.Cross => "Add cross", _ => e.ReplaceId is null ? "Add text" : "Edit text" },
+                            (d, pw) => TextStamps.Put(d, pw, e.PageIndex, e.Rect, e.Kind, e.Text, e.FontSize, e.ReplaceId), quiet: e.Kind == StampKind.Text, contentOnly: true);
+                if (outcome != EditOutcome.Busy || _disposed) return;
             }
-            if (e.ReplaceId is { } id && e.Text.Length == 0 && e.Kind == StampKind.Text)
-                await RunEdit("Remove text", (d, pw) => TextStamps.Remove(d, pw, id), contentOnly: true);
-            else if (e.ReplaceId is { } markId && e.Kind != StampKind.Text)
-                await RunEdit(e.Kind == StampKind.Check ? "Remove check mark" : "Remove cross", (d, pw) => TextStamps.Remove(d, pw, markId), contentOnly: true);
-            else
-                await RunEdit(e.Kind switch { StampKind.Check => "Add check mark", StampKind.Cross => "Add cross", _ => e.ReplaceId is null ? "Add text" : "Edit text" },
-                    (d, pw) => TextStamps.Put(d, pw, e.PageIndex, e.Rect, e.Kind, e.Text, e.FontSize, e.ReplaceId), quiet: e.Kind == StampKind.Text, contentOnly: true);
         }
         finally
         {
@@ -686,23 +703,42 @@ public partial class DocumentTab : UserControl, IDisposable
 
     // ───────────────────────────── Editing ─────────────────────────────
 
-    /// <summary>Runs a page edit off the UI thread and commits it as one undo step.</summary>
-    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false)
+    /// <summary>Runs a page edit off the UI thread and commits it as one undo step. True when it was committed.</summary>
+    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false) =>
+        await TryEdit(label, edit, goToPage, quiet, contentOnly) is EditOutcome.Done or EditOutcome.NoChange;
+
+    /// <summary>
+    /// <see cref="RunEdit"/> that says why nothing was committed: <see cref="EditOutcome.NoChange"/> (the edit returned the
+    /// same bytes), <see cref="EditOutcome.Busy"/> (another edit or its
+    /// warning prompt holds the tab: try again once idle), <see cref="EditOutcome.Declined"/> (the user said no to the
+    /// password/signature warning) or <see cref="EditOutcome.Failed"/> (the edit threw, or the file isn't a PDF).
+    /// </summary>
+    public async Task<EditOutcome> TryEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false)
     {
         if (!Session.IsPdf)
         {
             Prompt.Info(Window.GetWindow(this), "Page editing works on PDFs", "This file can be viewed and printed, but only PDF pages can be rearranged.");
-            return false;
+            return EditOutcome.Failed;
         }
-        if (IsBusy || _disposed) return false;
-        if (Session.Engine.IsEncrypted && !_protectionWarned)
+        if (_disposed) return EditOutcome.Failed;
+        if (IsBusy) return EditOutcome.Busy;
+        if ((Session.Engine.IsEncrypted && !_protectionWarned) || NeedsSignedWarning)
         {
-            if (!Prompt.Confirm(Window.GetWindow(this), "This PDF is password-protected",
-                    "After a page edit it is saved without its password protection.", "Edit anyway", warning: true)) return false;
-            _protectionWarned = true;
+            // Hold the tab while the warning is open, so an edit started meanwhile waits (Busy) instead of slipping in
+            // or opening a second prompt. No veil: the prompt is the only thing on screen.
+            IsBusy = true;
+            var go = false;
+            try
+            {
+                go = ConfirmProtectedEdit() && ConfirmSignedEdit();
+            }
+            finally
+            {
+                if (!go) SetBusy(null);
+            }
+            if (!go) return EditOutcome.Declined;
+            if (_disposed) return EditOutcome.Failed;
         }
-        if (!ConfirmSignedEdit()) return false;
-        if (IsBusy || _disposed) return false; // something started while the prompt was open
 
         SetBusy($"{label}…");
         BeginWrite();
@@ -710,8 +746,25 @@ public partial class DocumentTab : UserControl, IDisposable
         {
             var data = Session.Data;
             var password = Session.Password;
-            var result = await Task.Run(() => edit(data, password));
-            if (_disposed) return false;
+            byte[] result;
+            while (true)
+            {
+                try
+                {
+                    result = await Task.Run(() => edit(data, password));
+                    break;
+                }
+                catch (OwnerPasswordRequiredException ex) when (!_disposed)
+                {
+                    // Opened for viewing without the permissions password: ask for it and try the same edit again.
+                    if (PdfFiles.PromptOwnerPassword(Window.GetWindow(this), Session.DisplayName, ex.WrongPassword) is not { } owner)
+                        return EditOutcome.Declined;
+                    password = owner;
+                }
+            }
+            if (_disposed) return EditOutcome.Failed;
+            if (password is not null && password != Session.Password) Session.UsePassword(password); // only once it worked
+            if (ReferenceEquals(result, data)) return EditOutcome.NoChange; // nothing to do: no undo step
             _contentOnlyCommit = contentOnly;
             try
             {
@@ -735,19 +788,32 @@ public partial class DocumentTab : UserControl, IDisposable
                     Undo();
                 });
             }
-            return true;
+            return EditOutcome.Done;
+        }
+        catch (OperationCanceledException)
+        {
+            return EditOutcome.Declined; // the user cancelled a long edit (e.g. text recognition): nothing changed
         }
         catch (Exception ex) // top-level UI action: report any failure, never lose it
         {
             Log.Write($"{label} failed: {ex}");
             Prompt.Error(Window.GetWindow(this), $"{label} didn't work", ex.Message);
-            return false;
+            return EditOutcome.Failed;
         }
         finally
         {
             EndWrite();
             if (!_disposed) SetBusy(null);
         }
+    }
+
+    private bool ConfirmProtectedEdit()
+    {
+        if (!Session.Engine.IsEncrypted || _protectionWarned) return true;
+        if (!Prompt.Confirm(Window.GetWindow(this), "This PDF is password-protected",
+                "After a page edit it is saved without its password protection.", "Edit anyway", warning: true)) return false;
+        _protectionWarned = true;
+        return true;
     }
 
     public void Undo()
@@ -1527,6 +1593,7 @@ public partial class DocumentTab : UserControl, IDisposable
         {
             _formQueue.Clear();
             Viewer.ClearPendingValues();
+            _signatureBaselineStale = true;
             Session.ReloadFromDisk();
             _undoIds.Clear();
             _redoIds.Clear();

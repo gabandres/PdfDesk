@@ -94,5 +94,6 @@ public static class Cmd
     public static readonly RoutedUICommand StrikeOut = Make("_Strike Out Text", nameof(StrikeOut));
     public static readonly RoutedUICommand AddNote = Make("Add _Note", nameof(AddNote));
     public static readonly RoutedUICommand Redact = Make("_Redact", nameof(Redact));
+    public static readonly RoutedUICommand RecognizeText = Make("Recognize Te_xt (OCR)…", nameof(RecognizeText));
     public static readonly RoutedUICommand ReloadFromDisk = Make("Re_load from Disk", nameof(ReloadFromDisk), K(Key.F5));
 }

@@ -11,7 +11,9 @@ namespace PdfDesk.Core;
 /// the areas are painted solid black in the pixels, and the page's content is replaced by that image. Nothing from the
 /// original page (text, vector art, images, annotations, form widgets, thumbnails, alternate text in the structure
 /// tree) survives, so the redacted content can't be recovered or copied. Redacted pages become images: their text is
-/// no longer selectable or searchable. Other pages and the document metadata are left untouched.
+/// no longer selectable or searchable. A form field an area touches is emptied on every page (its value would otherwise
+/// survive in its other widgets). Tagged PDFs lose the redacted page's part of the structure tree. Other pages and the
+/// document metadata are left untouched.
 /// </summary>
 public static class Redaction
 {
@@ -22,6 +24,7 @@ public static class Redaction
         var pages = areasByPage.Where(kv => kv.Value.Any(r => !r.IsEmpty)).ToList();
         if (pages.Count == 0) return data;
         dpi = Math.Clamp(dpi, 36, 1200);
+        data = ClearRedactedFields(data, password, pages);
 
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         using var engine = PdfEngine.Open(data, InputFileTypes.PDF, password);
@@ -50,6 +53,28 @@ public static class Redaction
         return PdfObj.Save(doc);
     }
 
+    /// <summary>
+    /// A form field whose widget an area covers loses its value everywhere: its widgets on other pages would otherwise
+    /// keep showing it (and /V would keep it in the file). Done first, so the rendered pages already show the field empty.
+    /// </summary>
+    private static byte[] ClearRedactedFields(byte[] data, string? password, List<KeyValuePair<int, IReadOnlyList<RectD>>> pages)
+    {
+        using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
+        var hit = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        foreach (var (index, areas) in pages)
+        {
+            if (index < 0 || index >= doc.PageCount || PdfObj.Array(doc.Pages[index].Elements["/Annots"]) is not { } annots) continue;
+            var page = doc.Pages[index];
+            foreach (var w in annots.Elements.Select(PdfObj.Dict).OfType<PdfDictionary>())
+            {
+                if (PdfObj.NameOf(w, "/Subtype") != "/Widget" || PdfObj.Array(w.Elements["/Rect"]) is not { } r) continue;
+                var rect = PdfObj.RectToPage(page, r);
+                if (areas.Any(a => !a.IsEmpty && !a.Intersect(rect).IsEmpty)) hit.Add(w);
+            }
+        }
+        return hit.Count > 0 && FormEditor.ClearFields(doc, hit) ? PdfObj.Save(doc) : data;
+    }
+
     private static void ReplacePage(PdfDocument doc, PdfPage page, int width, int height, byte[] rgb)
     {
         var image = PdfObj.AddStream(doc, rgb);
@@ -75,6 +100,7 @@ public static class Redaction
         page.Elements["/Resources"] = resources;
 
         var removed = new HashSet<PdfObject>(ReferenceEqualityComparer.Instance);
+        var parentKeys = StructTree.ParentKeys(page).ToList();
         if (PdfObj.Array(page.Elements["/Annots"]) is { } annots)
         {
             var acro = PdfObj.Dict(doc.Internals.Catalog.Elements["/AcroForm"]);
@@ -102,6 +128,7 @@ public static class Redaction
         foreach (var key in new[] { "/Annots", "/Thumb", "/PieceInfo", "/StructParents", "/Group", "/B", "/Metadata", "/SeparationInfo", "/AA" })
             page.Elements.Remove(key);
         ScrubStructure(doc, page, removed);
+        StructTree.Prune(doc, [page], parentKeys, removed.Contains);
     }
 
     /// <summary>Takes a widget out of the field tree, dropping fields left without widgets.</summary>

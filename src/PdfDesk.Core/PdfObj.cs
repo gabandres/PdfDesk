@@ -82,8 +82,21 @@ internal static class PdfObj
         }
         catch (PdfReaderException ex)
         {
-            throw new InvalidOperationException($"{failure}: {ex.Message}", ex);
+            throw ReaderError(ex, mode, failure);
         }
+    }
+
+    /// <summary>
+    /// Maps a PDFsharp open failure. In Modify mode the document already opened for viewing, so a password complaint
+    /// means the permissions (owner) password is missing or wrong, which the UI can ask for and retry.
+    /// </summary>
+    public static Exception ReaderError(PdfReaderException ex, PdfDocumentOpenMode mode, string failure)
+    {
+        if (mode == PdfDocumentOpenMode.Modify && ex.Message.Contains("owner password", StringComparison.OrdinalIgnoreCase))
+            return new OwnerPasswordRequiredException(false, ex);
+        if (mode == PdfDocumentOpenMode.Modify && ex.Message.Contains("password is invalid", StringComparison.OrdinalIgnoreCase))
+            return new OwnerPasswordRequiredException(true, ex);
+        return new InvalidOperationException($"{failure}: {ex.Message}", ex);
     }
 
     /// <summary>

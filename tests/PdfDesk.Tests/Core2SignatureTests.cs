@@ -75,6 +75,17 @@ public class Core2SignatureTests
     }
 
     [Fact]
+    public void EditsThatBreakASignatureAreReportedAgainstTheOpenedFile()
+    {
+        var pdf = Signed();
+        var original = Signatures.Verify(pdf);
+        Assert.Empty(Signatures.BrokenByEdits(original, pdf));
+        var edited = PageEditor.Rotate(pdf, null, [0], 90);
+        var broken = Signatures.BrokenByEdits(original, edited);
+        Assert.Equal("Approval", Assert.Single(broken).FieldName); // the unsigned "Witness" field isn't reported
+    }
+
+    [Fact]
     public void ChangedBytesMakeItInvalid()
     {
         var pdf = Signed();

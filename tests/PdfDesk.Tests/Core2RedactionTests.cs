@@ -92,6 +92,47 @@ public class Core2RedactionTests
         Assert.Contains("Second page stays", engine.GetText(1).Text);
     }
 
+    /// <summary>
+    /// Fields with a widget on each page: "ssn" and "agree" are covered by the redaction area on page 1, "keep" is on
+    /// page 1 too but outside the area. The ssn widgets have appearances showing the value.
+    /// </summary>
+    [Fact]
+    public void RedactedFieldIsEmptiedOnEveryPage()
+    {
+        const string Ap = "/Type /XObject /Subtype /Form /BBox [0 0 228 20] /Resources << /Font << /Helv 5 0 R >> >>";
+        var data = Core2Pdf.Build([
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 9 0 R 12 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Annots [7 0 R 10 0 R 13 0 R] >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Annots [8 0 R 11 0 R 14 0 R] >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            "<< /FT /Tx /T (ssn) /V (SSNSECRET) /DA (/Helv 12 Tf 0 g) /Kids [7 0 R 8 0 R] >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [72 600 300 620] /P 3 0 R /AP << /N 15 0 R >> >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [72 600 300 620] /P 4 0 R /AP << /N 16 0 R >> >>",
+            "<< /FT /Btn /T (agree) /V /Yes /Kids [10 0 R 11 0 R] >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 9 0 R /Rect [72 500 90 518] /P 3 0 R /AS /Yes /AP << /N << /Yes 17 0 R /Off 17 0 R >> >> >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 9 0 R /Rect [72 500 90 518] /P 4 0 R /AS /Yes /AP << /N << /Yes 17 0 R /Off 17 0 R >> >> >>",
+            "<< /FT /Tx /T (keep) /V (KEEPVALUE) /DA (/Helv 12 Tf 0 g) /Kids [13 0 R 14 0 R] >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 12 0 R /Rect [72 300 300 320] /P 3 0 R >>",
+            "<< /Type /Annot /Subtype /Widget /Parent 12 0 R /Rect [72 300 300 320] /P 4 0 R >>",
+            Core2Pdf.Stream("BT /Helv 12 Tf 2 5 Td (SSNSECRET) Tj ET", Ap),
+            Core2Pdf.Stream("BT /Helv 12 Tf 2 5 Td (SSNSECRET) Tj ET", Ap),
+            Core2Pdf.Stream("0 0 18 18 re f", "/Type /XObject /Subtype /Form /BBox [0 0 18 18]"),
+        ]);
+        Assert.Contains("SSNSECRET", Core2Pdf.AllText(data, 1));
+
+        // Page space: ssn at y 172–192, agree at 274–292, keep at 472–492.
+        var redacted = Redaction.Apply(data, null, new Dictionary<int, IReadOnlyList<RectD>> { [0] = [new RectD(60, 160, 260, 140)] }, dpi: 72);
+
+        Assert.DoesNotContain("SSNSECRET", AllBytesInflated(redacted));
+        Assert.DoesNotContain("SSNSECRET", Core2Pdf.AllText(redacted, 1));
+        var fields = FormEditor.Read(redacted, null);
+        Assert.All(fields, f => Assert.Equal(1, f.PageIndex));
+        Assert.Equal("", fields.Single(f => f.FieldName == "ssn").Value);
+        Assert.Equal("Off", fields.Single(f => f.FieldName == "agree").Value);
+        Assert.Equal("KEEPVALUE", fields.Single(f => f.FieldName == "keep").Value); // not under an area: unchanged
+    }
+
     [Fact]
     public void NothingToRedactReturnsTheSameBytes()
     {
@@ -108,7 +149,7 @@ public class Core2RedactionTests
     }
 
     /// <summary>The file as text with every Flate stream inflated, to look for leftovers anywhere.</summary>
-    private static string AllBytesInflated(byte[] pdf)
+    internal static string AllBytesInflated(byte[] pdf)
     {
         var text = Encoding.Latin1.GetString(pdf);
         var sb = new StringBuilder(text);

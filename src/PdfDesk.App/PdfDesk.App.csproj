@@ -13,6 +13,13 @@
   <ItemGroup>
     <ProjectReference Include="..\PdfDesk.Core\PdfDesk.Core.csproj" />
   </ItemGroup>
+  <!-- Publish: our own symbols are embedded (Directory.Build.props); packages' loose .pdb files (e.g. libHarfBuzzSharp.pdb,
+       23 MB) would land next to the single-file exe, so leave every .pdb out of the publish output. -->
+  <Target Name="DropPdbsFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
   <ItemGroup>
     <Resource Include="..\..\assets\PdfDesk.ico" Link="PdfDesk.ico" />
     <Resource Include="..\..\assets\PdfDesk-512.png" Link="PdfDeskLogo.png" />

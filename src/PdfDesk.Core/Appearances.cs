@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
-using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.Advanced;
 
@@ -20,17 +19,6 @@ internal readonly record struct PdfColorValue(double[] C)
 
     public string Fill => string.Join(' ', C.Select(PdfObj.F)) + (C.Length switch { 1 => " g", 3 => " rg", _ => " k" });
     public string Stroke => string.Join(' ', C.Select(PdfObj.F)) + (C.Length switch { 1 => " G", 3 => " RG", _ => " K" });
-
-    public XColor ToXColor()
-    {
-        static int B(double v) => (int)Math.Round(Math.Clamp(v, 0, 1) * 255);
-        return C.Length switch
-        {
-            1 => XColor.FromArgb(B(C[0]), B(C[0]), B(C[0])),
-            3 => XColor.FromArgb(B(C[0]), B(C[1]), B(C[2])),
-            _ => XColor.FromArgb(B((1 - C[0]) * (1 - C[3])), B((1 - C[1]) * (1 - C[3])), B((1 - C[2]) * (1 - C[3]))),
-        };
-    }
 }
 
 /// <summary>A parsed default-appearance string (/DA): font resource name, size (0 = auto) and text color.</summary>
@@ -70,9 +58,9 @@ internal sealed record DefaultAppearance(string FontName, double Size, PdfColorV
 
 /// <summary>
 /// Lays out and draws text for an appearance stream. Text the standard font can encode (WinAnsi) is written with
-/// that non-embedded font; anything else (Greek, Cyrillic, CJK, ...) is drawn through PDFsharp with an embedded,
-/// subset system TrueType font chosen per character, so any script renders in every viewer.
-/// Complex-script shaping (Arabic joining, Indic reordering) and bidi are not done.
+/// that non-embedded font; anything else (Greek, Cyrillic, Arabic, Hebrew, Indic, CJK, ...) is shaped with HarfBuzz,
+/// ordered by the bidi algorithm and drawn with embedded, subset system TrueType fonts chosen per run
+/// (see <see cref="TextShaper"/> and <see cref="CidFontWriter"/>), so any script renders in every viewer.
 /// </summary>
 internal sealed class TextPainter
 {
@@ -97,7 +85,7 @@ internal sealed class TextPainter
 
     /// <summary>Width of <paramref name="s"/> at 1 pt.</summary>
     public double Measure(string s) =>
-        Unicode ? SystemFonts.Runs(s, _primary).Sum(r => r.Font.Measure(r.Text)) : _std.Measure(s);
+        Unicode ? TextShaper.Measure(s, _primary) : _std.Measure(s);
 
     /// <summary>Queues a line of text with its baseline-left at (x, y) in the appearance's bbox coordinates.</summary>
     public void Draw(string text, double x, double y, double size)
@@ -120,20 +108,17 @@ internal sealed class TextPainter
             return (Encoding.Latin1.GetBytes(sb.ToString()), res);
         }
 
-        var brush = new XSolidBrush(color.ToXColor());
-        var format = new XStringFormat { Alignment = XStringAlignment.Near, LineAlignment = XLineAlignment.BaseLine };
-        return ScratchPage.Draw(doc, width, height, gfx =>
+        var writer = new CidFontWriter();
+        var ops = new StringBuilder();
+        foreach (var (text, x, y, size) in _items)
         {
-            foreach (var (text, x0, y, size) in _items)
-            {
-                var x = x0;
-                foreach (var (run, font) in SystemFonts.Runs(text, _primary))
-                {
-                    gfx.DrawString(run, font.XFont(size), brush, x, height - y, format);
-                    x += font.Measure(run) * size;
-                }
-            }
-        });
+            ops.Append(CultureInfo.InvariantCulture, $"BT {color.Fill} 1 0 0 1 {PdfObj.F(x)} {PdfObj.F(y)} Tm ");
+            writer.Emit(ops, TextShaper.Shape(text, _primary), size);
+            ops.Append("ET\n");
+        }
+        var resources = new PdfDictionary(doc);
+        resources.Elements["/Font"] = writer.BuildFonts(doc);
+        return (Encoding.ASCII.GetBytes(ops.ToString()), resources);
     }
 
     /// <summary>Greedy word wrap to <paramref name="maxWidth"/> (honors explicit line breaks; splits words that don't fit).</summary>
@@ -178,41 +163,6 @@ internal sealed class TextPainter
             lines.Add(line);
         }
         return lines;
-    }
-}
-
-/// <summary>
-/// Draws with PDFsharp's <see cref="XGraphics"/> (which embeds and subsets TrueType fonts) on a throw-away page of the
-/// document, then lifts the resulting operators and resources out for use in an appearance stream.
-/// </summary>
-internal static class ScratchPage
-{
-    public static (byte[] Ops, PdfDictionary Resources) Draw(PdfDocument doc, double width, double height, Action<XGraphics> draw)
-    {
-        var page = doc.AddPage();
-        try
-        {
-            page.Width = XUnit.FromPoint(Math.Max(width, 1));
-            page.Height = XUnit.FromPoint(Math.Max(height, 1));
-            using (var gfx = XGraphics.FromPdfPage(page)) draw(gfx);
-            using var ms = new MemoryStream();
-            ms.Write("q\n"u8);
-            foreach (var item in page.Contents.Elements)
-                if (PdfObj.Dict(item) is { Stream: not null } s)
-                {
-                    ms.Write(PdfObj.StreamBytes(s));
-                    ms.WriteByte((byte)'\n');
-                }
-            ms.Write("Q\n"u8);
-            var res = new PdfDictionary(doc);
-            foreach (var key in page.Resources.Elements.Keys)
-                if (key != "/ProcSet") res.Elements[key] = page.Resources.Elements[key];
-            return (ms.ToArray(), res);
-        }
-        finally
-        {
-            doc.Pages.Remove(page);
-        }
     }
 }
 

@@ -224,7 +224,7 @@ public static class TextStamps
         }
         catch (PdfReaderException ex)
         {
-            throw new InvalidOperationException($"This PDF can't be edited: {ex.Message}", ex);
+            throw PdfObj.ReaderError(ex, mode, "This PDF can't be edited");
         }
     }
 }

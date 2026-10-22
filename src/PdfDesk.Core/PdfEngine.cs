@@ -5,6 +5,13 @@ using MuPDFCore.StructuredText;
 
 namespace PdfDesk.Core;
 
+/// <summary>An edit needs the document's permissions (owner) password: it was opened without it, or the one given is wrong.</summary>
+public sealed class OwnerPasswordRequiredException(bool wrongPassword, Exception? inner = null)
+    : Exception(wrongPassword ? "Incorrect permissions password." : "Editing this PDF needs its permissions (owner) password.", inner)
+{
+    public bool WrongPassword { get; } = wrongPassword;
+}
+
 public sealed class PasswordRequiredException(bool wrongPassword) : Exception(wrongPassword ? "Incorrect password." : "This document is password protected.")
 {
     public bool WrongPassword { get; } = wrongPassword;

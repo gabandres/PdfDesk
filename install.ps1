@@ -30,8 +30,11 @@ if ($Uninstall) {
     return
 }
 
-$src = Join-Path $PSScriptRoot 'publish\win-arm64\PdfDesk.exe'
+$publish = Join-Path $PSScriptRoot 'publish\win-arm64'
+$src = Join-Path $publish 'PdfDesk.exe'
 if (-not $NoBuild) {
+    # Start clean, so nothing left over from an older build ends up installed.
+    Remove-Item $publish -Recurse -Force -ErrorAction SilentlyContinue
     dotnet publish (Join-Path $PSScriptRoot 'src\PdfDesk.App') -p:PublishProfile=win-arm64
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 }
@@ -39,6 +42,8 @@ if (-not (Test-Path $src)) { throw "Not found: $src (run without -NoBuild)" }
 
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item $src $exe -Force
+# The exe is single-file (natives bundled). Copy only a native library the bundle left beside it, never symbols (.pdb).
+Get-ChildItem $publish -File -Filter *.dll | Copy-Item -Destination $dest -Force
 Copy-Item (Join-Path $PSScriptRoot 'assets\PdfDocument.ico') $docIcon -Force
 
 # Start Menu and Desktop shortcuts (the exe carries the PdfDesk icon).

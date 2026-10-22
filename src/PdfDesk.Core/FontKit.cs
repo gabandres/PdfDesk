@@ -1,15 +1,14 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
-using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 
 namespace PdfDesk.Core;
 
 /// <summary>
 /// A TrueType font read from disk: just enough of it (cmap, advance widths, ascent/descent) to lay text out and to
-/// pick a font that has the glyphs. PDFsharp embeds it (subset, Identity-H) when text is drawn with <see cref="XFont"/>.
-/// Font collections (.ttc) are split into a standalone font first, since PDFsharp embeds single fonts only.
+/// pick a font that has the glyphs; HarfBuzz shapes with it and <see cref="CidFontWriter"/> embeds a subset.
+/// Font collections (.ttc) are split into a standalone font first.
 /// </summary>
 internal sealed class TrueTypeFont
 {
@@ -17,7 +16,9 @@ internal sealed class TrueTypeFont
     private readonly Func<int, int> _lookup;
     private readonly ushort[] _advances;
     private readonly Lock _gate = new();
-    private XGlyphTypeface? _typeface;
+    private HarfBuzzSharp.Font? _hbFont;
+    private HarfBuzzSharp.Face? _hbFace;
+    private HarfBuzzSharp.Blob? _hbBlob;
 
     public string Family { get; }
     public byte[] Bytes { get; }
@@ -25,6 +26,8 @@ internal sealed class TrueTypeFont
     /// <summary>Ascent and descent as fractions of the em (descent negative).</summary>
     public double Ascent { get; }
     public double Descent { get; }
+    /// <summary>Glyph bounding box (head table) in font units: xMin, yMin, xMax, yMax.</summary>
+    public short[] BBox { get; private init; } = [0, 0, 1000, 1000];
 
     private TrueTypeFont(string family, byte[] bytes, double upem, double ascent, double descent, ushort[] advances, Func<int, int> lookup)
     {
@@ -67,10 +70,39 @@ internal sealed class TrueTypeFont
         return w;
     }
 
-    public XFont XFont(double size)
+    /// <summary>Advance width of a glyph in font units (hmtx).</summary>
+    public int GlyphAdvance(int glyph) => _advances.Length == 0 ? (int)(UnitsPerEm / 2) : _advances[Math.Clamp(glyph, 0, _advances.Length - 1)];
+
+    /// <summary>The HarfBuzz font used to shape text with this font (created once; HarfBuzz fonts are safe to shape with concurrently).</summary>
+    internal HarfBuzzSharp.Font HbFont
     {
-        lock (_gate) _typeface ??= new XGlyphTypeface(XFontSource.GetOrCreateFrom(Bytes));
-        return new XFont(_typeface, size, new XPdfFontOptions(PdfFontEncoding.Unicode), null);
+        get
+        {
+            lock (_gate)
+            {
+                if (_hbFont is null)
+                {
+                    // Process-lifetime objects (fonts are cached for the process): the font data is copied to native
+                    // memory that is never freed, and the wrappers are kept referenced so no finalizer releases them.
+                    var data = System.Runtime.InteropServices.Marshal.AllocHGlobal(Bytes.Length);
+                    System.Runtime.InteropServices.Marshal.Copy(Bytes, 0, data, Bytes.Length);
+                    _hbBlob = new HarfBuzzSharp.Blob(data, Bytes.Length, HarfBuzzSharp.MemoryMode.ReadOnly);
+                    _hbFace = new HarfBuzzSharp.Face(_hbBlob, 0);
+                    _hbFont = new HarfBuzzSharp.Font(_hbFace);
+                    _hbFont.SetScale((int)UnitsPerEm, (int)UnitsPerEm);
+                }
+                return _hbFont;
+            }
+        }
+    }
+
+    internal HarfBuzzSharp.Face HbFace
+    {
+        get
+        {
+            _ = HbFont;
+            return _hbFace!;
+        }
     }
 
     public static IEnumerable<int> CodePoints(string s)
@@ -108,7 +140,9 @@ internal sealed class TrueTypeFont
             for (var i = 0; i < advances.Length; i++) advances[i] = BinaryPrimitives.ReadUInt16BigEndian(span[(hmtx.Offset + i * 4)..]);
             var lookup = CmapLookup(bytes, cmap.Offset);
             if (lookup is null) return null;
-            return new TrueTypeFont(family, bytes, upem, ascent, descent, advances, lookup);
+            var bbox = new short[4];
+            for (var i = 0; i < 4; i++) bbox[i] = BinaryPrimitives.ReadInt16BigEndian(span[(head.Offset + 36 + 2 * i)..]);
+            return new TrueTypeFont(family, bytes, upem, ascent, descent, advances, lookup) { BBox = bbox };
         }
         catch (Exception ex) when (ex is ArgumentException or IndexOutOfRangeException or ArgumentOutOfRangeException)
         {
@@ -339,29 +373,8 @@ internal static class SystemFonts
             if (Get(f) is { } font && font.Has(codePoint)) return font;
         return primary ?? Get("arial.ttf") ?? Get("segoeui.ttf");
     }
-
-    /// <summary>Splits text into runs that each use one font able to draw them.</summary>
-    public static List<(string Text, TrueTypeFont Font)> Runs(string text, TrueTypeFont? primary)
-    {
-        var runs = new List<(string, TrueTypeFont)>();
-        var sb = new StringBuilder();
-        TrueTypeFont? current = null;
-        foreach (var cp in TrueTypeFont.CodePoints(text))
-        {
-            var font = char.IsWhiteSpace((char)Math.Min(cp, 0xFFFF)) && current is not null ? current : For(cp, primary);
-            if (font is null) continue;
-            if (current is not null && font != current)
-            {
-                runs.Add((sb.ToString(), current));
-                sb.Clear();
-            }
-            current = font;
-            sb.Append(char.ConvertFromUtf32(cp));
-        }
-        if (current is not null && sb.Length > 0) runs.Add((sb.ToString(), current));
-        return runs;
-    }
 }
+
 
 /// <summary>WinAnsiEncoding (the encoding the standard fonts use here).</summary>
 internal static class WinAnsi

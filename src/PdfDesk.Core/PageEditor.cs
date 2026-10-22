@@ -284,7 +284,7 @@ public static class PageEditor
         }
         catch (PdfReaderException ex)
         {
-            throw new InvalidOperationException($"This PDF can't be edited: {ex.Message}", ex);
+            throw PdfObj.ReaderError(ex, mode, "This PDF can't be edited");
         }
     }
 
@@ -343,10 +343,14 @@ internal static class PdfStructure
     {
         var removedPages = new HashSet<object>();
         var removedAnnots = new HashSet<object>();
+        var gonePages = new List<PdfDictionary>();
+        var goneKeys = new List<int>();
         foreach (var i in pages.Distinct().OrderDescending())
         {
             var page = doc.Pages[i];
             removedPages.Add(Id(page));
+            gonePages.Add(page);
+            goneKeys.AddRange(StructTree.ParentKeys(page));
             foreach (var a in Annots(page)) removedAnnots.Add(Id(a));
             doc.Pages.RemoveAt(i);
         }
@@ -371,6 +375,7 @@ internal static class PdfStructure
 
         names.RemoveWhere(Dead);
         DropWidgets(doc, removedAnnots.Contains);
+        StructTree.Prune(doc, gonePages, goneKeys, a => removedAnnots.Contains(Id(a)));
     }
 
     /// <summary>The document's bookmarks as a tree (empty if none).</summary>

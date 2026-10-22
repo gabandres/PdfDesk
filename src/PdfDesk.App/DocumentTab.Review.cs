@@ -140,17 +140,17 @@ public sealed class LayerNode(string label, LayerInfo? layer, List<LayerNode> ch
 }
 
 /// <summary>A signature field and its verification result, in the Signatures pane.</summary>
-public sealed class SignatureItem(SignatureInfo info, string? pageLabel)
+public sealed class SignatureItem(SignatureInfo info, string? pageLabel, bool brokenByEdits = false)
 {
     public SignatureInfo Info { get; } = info;
     public string Title => Info.Status == SignatureStatus.Unsigned ? $"{Info.FieldName} (not signed)" : Info.SignerName ?? Info.FieldName;
     public Visibility GoVisibility => Info.PageIndex >= 0 ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>ok, warn, bad or none (drives the icon color).</summary>
-    public string Severity => DocumentTab.SignatureSeverity(Info);
+    public string Severity => DocumentTab.SignatureSeverity(Info, brokenByEdits);
 
     public string Glyph => Severity switch { "ok" => "", "bad" => "", "none" => "", _ => "" };
-    public string Status => DocumentTab.SignatureSummary(Info);
+    public string Status => DocumentTab.SignatureSummary(Info, brokenByEdits);
 
     public string Details
     {
@@ -197,6 +197,8 @@ public partial class DocumentTab
     private PdfEngine? _viewEngine;
     private IReadOnlyList<SignatureInfo> _signatures = [];
     private bool _signedOnOpen;
+    private readonly Dictionary<string, SignatureInfo> _signaturesOnOpen = [];
+    private bool _signatureBaselineStale; // reloaded from disk: the next verification is the new "on open" result
     private bool _signatureWarned;
     private bool _sigBarDismissed;
     private bool _xfaBarDismissed;
@@ -389,7 +391,11 @@ public partial class DocumentTab
         RefreshLayerTree();
         if (_layerChoice.Count > 0 && _viewEngine is null) _ = ApplyLayersAsync();
 
-        if (info.Signatures is { } sigs) ShowSignatures(sigs, first);
+        if (info.Signatures is { } sigs)
+        {
+            ShowSignatures(sigs, first || _signatureBaselineStale);
+            _signatureBaselineStale = false;
+        }
 
         if (first)
         {
@@ -647,6 +653,11 @@ public partial class DocumentTab
     public async Task SaveAttachment(AttachmentInfo a, string? path = null)
     {
         if (!ReviewIsCurrent()) return;
+        if (path is null && DevScript.TakeSavePath(out var scripted))
+        {
+            if (scripted is null) return;
+            path = scripted;
+        }
         if (path is null)
         {
             var dlg = new SaveFileDialog
@@ -887,7 +898,17 @@ public partial class DocumentTab
 
     public bool IsSigned => _signatures.Any(s => s.Status != SignatureStatus.Unsigned);
 
-    internal static string SignatureSeverity(SignatureInfo s) => s.Status switch
+    /// <summary>
+    /// The signature verified when the document was opened (or reloaded) but no longer does after this tab's edits.
+    /// That's the expected effect of editing a signed file, not tampering, so it is reported as such.
+    /// </summary>
+    internal bool BrokenByEdits(SignatureInfo s) =>
+        s.Status is SignatureStatus.Invalid or SignatureStatus.ModifiedAfterSigning
+        && _signaturesOnOpen.TryGetValue(s.FieldName, out var before)
+        && before.Status is SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning
+        && before.Status != s.Status;
+
+    internal static string SignatureSeverity(SignatureInfo s, bool brokenByEdits = false) => brokenByEdits ? "warn" : s.Status switch
     {
         SignatureStatus.Unsigned => "none",
         SignatureStatus.Invalid => "bad",
@@ -895,7 +916,9 @@ public partial class DocumentTab
         _ => "warn",
     };
 
-    internal static string SignatureSummary(SignatureInfo s) => s.Status switch
+    internal static string SignatureSummary(SignatureInfo s, bool brokenByEdits = false) => brokenByEdits
+        ? "Valid when opened. Your edits changed the signed document, so this signature no longer verifies. Undo them, or keep the signed original by saving your changes as a copy."
+        : s.Status switch
     {
         SignatureStatus.Unsigned => "Empty signature field.",
         SignatureStatus.Invalid => "Invalid: the signed content was altered, or the signature is damaged.",
@@ -907,7 +930,7 @@ public partial class DocumentTab
         _ => "Valid: the document hasn't changed since it was signed.",
     };
 
-    private static string ShortStatus(SignatureInfo s) => s.Status switch
+    private string ShortStatus(SignatureInfo s) => BrokenByEdits(s) ? "valid when opened, invalidated by your edits" : s.Status switch
     {
         SignatureStatus.Invalid => "invalid",
         SignatureStatus.Unsupported => "can't be checked",
@@ -918,10 +941,21 @@ public partial class DocumentTab
 
     private void ShowSignatures(IReadOnlyList<SignatureInfo> sigs, bool onOpen)
     {
+        // A signature our edits broke may no longer parse: keep naming its signer and certificate as they were.
+        sigs = [.. sigs.Select(s => !onOpen && BrokenByEdits(s) && _signaturesOnOpen[s.FieldName] is var o
+            ? s.Certificate is null
+                ? s with { SignerName = s.SignerName ?? o.SignerName, SigningTime = s.SigningTime ?? o.SigningTime, Certificate = o.Certificate, CertificateTrusted = o.CertificateTrusted, CertificateStatus = o.CertificateStatus }
+                : s with { SignerName = s.SignerName ?? o.SignerName, SigningTime = s.SigningTime ?? o.SigningTime }
+            : s)];
         _signatures = sigs;
-        if (onOpen) _signedOnOpen = IsSigned;
+        if (onOpen)
+        {
+            _signedOnOpen = IsSigned;
+            _signaturesOnOpen.Clear();
+            foreach (var s in sigs) _signaturesOnOpen[s.FieldName] = s;
+        }
         SignaturesRail.Visibility = sigs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SignatureList.ItemsSource = sigs.Select(s => new SignatureItem(s, s.PageIndex >= 0 ? PageLabel(s.PageIndex) : null)).ToList();
+        SignatureList.ItemsSource = sigs.Select(s => new SignatureItem(s, s.PageIndex >= 0 ? PageLabel(s.PageIndex) : null, BrokenByEdits(s))).ToList();
         if (sigs.Count == 0 && _pane == NavPaneKind.Signatures) ShowPane(NavPaneKind.Pages);
 
         var signed = sigs.Where(s => s.Status != SignatureStatus.Unsigned).ToList();
@@ -937,14 +971,19 @@ public partial class DocumentTab
             var s = signed[0];
             text = $"Signed by {s.SignerName ?? s.FieldName} — {ShortStatus(s)}.";
         }
+        else if (signed.All(BrokenByEdits))
+        {
+            text = $"{signed.Count} signatures were valid when opened; your edits invalidated them.";
+        }
         else
         {
-            var problems = signed.Count(s => SignatureSeverity(s) != "ok");
+            var problems = signed.Count(s => SignatureSeverity(s, BrokenByEdits(s)) != "ok");
             text = problems == 0
                 ? $"{signed.Count} signatures, all valid."
-                : $"{signed.Count} signatures; {problems} {(problems == 1 ? "has a problem" : "have problems")}: {string.Join("; ", signed.Where(s => SignatureSeverity(s) != "ok").Take(3).Select(s => $"{s.SignerName ?? s.FieldName} — {ShortStatus(s)}"))}.";
+                : $"{signed.Count} signatures; {problems} {(problems == 1 ? "has a problem" : "have problems")}: {string.Join("; ", signed.Where(s => SignatureSeverity(s, BrokenByEdits(s)) != "ok").Take(3).Select(s => $"{s.SignerName ?? s.FieldName} — {ShortStatus(s)}"))}.";
         }
-        var worst = signed.Any(s => SignatureSeverity(s) == "bad") ? "bad" : signed.Any(s => SignatureSeverity(s) == "warn") ? "warn" : "ok";
+        var severities = signed.Select(s => SignatureSeverity(s, BrokenByEdits(s))).ToList();
+        var worst = severities.Contains("bad") ? "bad" : severities.Contains("warn") ? "warn" : "ok";
         SigBarText.Text = text;
         SigBarIcon.SetResourceReference(TextBlock.ForegroundProperty,
             worst switch { "ok" => "SystemFillColorSuccessBrush", "bad" => "SystemFillColorCriticalBrush", _ => "SystemFillColorCautionBrush" });
@@ -958,10 +997,12 @@ public partial class DocumentTab
         if (sender is FrameworkElement { Tag: SignatureItem s } && s.Info.PageIndex >= 0) Viewer.Flash(s.Info.PageIndex, s.Info.Rect);
     }
 
+    private bool NeedsSignedWarning => _signedOnOpen && !_signatureWarned;
+
     /// <summary>Before the first edit of a signed document: say that editing breaks the signatures.</summary>
     private bool ConfirmSignedEdit()
     {
-        if (!_signedOnOpen || _signatureWarned) return true;
+        if (!NeedsSignedWarning) return true;
         if (!Prompt.Confirm(Window.GetWindow(this), "This document is digitally signed",
                 "Any change invalidates its signatures: they will no longer verify. To keep the signed original, save your changes as a copy (Save As).",
                 "Edit anyway", warning: true)) return false;
@@ -1021,12 +1062,147 @@ public partial class DocumentTab
                 $"The marked areas are blacked out and their content removed. {(pages.Count == 1 ? "Page" : "Pages")} {list} become images: their text can no longer be selected, searched or copied, and their links, comments and form fields are flattened into the image.\n\nYou can undo this until you save. Once saved, the removed content can't be recovered.",
                 "Apply redactions", warning: true)) return false;
         var areas = marks.GroupBy(m => m.PageIndex).ToDictionary(g => g.Key, g => (IReadOnlyList<RectD>)[.. g.Select(m => m.Rect)]);
-        var ok = await RunEdit($"Redact {marks.Count} area{(marks.Count == 1 ? "" : "s")}", (d, pw) => Redaction.Apply(d, pw, areas));
+        var ocr = PageOcr.Engine;
+        var recognized = 0;
+        var ocrSkipped = false;
+        var ok = await RunEdit($"Redact {marks.Count} area{(marks.Count == 1 ? "" : "s")}", (d, pw) =>
+        {
+            var redacted = Redaction.Apply(d, pw, areas);
+            if (ocr is null) return redacted;
+            // The redacted pages are images now: recognize what's left on them and lay it back as invisible text, so they
+            // stay searchable and selectable. Part of the same edit (one undo step). Cancel skips only this part.
+            var progress = Dispatcher.Invoke(() => new ProgressPrompt(Window.GetWindow(this), "Applying redactions", "Recognizing text…"));
+            try
+            {
+                var (words, _) = RecognizePages(ocr, redacted, pw, pages, progress, "Recognizing the text left on redacted pages", areas);
+                recognized = words.Values.Sum(w => w.Count);
+                return recognized == 0 ? redacted : TextLayer.AddInvisibleText(redacted, pw, words);
+            }
+            catch (OperationCanceledException)
+            {
+                ocrSkipped = true;
+                return redacted;
+            }
+            finally
+            {
+                Dispatcher.Invoke(progress.Dispose);
+            }
+        });
         if (ok)
         {
             Viewer.ClearRedactions();
             if (Viewer.Tool == ViewerTool.Redact) Viewer.Tool = ViewerTool.Hand;
+            if (ocr is null) Notify("The redacted pages are images now and their text can't be searched: no text recognition (OCR) language is installed in Windows.");
+            else if (ocrSkipped) Notify("Redacted. Text recognition was cancelled, so the redacted pages can't be searched; use Recognize Text (OCR) to add it later.");
         }
         return ok;
+    }
+
+    /// <summary>
+    /// Recognize Text (OCR): for scanned pages (no text), recognizes the words and adds them as an invisible text layer,
+    /// so the pages become searchable and selectable while looking the same. One undo step; Cancel changes nothing.
+    /// </summary>
+    public async Task<bool> RecognizeText()
+    {
+        if (!Session.IsPdf || IsBusy || Window.GetWindow(this) is not { } owner) return false;
+        if (PageOcr.Engine is not { } ocr)
+        {
+            Prompt.Info(owner, "Text recognition isn't available", PageOcr.Unavailable);
+            return false;
+        }
+        var count = Viewer.PageCount;
+        var current = Viewer.CurrentPage;
+        var dlg = new FormDialog(owner, "Recognize Text (OCR)", "Recognize", 460);
+        var which = dlg.AddChoice("Pages", ["All pages without text", $"Current page ({PageLabel(current)})", "Page range"]);
+        var range = dlg.Add("Page range", new TextBox { Text = Core.PageRange.Format(SelectedPages.Length > 1 ? SelectedPages : [current]) });
+        range.GotKeyboardFocus += (_, _) => which.SelectedIndex = 2;
+        dlg.AddNote($"Pages that already have text are skipped. The pages look the same afterwards; their words can be searched, selected and copied. Recognition runs on this PC with Windows' {ocr.RecognizerLanguage.DisplayName} text recognition, so check important text.");
+        int[] pages = [];
+        dlg.Validate(() =>
+        {
+            switch (which.SelectedIndex)
+            {
+                case 0:
+                    pages = [.. Enumerable.Range(0, count)];
+                    return null;
+                case 1:
+                    pages = [current];
+                    return null;
+                default:
+                    return Core.PageRange.TryParse(range.Text, count, out pages, out var err) ? null : err;
+            }
+        });
+        if (!dlg.ShowModal()) return false;
+
+        var found = 0;
+        var pagesWithWords = 0;
+        var hadText = 0;
+        var chosen = pages;
+        var outcome = await TryEdit("Recognize text", (d, pw) =>
+        {
+            var progress = Dispatcher.Invoke(() => new ProgressPrompt(owner, "Recognizing text", "Starting…"));
+            try
+            {
+                var (words, skipped) = RecognizePages(ocr, d, pw, chosen, progress, "Recognizing text");
+                hadText = skipped;
+                pagesWithWords = words.Count;
+                found = words.Values.Sum(w => w.Count);
+                return found == 0 ? d : TextLayer.AddInvisibleText(d, pw, words);
+            }
+            finally
+            {
+                Dispatcher.Invoke(progress.Dispose);
+            }
+        }, quiet: true);
+        switch (outcome)
+        {
+            case EditOutcome.Done:
+                Notify($"Recognized {found} word{(found == 1 ? "" : "s")} on {pagesWithWords} page{(pagesWithWords == 1 ? "" : "s")}{(hadText > 0 ? $" ({hadText} already had text)" : "")}. They can be searched and selected now.",
+                    "Undo", () => { if (!IsBusy && Session.UndoLabel == "Recognize text") Undo(); });
+                return true;
+            case EditOutcome.NoChange:
+                Notify(hadText == chosen.Length
+                    ? (chosen.Length == 1 ? "This page already has text: nothing to recognize." : "These pages already have text: nothing to recognize.")
+                    : "No text was recognized on these pages.");
+                return false;
+            case EditOutcome.Declined:
+                Notify("Text recognition cancelled. Nothing was changed.");
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// OCR of <paramref name="pages"/> in <paramref name="data"/> (runs on a worker thread). Pages that already have text are
+    /// skipped; words mostly inside a <paramref name="exclude"/> area (blacked-out redactions) are dropped.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">The user pressed Cancel in <paramref name="progress"/>.</exception>
+    internal static (Dictionary<int, IReadOnlyList<OcrWord>> Words, int HadText) RecognizePages(Windows.Media.Ocr.OcrEngine ocr, byte[] data, string? pw, IReadOnlyList<int> pages,
+        ProgressPrompt progress, string title, IReadOnlyDictionary<int, IReadOnlyList<RectD>>? exclude = null)
+    {
+        var result = new Dictionary<int, IReadOnlyList<OcrWord>>();
+        var hadText = 0;
+        using var engine = PdfEngine.Open(data, MuPDFCore.InputFileTypes.PDF, pw);
+        for (var i = 0; i < pages.Count; i++)
+        {
+            progress.Token.ThrowIfCancellationRequested();
+            progress.Report($"{title}: page {i + 1} of {pages.Count}…", (double)i / pages.Count);
+            var page = pages[i];
+            if (page < 0 || page >= engine.PageCount) continue;
+            if (TextLayer.HasText(engine, page))
+            {
+                hadText++;
+                continue;
+            }
+            var words = PageOcr.Recognize(ocr, engine, page, progress.Token);
+            if (exclude is not null && exclude.TryGetValue(page, out var blacked))
+                words.RemoveAll(w => blacked.Any(b => Overlap(w.Rect, b) > 0.3 * w.Rect.Width * w.Rect.Height));
+            if (words.Count > 0) result[page] = words;
+        }
+        return (result, hadText);
+
+        static double Overlap(RectD a, RectD b) =>
+            Math.Max(0, Math.Min(a.Right, b.Right) - Math.Max(a.X, b.X)) * Math.Max(0, Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Y, b.Y));
     }
 }

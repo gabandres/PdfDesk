@@ -21,7 +21,8 @@ public sealed class DocumentSession : IDisposable
     public string? FilePath { get; private set; }
     public string DisplayName { get; private set; }
     public byte[] Data { get; private set; }
-    public string? Password { get; }
+    /// <summary>The password the document was opened with; replaced by the permissions password once the user gives it for an edit.</summary>
+    public string? Password { get; private set; }
     public InputFileTypes FileType { get; }
     public PdfEngine Engine { get; private set; }
     /// <summary>True when the content differs from what is on disk (undoing back to the saved state clears it).</summary>
@@ -70,6 +71,9 @@ public sealed class DocumentSession : IDisposable
         session._savedVersion = -1; // never saved
         return session;
     }
+
+    /// <summary>Uses the permissions (owner) password for edits from now on (after <see cref="OwnerPasswordRequiredException"/>).</summary>
+    public void UsePassword(string password) => Password = password;
 
     /// <summary>Replaces the content with edited bytes, recording an undo step.</summary>
     public void Commit(byte[] newData, string label)

@@ -102,6 +102,28 @@ public sealed partial class PageViewer
         return HasSelection;
     }
 
+    /// <summary>Dev/test entry: where a page point (points, top-left origin) is in <paramref name="root"/>'s coordinates, scrolled into view first.</summary>
+    internal Point? DevPointIn(Visual root, int page, double x, double y)
+    {
+        if (_engine is null || page < 0 || page >= PageCount || page >= _rects.Length) return null;
+        var k = _zoom * PtToDip;
+        var sp = new Point(_rects[page].X + x * k, _rects[page].Y + y * k);
+        var vp = Viewport;
+        vp.Inflate(-4, -4);
+        if (!vp.Contains(sp))
+        {
+            EnsureVisible(page, new RectD(x - 2, y - 2, 4, 4));
+            UpdateLayout();
+            sp = new Point(_rects[page].X + x * k, _rects[page].Y + y * k);
+        }
+        return _surface.TransformToAncestor(root).Transform(sp);
+    }
+
+    /// <summary>Dev/test entry: the hover tip's text while it is open.</summary>
+    internal string? DevTipText => _linkTip is { IsOpen: true } tip
+        ? tip.Content as string ?? string.Join(" / ", (tip.Content as Panel)?.Children.OfType<TextBlock>().Select(t => t.Text) ?? [])
+        : null;
+
     /// <summary>Scrolls a page area into view and blinks an outline around it (e.g. the comment picked in the list).</summary>
     public void Flash(int page, RectD rect)
     {

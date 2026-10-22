@@ -320,8 +320,9 @@ public partial class MainWindow : Window
             Text = toast.IsError ? "" : toast.Action is not null ? "" : "",
             Style = (Style)FindResource("Icon"),
             Margin = new Thickness(0, 0, 12, 0),
-            Foreground = (Brush)FindResource(toast.IsError ? "SystemFillColorCriticalBrush" : "AccentTextFillColorPrimaryBrush"),
         };
+        // Resource references, not values: a toast still showing when the theme changes takes the new colors.
+        icon.SetResourceReference(TextBlock.ForegroundProperty, toast.IsError ? "SystemFillColorCriticalBrush" : "AccentTextFillColorPrimaryBrush");
         var row = new DockPanel();
         var card = new Border
         {
@@ -330,10 +331,10 @@ public partial class MainWindow : Window
             Padding = new Thickness(14, 10, 8, 10),
             Margin = new Thickness(0, 8, 0, 0),
             BorderThickness = new Thickness(1),
-            Background = (Brush)FindResource("SolidBackgroundFillColorQuarternaryBrush"),
-            BorderBrush = (Brush)FindResource("CardStrokeColorDefaultBrush"),
             Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 2, Opacity = 0.22 },
         };
+        card.SetResourceReference(Border.BackgroundProperty, "SolidBackgroundFillColorQuarternaryBrush");
+        card.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
         AutomationProperties.SetLiveSetting(card, AutomationLiveSetting.Polite);
         AutomationProperties.SetName(card, toast.Message);
 
@@ -879,8 +880,9 @@ public partial class MainWindow : Window
             AddExtension = true,
             InitialDirectory = Path.GetDirectoryName(s.FilePath) ?? AppSettings.Current.LastFolder,
         };
-        if (dlg.ShowDialog(this) != true || tab.IsDisposed) return false;
-        var path = Path.GetFullPath(dlg.FileName);
+        string? picked = DevScript.TakeSavePath(out var scripted) ? scripted : dlg.ShowDialog(this) == true ? dlg.FileName : null;
+        if (picked is null || tab.IsDisposed) return false;
+        var path = Path.GetFullPath(picked);
 
         // Two tabs must never share a file: the other tab's copy would silently go stale (and could overwrite this one).
         var other = _tabs.FirstOrDefault(t => t.Tab != tab && string.Equals(t.Tab.Session.FilePath, path, StringComparison.OrdinalIgnoreCase));
@@ -1245,6 +1247,7 @@ public partial class MainWindow : Window
         Bind(Cmd.StrikeOut, t => _ = t.MarkupSelection(TextMarkupKind.StrikeOut), t => t.CanMarkup);
         Bind(Cmd.AddNote, t => ToggleTool(t, ViewerTool.AddNote), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.RecognizeText, t => _ = t.RecognizeText(), t => t.Session.IsPdf);
     }
 
     private void OnAttachFile(object sender, RoutedEventArgs e)

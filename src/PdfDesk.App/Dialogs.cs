@@ -225,6 +225,17 @@ public static class PdfFiles
         return dlg.ShowModal() ? box.Password : null;
     }
 
+    /// <summary>Asks for the permissions (owner) password an edit needs. Null if the user cancels.</summary>
+    public static string? PromptOwnerPassword(Window owner, string name, bool wrong)
+    {
+        var dlg = new FormDialog(owner, "Permissions password required", "Edit");
+        if (wrong) dlg.AddNote("That password is incorrect. Try again.");
+        dlg.AddNote($"\"{name}\" opens without a password, but its author restricted changes. Enter its permissions (owner) password to edit it.");
+        var box = dlg.Add("Password", new PasswordBox());
+        dlg.Loaded += (_, _) => box.Focus();
+        return dlg.ShowModal() ? box.Password : null;
+    }
+
     /// <summary>Reads a PDF and verifies it opens (prompting for a password). Null if the user cancels or it can't be read.</summary>
     public static PdfSource? LoadForImport(Window owner, string path)
     {
@@ -270,6 +281,7 @@ public static class PdfFiles
 
     public static string? PickSavePath(Window owner, string suggestedName, string? folder = null)
     {
+        if (DevScript.TakeSavePath(out var scripted)) return scripted;
         var dlg = new SaveFileDialog
         {
             Title = "Save As",

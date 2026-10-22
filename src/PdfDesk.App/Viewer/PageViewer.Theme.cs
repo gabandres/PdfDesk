@@ -55,6 +55,11 @@ public sealed partial class PageViewer
     private Palette _palette = Palette.Normal;
     private bool _highContrast;
 
+    /// <summary>Dev/test: forces the high-contrast palette on or off (null = follow Windows).</summary>
+    internal static bool? DevForceHighContrast { get; set; }
+
+    internal void DevApplyContrast() => ApplyContrast();
+
     private void OnSystemParametersChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(SystemParameters.HighContrast) or null or "")
@@ -65,7 +70,7 @@ public sealed partial class PageViewer
     private void ApplyContrast()
     {
         var was = EffectiveInvert;
-        _highContrast = SystemParameters.HighContrast;
+        _highContrast = DevForceHighContrast ?? SystemParameters.HighContrast;
         _palette = _highContrast ? Palette.HighContrast() : Palette.Normal;
         Background = _palette.Background;
         if (was != EffectiveInvert) DropPageBitmaps();

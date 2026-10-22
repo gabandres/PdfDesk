@@ -422,6 +422,53 @@ public static class FormEditor
         return order;
     }
 
+    /// <summary>
+    /// Empties every field that has one of <paramref name="widgets"/> (and every field sharing its value through a
+    /// parent): /V, /RV and /I go, check boxes and radios turn off on all their widgets, and text and choice widgets get
+    /// fresh (empty) appearances on every page, so the value survives nowhere. Used by redaction. True if any field changed.
+    /// </summary>
+    internal static bool ClearFields(PdfDocument doc, IReadOnlySet<PdfDictionary> widgets)
+    {
+        var acro = PdfObj.Dict(doc.Internals.Catalog.Elements["/AcroForm"]);
+        var fields = new List<Field>();
+        Collect(doc, acro, fields);
+
+        static IEnumerable<PdfDictionary> Chain(PdfDictionary d)
+        {
+            var guard = 0;
+            for (var n = d; n is not null && guard++ < 64; n = PdfObj.Dict(n.Elements["/Parent"])) yield return n;
+        }
+
+        // Where the values live: the hit fields, and any ancestor whose /V they inherit.
+        var holders = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        foreach (var f in fields.Where(f => f.Widgets.Any(widgets.Contains)))
+            foreach (var n in Chain(f.Dict))
+                if (n == f.Dict || n.Elements.ContainsKey("/V")) holders.Add(n);
+        if (holders.Count == 0) return false;
+
+        var cleared = fields.Where(f => Chain(f.Dict).Any(holders.Contains)).ToList();
+        foreach (var n in holders.Concat(cleared.SelectMany(f => f.Widgets)))
+            foreach (var key in new[] { "/V", "/RV", "/I" }) n.Elements.Remove(key);
+        foreach (var f in cleared)
+        {
+            switch (f.Type)
+            {
+                case "/Btn" when (f.Flags & FfPushButton) == 0:
+                    f.Dict.Elements["/V"] = new PdfName("/Off");
+                    foreach (var w in f.Widgets)
+                        if (w.Elements.ContainsKey("/AS") || w.Elements.ContainsKey("/AP")) w.Elements["/AS"] = new PdfName("/Off");
+                    break;
+                case "/Tx" or "/Ch":
+                    foreach (var w in f.Widgets) w.Elements.Remove("/AP"); // a widget whose appearance can't be rebuilt shows nothing
+                    WriteAppearances(doc, acro, f);
+                    break;
+            }
+        }
+        // XFA datasets keep their own copy of every value.
+        acro?.Elements.Remove("/XFA");
+        return true;
+    }
+
     internal static void Collect(PdfDocument doc, PdfDictionary? acro, List<Field> into)
     {
         var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
