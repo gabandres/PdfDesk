@@ -124,7 +124,26 @@
         <Grid Grid.Column="3">
             <!-- Reading view -->
             <Grid x:Name="ReadingView">
-                <v:PageViewer x:Name="Viewer" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}"
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- InfoBar: this document has fillable fields -->
+                <Border x:Name="FormBar" Grid.Row="0" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorAttentionBackgroundBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <DockPanel>
+                        <Button x:Name="FormBarClose" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="26" MinWidth="26"
+                                Content="&#xE711;" ToolTip="Dismiss" />
+                        <CheckBox x:Name="HighlightFieldsBox" DockPanel.Dock="Right" Content="Highlight fields" IsChecked="True" Margin="12,0,8,0" VerticalAlignment="Center" />
+                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE70B;" FontSize="16" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="FormBarText" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </DockPanel>
+                </Border>
+
+                <v:PageViewer x:Name="Viewer" Grid.Row="1" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}"
                               AutomationProperties.Name="Document pages">
                     <v:PageViewer.ContextMenu>
                         <ContextMenu>
@@ -152,7 +171,7 @@
                 </v:PageViewer>
 
                 <!-- Find widget (Ctrl+F), floating top-right -->
-                <Border x:Name="FindBar" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,12,28,0" Padding="6"
+                <Border x:Name="FindBar" Grid.Row="1" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,12,28,0" Padding="6"
                         Visibility="Collapsed" CornerRadius="8" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}"
                         BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                     <Border.Effect>
@@ -171,7 +190,7 @@
                 </Border>
 
                 <!-- Page and zoom pill, floating bottom-center -->
-                <Border x:Name="Pill" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,18" Padding="6,4"
+                <Border x:Name="Pill" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,18" Padding="6,4"
                         CornerRadius="20" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}"
                         BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                     <Border.Effect>

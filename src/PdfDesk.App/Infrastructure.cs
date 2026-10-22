@@ -246,7 +246,11 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) ?? new AppSettings();
+            {
+                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) ?? new AppSettings();
+                loaded.Files = new Dictionary<string, FileState>(loaded.Files, StringComparer.OrdinalIgnoreCase);
+                return loaded;
+            }
         }
         catch (Exception ex)
         {

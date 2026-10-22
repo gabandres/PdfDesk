@@ -7,7 +7,7 @@ namespace PdfDesk.Tests;
 public class FormTests
 {
     /// <summary>A minimal AcroForm: text "name", check box "agree", radio group "color" (Red/Blue), combo "size" (S/M/L).</summary>
-    internal static byte[] MakeForm(int rotate = 0)
+    public static byte[] MakeForm(int rotate = 0)
     {
         var objects = new List<string>
         {

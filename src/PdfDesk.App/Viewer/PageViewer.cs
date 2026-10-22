@@ -9,7 +9,7 @@ namespace PdfDesk.App.Viewer;
 
 public enum ViewLayout { SinglePage, Continuous, Facing, FacingCover }
 public enum ZoomMode { Custom, FitWidth, FitPage }
-public enum ViewerTool { Hand, SelectText, Snapshot }
+public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross }
 
 public sealed record SearchHit(int Page, int Start, int End, IReadOnlyList<RectD> Rects, string Excerpt)
 {
@@ -27,7 +27,7 @@ public readonly record struct TextPos(int Page, int Caret) : IComparable<TextPos
 /// from it hold no bitmaps. At high zoom a page is rendered once at a capped resolution plus a sharp "detail" tile
 /// covering just the visible region, so memory stays bounded at any zoom.
 /// </summary>
-public sealed class PageViewer : ScrollViewer
+public sealed partial class PageViewer : ScrollViewer
 {
     private const double Pad = 12;
     private const double PtToDip = 96.0 / 72.0;
@@ -43,6 +43,7 @@ public sealed class PageViewer : ScrollViewer
     private readonly PageSurface _surface;
     private readonly Dictionary<int, PageBitmap> _full = [];
     private readonly Dictionary<int, PageBitmap> _detail = [];
+    private readonly Dictionary<int, PageBitmap> _stale = []; // previous content, shown until the fresh render lands
     private readonly Dictionary<int, IReadOnlyList<PageLink>> _links = [];
     private readonly Dictionary<int, PageText> _texts = [];
     private readonly Stack<Anchor> _back = new();
@@ -81,7 +82,11 @@ public sealed class PageViewer : ScrollViewer
     public PageViewer()
     {
         _surface = new PageSurface(this);
-        Content = _surface;
+        // Pages are painted by the surface; inline editors (form fields, Fill & Sign text) live on a canvas above it.
+        var host = new Grid();
+        host.Children.Add(_surface);
+        host.Children.Add(_overlay);
+        Content = host;
         Focusable = true;
         FocusVisualStyle = null;
         HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
@@ -90,7 +95,7 @@ public sealed class PageViewer : ScrollViewer
         Background = new SolidColorBrush(Color.FromRgb(0x80, 0x84, 0x8C));
         RenderOptions.SetBitmapScalingMode(_surface, BitmapScalingMode.HighQuality);
 
-        IsManipulationEnabled = true;
+        IsManipulationEnabled = true; // hand tool; switched off for the other tools so touch acts as a mouse
         ManipulationStarting += (_, e) =>
         {
             e.ManipulationContainer = this;
@@ -105,6 +110,17 @@ public sealed class PageViewer : ScrollViewer
             ScrollToHorizontalOffset(HorizontalOffset - d.Translation.X);
             ScrollToVerticalOffset(VerticalOffset - d.Translation.Y);
             e.Handled = true;
+        };
+        ManipulationCompleted += (_, e) =>
+        {
+            // A tap (no movement) clicks: follow a link or fill a field.
+            if (e.TotalManipulation.Translation.Length > 6 || Math.Abs(e.TotalManipulation.Scale.X - 1) > 0.02) return;
+            var sp = TranslatePoint(e.ManipulationOrigin, _surface);
+            var page = HitPage(sp);
+            if (page < 0) return;
+            var pt = ToPagePoint(page, sp);
+            if (HandleFormClick(page, pt, 1)) return;
+            if (LinkAt(page, pt) is { } link) ActivateLink(link);
         };
         ManipulationInertiaStarting += (_, e) =>
         {
@@ -163,7 +179,9 @@ public sealed class PageViewer : ScrollViewer
         set
         {
             if (_tool == value) return;
+            CommitEditor();
             _tool = value;
+            IsManipulationEnabled = value == ViewerTool.Hand;
             if (value != ViewerTool.SelectText) ClearSelection();
             UpdateCursor(Mouse.GetPosition(_surface));
             ToolChanged?.Invoke(this, EventArgs.Empty);
@@ -178,6 +196,11 @@ public sealed class PageViewer : ScrollViewer
         _scheduler = scheduler;
         _generation++;
         scheduler.Clear(k => !k.StartsWith('t'));
+        CommitEditor();
+        CloseEditor();
+        _stale.Clear();
+        if (anchor is not null && _rects.Length == engine.PageCount)
+            foreach (var (page, bmp) in _full) _stale[page] = bmp;
         _full.Clear();
         _detail.Clear();
         _links.Clear();
@@ -355,6 +378,7 @@ public sealed class PageViewer : ScrollViewer
         CenterCurrentRow();
         UpdateLayout(); // apply the scroll now, so the current page is computed from the new offsets
         UpdateCurrentPage();
+        PositionEditor();
         _surface.InvalidateVisual();
         QueueUpdate();
         ZoomChanged?.Invoke(this, EventArgs.Empty);
@@ -638,6 +662,7 @@ public sealed class PageViewer : ScrollViewer
                 {
                     if (gen != _generation || result is not (BitmapSource bmp, IReadOnlyList<PageLink> links)) return;
                     _full[p] = new PageBitmap(bmp, s, new RectD(0, 0, g.Width, g.Height));
+                    _stale.Remove(p);
                     _links[p] = links;
                     _surface.InvalidateVisual();
                 });
@@ -689,6 +714,7 @@ public sealed class PageViewer : ScrollViewer
         var keepFrom = visible[0] - 4;
         var keepTo = visible[^1] + 4;
         foreach (var p in _full.Keys.Where(p => p < keepFrom || p > keepTo).ToList()) _full.Remove(p);
+        foreach (var p in _stale.Keys.Where(p => p < keepFrom || p > keepTo).ToList()) _stale.Remove(p);
         var total = _full.Values.Sum(b => (long)b.Image.PixelWidth * b.Image.PixelHeight);
         foreach (var p in _full.Keys.Where(p => !visible.Contains(p)).OrderByDescending(p => Math.Abs((_rects[p].Top + _rects[p].Bottom) / 2 - center)).ToList())
         {
@@ -702,7 +728,7 @@ public sealed class PageViewer : ScrollViewer
         _scheduler.Clear(key => key[0] is 'p' or 'd' or 'x' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
     }
 
-    internal static BitmapSource ToBitmap(RenderedImage img, bool invert)
+    public static BitmapSource ToBitmap(RenderedImage img, bool invert)
     {
         if (invert) NightColors(img.Pixels);
         return ToBitmap(img);
@@ -725,7 +751,7 @@ public sealed class PageViewer : ScrollViewer
         }
     }
 
-    internal static BitmapSource ToBitmap(RenderedImage img)
+    public static BitmapSource ToBitmap(RenderedImage img)
     {
         var bmp = BitmapSource.Create(img.Width, img.Height, 96, 96, PixelFormats.Bgr24, null, img.Pixels, img.Stride);
         bmp.Freeze();
@@ -764,7 +790,7 @@ public sealed class PageViewer : ScrollViewer
             dc.DrawRectangle(ShadowBrush, null, new Rect(r.X + 2, r.Y + 2, r.Width, r.Height));
             dc.DrawRectangle(_invert ? DarkPageBrush : PageBrush, null, r);
 
-            if (_full.TryGetValue(i, out var full))
+            if (_full.TryGetValue(i, out var full) || _stale.TryGetValue(i, out full))
             {
                 var exact = Math.Abs(full.Scale - deviceScale) < 1e-6;
                 dc.DrawImage(full.Image, exact ? new Rect(r.X, r.Y, full.Image.PixelWidth / dpi, full.Image.PixelHeight / dpi) : r);
@@ -776,6 +802,8 @@ public sealed class PageViewer : ScrollViewer
                 dc.DrawImage(det.Image, new Rect(dr.X, dr.Y, det.Image.PixelWidth / dpi, det.Image.PixelHeight / dpi));
                 dc.Pop();
             }
+
+            PaintForms(dc, i);
 
             if (_hitsByPage.TryGetValue(i, out var hits))
                 foreach (var hit in hits)
@@ -904,6 +932,8 @@ public sealed class PageViewer : ScrollViewer
         _dragged = false;
         _pressLink = page >= 0 ? LinkAt(page, ToPagePoint(page, sp)) : null;
         _pressLinkPage = page;
+        if (e.ChangedButton == MouseButton.Left && HandleFormMouseDown(e, page, sp)) return;
+        CommitEditor();
 
         switch (_tool)
         {
@@ -1004,6 +1034,11 @@ public sealed class PageViewer : ScrollViewer
         }
         var page = HitPage(sp);
         Cursor = null;
+        if (FormCursor(page, sp) is { } formCursor)
+        {
+            _surface.Cursor = formCursor;
+            return;
+        }
         if (page >= 0 && LinkAt(page, ToPagePoint(page, sp)) is not null)
         {
             _surface.Cursor = Cursors.Hand;
@@ -1136,6 +1171,11 @@ public sealed class PageViewer : ScrollViewer
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
+        if (_engine is not null && HandleFormKey(e))
+        {
+            e.Handled = true;
+            return;
+        }
         if (_engine is null || Keyboard.Modifiers != ModifierKeys.None)
         {
             base.OnKeyDown(e);
@@ -1170,6 +1210,15 @@ public sealed class PageViewer : ScrollViewer
                 break;
             case Key.G:
                 Tool = ViewerTool.Snapshot;
+                break;
+            case Key.A:
+                Tool = ViewerTool.AddText;
+                break;
+            case Key.K:
+                Tool = ViewerTool.AddCheck;
+                break;
+            case Key.X:
+                Tool = ViewerTool.AddCross;
                 break;
             case Key.Escape when HasSelection:
                 ClearSelection();

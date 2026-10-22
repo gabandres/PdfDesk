@@ -70,10 +70,43 @@ public static class FormEditor
             }
         }
 
-        if (needAppearances && acro is not null) acro.Elements["/NeedAppearances"] = new PdfBoolean(true);
+        if (needAppearances && acro is not null)
+        {
+            acro.Elements["/NeedAppearances"] = new PdfBoolean(true);
+            EnsureDefaultFonts(doc, acro);
+        }
         using var ms = new MemoryStream();
         doc.Save(ms, false);
         return ms.ToArray();
+    }
+
+    /// <summary>
+    /// With NeedAppearances, viewers redraw every field (check boxes too) from the form's default resources;
+    /// make sure the fonts they look for (Helvetica for text, ZapfDingbats for check marks) are there.
+    /// </summary>
+    private static void EnsureDefaultFonts(PdfDocument doc, PdfDictionary acro)
+    {
+        if (Resolve(acro.Elements["/DR"]) is not PdfDictionary dr)
+        {
+            dr = new PdfDictionary(doc);
+            acro.Elements["/DR"] = dr;
+        }
+        if (Resolve(dr.Elements["/Font"]) is not PdfDictionary fonts)
+        {
+            fonts = new PdfDictionary(doc);
+            dr.Elements["/Font"] = fonts;
+        }
+        foreach (var (key, name) in new[] { ("/Helv", "Helvetica"), ("/ZaDb", "ZapfDingbats") })
+        {
+            if (fonts.Elements.ContainsKey(key)) continue;
+            var font = new PdfDictionary(doc);
+            font.Elements["/Type"] = new PdfName("/Font");
+            font.Elements["/Subtype"] = new PdfName("/Type1");
+            font.Elements["/BaseFont"] = new PdfName("/" + name);
+            if (name == "Helvetica") font.Elements["/Encoding"] = new PdfName("/WinAnsiEncoding");
+            fonts.Elements[key] = font;
+        }
+        if (!acro.Elements.ContainsKey("/DA")) acro.Elements["/DA"] = new PdfString("/Helv 0 Tf 0 g");
     }
 
     private static IReadOnlyList<FormWidget> ReadWidgets(PdfDocument doc)

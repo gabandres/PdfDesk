@@ -36,6 +36,10 @@ public static class Cmd
     public static readonly RoutedUICommand ToolHand = Make("_Hand Tool", nameof(ToolHand));
     public static readonly RoutedUICommand ToolSelect = Make("Select _Text Tool", nameof(ToolSelect));
     public static readonly RoutedUICommand ToolSnapshot = Make("S_napshot Tool", nameof(ToolSnapshot));
+    public static readonly RoutedUICommand ToolAddText = Make("Add Te_xt (Fill and Sign)", nameof(ToolAddText));
+    public static readonly RoutedUICommand ToolCheck = Make("Add Chec_k Mark", nameof(ToolCheck));
+    public static readonly RoutedUICommand ToolCross = Make("Add C_ross", nameof(ToolCross));
+    public static readonly RoutedUICommand HighlightFields = Make("_Highlight Form Fields", nameof(HighlightFields));
 
     // View
     public static readonly RoutedUICommand ZoomIn = Make("Zoom _In", nameof(ZoomIn), K(Key.OemPlus, ModifierKeys.Control, "Ctrl+="), K(Key.Add, ModifierKeys.Control));

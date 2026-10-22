@@ -86,6 +86,12 @@ public partial class DocumentTab : UserControl, IDisposable
     private readonly System.Windows.Threading.DispatcherTimer _busyDelay = new() { Interval = TimeSpan.FromMilliseconds(350) };
     private readonly System.Windows.Threading.DispatcherTimer _saveViewDelay = new() { Interval = TimeSpan.FromSeconds(2) };
     private bool _updatingPill;
+
+    // Forms and Fill & Sign
+    private readonly Dictionary<string, string> _formQueue = [];
+    private bool _formSaving;
+    private int _annotationLoad;
+    private bool _formBarDismissed;
     private NavPaneKind _paneBeforeOrganize;
 
     // Thumbnail drag state
@@ -124,6 +130,19 @@ public partial class DocumentTab : UserControl, IDisposable
         RebuildThumbs();
         LoadOutline();
         RestoreViewState();
+        Viewer.FieldEdited += (_, e) =>
+        {
+            _formQueue[e.FieldName] = e.Value;
+            _ = FlushFormQueue();
+        };
+        Viewer.StampEdited += (_, e) => _ = SaveStamp(e);
+        FormBarClose.Click += (_, _) =>
+        {
+            _formBarDismissed = true;
+            FormBar.Visibility = Visibility.Collapsed;
+        };
+        HighlightFieldsBox.Click += (_, _) => Viewer.HighlightFields = HighlightFieldsBox.IsChecked == true;
+        _ = LoadAnnotationsAsync();
         Organizer.Attach(this, _scheduler);
         Organizer.SelectionChanged += (_, _) => RaiseState();
         Organizer.OpenPage += (_, page) =>
@@ -253,8 +272,10 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         get
         {
-            int[] sel = IsOrganizing ? Organizer.SelectedPages : [.. Thumbs.SelectedItems.Cast<ThumbItem>().Select(t => t.Index).Order()];
-            return sel.Length > 0 ? sel : [Math.Clamp(Viewer.CurrentPage, 0, Math.Max(0, Viewer.PageCount - 1))];
+            // In the organizer only explicitly selected pages count (nothing selected = nothing to act on).
+            if (IsOrganizing) return Organizer.SelectedPages;
+            int[] sel = [.. Thumbs.SelectedItems.Cast<ThumbItem>().Select(t => t.Index).Order()];
+            return sel.Length > 0 ? sel : Viewer.PageCount == 0 ? [] : [Math.Clamp(Viewer.CurrentPage, 0, Viewer.PageCount - 1)];
         }
     }
 
@@ -344,6 +365,79 @@ public partial class DocumentTab : UserControl, IDisposable
         PageBox.SelectAll();
     }
 
+    // ───────────────────────────── Forms and Fill & Sign ─────────────────────────────
+
+    /// <summary>Reads form fields and Fill &amp; Sign items off the UI thread (the latest request wins).</summary>
+    private async Task LoadAnnotationsAsync()
+    {
+        if (!Session.IsPdf) return;
+        var ticket = ++_annotationLoad;
+        var data = Session.Data;
+        var pw = Session.Password;
+        IReadOnlyList<FormWidget> widgets = [];
+        IReadOnlyList<TextStamp> stamps = [];
+        try
+        {
+            (widgets, stamps) = await Task.Run(() => (FormEditor.Read(data, pw), TextStamps.Read(data, pw)));
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Reading form fields failed: {ex.Message}");
+        }
+        if (ticket != _annotationLoad) return;
+        Viewer.SetFormWidgets(widgets);
+        Viewer.SetStamps(stamps);
+
+        var fields = widgets.Where(w => !w.ReadOnly && w.Kind is not (FormFieldKind.PushButton or FormFieldKind.Signature))
+            .Select(w => w.FieldName).Distinct().Count();
+        FormBar.Visibility = fields > 0 && !_formBarDismissed ? Visibility.Visible : Visibility.Collapsed;
+        FormBarText.Text = $"This form has {fields} fillable field{(fields == 1 ? "" : "s")}. Click a field to fill it; Tab moves to the next one. Save (Ctrl+S) when you're done.";
+        RaiseState();
+    }
+
+    /// <summary>Writes queued field values one batch at a time, so quick clicks and typing never lose a change.</summary>
+    private async Task FlushFormQueue()
+    {
+        if (_formSaving) return;
+        _formSaving = true;
+        try
+        {
+            while (_formQueue.Count > 0)
+            {
+                if (IsBusy)
+                {
+                    await Task.Delay(80);
+                    continue;
+                }
+                var batch = new Dictionary<string, string>(_formQueue);
+                _formQueue.Clear();
+                var label = batch.Count == 1 ? "Fill form field" : $"Fill {batch.Count} form fields";
+                if (!await RunEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true))
+                {
+                    _formQueue.Clear();
+                    Viewer.ClearPendingValues();
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _formSaving = false;
+        }
+    }
+
+    private async Task SaveStamp(StampEdit e)
+    {
+        while (IsBusy) await Task.Delay(80);
+        if (e.ReplaceId is { } id && e.Text.Length == 0 && e.Kind == StampKind.Text)
+            await RunEdit("Remove text", (d, pw) => TextStamps.Remove(d, pw, id));
+        else if (e.ReplaceId is { } markId && e.Kind != StampKind.Text)
+            await RunEdit(e.Kind == StampKind.Check ? "Remove check mark" : "Remove cross", (d, pw) => TextStamps.Remove(d, pw, markId));
+        else
+            await RunEdit(e.Kind switch { StampKind.Check => "Add check mark", StampKind.Cross => "Add cross", _ => e.ReplaceId is null ? "Add text" : "Edit text" },
+                (d, pw) => TextStamps.Put(d, pw, e.PageIndex, e.Rect, e.Kind, e.Text, e.FontSize, e.ReplaceId), quiet: e.Kind == StampKind.Text);
+    }
+
     // ───────────────────────────── Organize mode ─────────────────────────────
 
     public void SelectAllPages() => Organizer.SelectAll();
@@ -415,7 +509,7 @@ public partial class DocumentTab : UserControl, IDisposable
     // ───────────────────────────── Editing ─────────────────────────────
 
     /// <summary>Runs a page edit off the UI thread and commits it as one undo step.</summary>
-    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null)
+    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false)
     {
         if (!Session.IsPdf)
         {
@@ -438,7 +532,15 @@ public partial class DocumentTab : UserControl, IDisposable
             var result = await Task.Run(() => edit(data, password));
             Session.Commit(result, label);
             if (goToPage is { } p) Viewer.GoToPage(Math.Clamp(p, 0, Viewer.PageCount - 1), record: false);
-            Notify(label, "Undo", Undo);
+            if (!quiet)
+            {
+                var depth = Session.UndoDepth;
+                Notify(label, "Undo", () =>
+                {
+                    if (_disposed || Session.UndoDepth != depth || IsBusy) return;
+                    Undo();
+                });
+            }
             return true;
         }
         catch (Exception ex) // top-level UI action: report any failure, never lose it
@@ -492,12 +594,13 @@ public partial class DocumentTab : UserControl, IDisposable
         Viewer.ShowHit(null);
         FindStatus.Text = SearchStatus.Text = "";
 
-        int[] organizerSelection = IsOrganizing ? Organizer.SelectedPages : [];
+        int[] organizerSelection = IsOrganizing && Organizer.PageCount == Session.Engine.PageCount ? Organizer.SelectedPages : [];
         _scheduler.Clear();
         Viewer.SetEngine(Session.Engine, _scheduler, keepPosition: true);
         RebuildThumbs();
         LoadOutline();
         if (IsOrganizing) Organizer.Load(Session.Engine, organizerSelection, organizerSelection.FirstOrDefault(Viewer.CurrentPage));
+        _ = LoadAnnotationsAsync();
         RaiseState();
     }
 
@@ -526,7 +629,8 @@ public partial class DocumentTab : UserControl, IDisposable
         var gen = _thumbGeneration;
         var g = engine.GetPage(item.Index);
         var scale = item.Width / g.Width * VisualTreeHelper.GetDpi(this).DpiScaleX;
-        _scheduler.Enqueue($"t{item.Index}", 1000 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale)), result =>
+        var invert = Viewer.InvertColors;
+        _scheduler.Enqueue($"t{item.Index}", 1000 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale), invert), result =>
         {
             if (gen != _thumbGeneration || result is not BitmapSource bmp) return;
             item.Image = bmp;
@@ -945,8 +1049,17 @@ public partial class DocumentTab : UserControl, IDisposable
         _searchCts = null;
     }
 
+    private bool _disposed;
+
+    public void FocusContent()
+    {
+        if (IsOrganizing) Organizer.Focus();
+        else Viewer.Focus();
+    }
+
     public void Dispose()
     {
+        _disposed = true;
         _saveViewDelay.Stop();
         _busyDelay.Stop();
         SaveViewState();

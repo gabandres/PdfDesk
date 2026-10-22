@@ -42,7 +42,7 @@ internal static class DevScript
                     case "zoom" when arg == "fitpage": v!.SetZoomMode(ZoomMode.FitPage); break;
                     case "zoom": v!.SetZoom(double.Parse(arg) / 100); break;
                     case "layout": v!.SetLayout(Enum.Parse<ViewLayout>(arg, true)); break;
-                    case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, _ => ViewerTool.Hand }; break;
+                    case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, "addtext" => ViewerTool.AddText, "check" => ViewerTool.AddCheck, _ => ViewerTool.Hand }; break;
                     case "selectall": v!.SelectAll(); break;
                     case "find": Cmd.Find.Execute(null, window); SetFindText(tab!, arg); tab!.FindNext(false); break;
                     case "findnext": tab!.FindNext(false); break;
@@ -56,6 +56,22 @@ internal static class DevScript
                     case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
                     case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
                     case "log": log.Add(arg); break;
+                    case "fields":
+                        log.Add($"fillable widgets: {v!.FillableCount}");
+                        for (var i = 0; i < Math.Min(v.FillableCount, int.TryParse(arg, out var nf) ? nf : 6); i++) log.Add("  " + v.DevDescribeField(i));
+                        break;
+                    case "click":
+                    {
+                        var a = arg.Split(' ');
+                        log.Add($"click consumed: {v!.DevClick(int.Parse(a[0]) - 1, double.Parse(a[1], System.Globalization.CultureInfo.InvariantCulture), double.Parse(a[2], System.Globalization.CultureInfo.InvariantCulture))}");
+                        break;
+                    }
+                    case "type": v!.DevType(arg); break;
+                    case "commit": v!.CommitEditor(); break;
+                    case "save":
+                        tab!.Session.SaveAs(arg);
+                        log.Add($"saved {new FileInfo(arg).Length} bytes");
+                        break;
                     case "screen": await ScreenShot(window, arg); break;
                     case "organize": tab!.SetOrganizing(arg != "off"); break;
                     case "theme": Application.Current.ThemeMode = arg == "dark" ? ThemeMode.Dark : ThemeMode.Light; break;

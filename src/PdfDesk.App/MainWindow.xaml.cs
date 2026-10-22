@@ -20,6 +20,7 @@ namespace PdfDesk.App;
 public sealed class TabModel(DocumentTab tab) : INotifyPropertyChanged
 {
     public DocumentTab Tab { get; } = tab;
+    public override string ToString() => Title;
     public string Title => Tab.Session.DisplayName;
     public string ToolTip => Tab.Session.FilePath ?? $"{Tab.Session.DisplayName} (not saved yet)";
     public Visibility DirtyVisibility => Tab.Session.IsDirty ? Visibility.Visible : Visibility.Collapsed;
@@ -57,7 +58,10 @@ public sealed class RecentItem(string path, string detail) : INotifyPropertyChan
 }
 
 /// <summary>A command palette entry.</summary>
-public sealed record PaletteItem(string Name, string Category, string Gesture, string Glyph, Action Run);
+public sealed record PaletteItem(string Name, string Category, string Gesture, string Glyph, Action Run)
+{
+    public override string ToString() => Gesture.Length > 0 ? $"{Name}, {Gesture}" : Name;
+}
 
 public partial class MainWindow : Window
 {
@@ -100,6 +104,21 @@ public partial class MainWindow : Window
         DpiChanged += (_, _) => MeasureCaptionButtons();
         PreviewKeyDown += OnPreviewKey;
 
+        CommandBar.AddHandler(System.Windows.Controls.Primitives.ButtonBase.ClickEvent, new RoutedEventHandler((_, e) =>
+        {
+            if (e.OriginalSource is System.Windows.Controls.Primitives.ButtonBase && Mouse.LeftButton == MouseButtonState.Released)
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, FocusDocument);
+        }));
+        KeyDown += OnWindowKey;
+        TabStrip.PreviewMouseWheel += (_, e) =>
+        {
+            if (FindChild<ScrollViewer>(TabStrip) is { } sv) sv.ScrollToHorizontalOffset(sv.HorizontalOffset - e.Delta / 2.0);
+            e.Handled = true;
+        };
+        PaletteBox.LostKeyboardFocus += (_, e) =>
+        {
+            if (Palette.Visibility == Visibility.Visible && e.NewFocus is DependencyObject d && !IsInside(d, Palette)) ClosePalette(focus: false);
+        };
         PaletteBox.TextChanged += (_, _) => FilterPalette();
         PaletteBox.PreviewKeyDown += OnPaletteKey;
         PaletteList.MouseUp += (_, _) => RunPaletteSelection();
@@ -218,6 +237,8 @@ public partial class MainWindow : Window
 
         Toasts.Children.Add(card);
         while (Toasts.Children.Count > 3) Toasts.Children.RemoveAt(0);
+        card.Loaded += (_, _) => System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(card)?
+            .RaiseAutomationEvent(System.Windows.Automation.Peers.AutomationEvents.LiveRegionChanged);
         timer.Start();
     }
 
@@ -300,8 +321,67 @@ public partial class MainWindow : Window
     {
         var active = ActiveTab;
         foreach (var t in Tabs) t.Visibility = t == active ? Visibility.Visible : Visibility.Collapsed;
+        if (TabStrip.SelectedItem is not null) TabStrip.ScrollIntoView(TabStrip.SelectedItem);
         UpdateUi();
-        if (active is not null) Dispatcher.BeginInvoke(DispatcherPriority.Input, () => active.PageView.Focus());
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, FocusDocument);
+    }
+
+    /// <summary>Puts keyboard focus where the user works: the organizer grid, the page view, or the window.</summary>
+    private void FocusDocument()
+    {
+        if (ActiveTab is { } t) t.FocusContent();
+        else Focus();
+    }
+
+    private void OnWindowKey(object sender, KeyEventArgs e)
+    {
+        var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+        var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        if (e.Key == Key.Escape && _fullScreen)
+        {
+            // Bubbling: only when nothing inside (find box, editor, organizer) used Esc first.
+            ToggleFullScreen();
+            e.Handled = true;
+        }
+        else if (ctrl && e.Key == Key.Tab && _tabs.Count > 1)
+        {
+            var i = TabStrip.SelectedIndex;
+            TabStrip.SelectedIndex = (i + (shift ? -1 : 1) + _tabs.Count) % _tabs.Count;
+            e.Handled = true;
+        }
+        else if (ctrl && !shift && e.Key is >= Key.D1 and <= Key.D9 && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt))
+        {
+            // Ctrl+Alt+1..9 picks a tab (Ctrl+digits are zoom/layout shortcuts).
+            var n = e.Key == Key.D9 ? _tabs.Count - 1 : e.Key - Key.D1;
+            if (n < _tabs.Count) TabStrip.SelectedIndex = n;
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F6)
+        {
+            // F6 / Shift+F6: move between the command bar, the side pane and the document.
+            if (IsInside(Keyboard.FocusedElement as DependencyObject, CommandBar)) FocusDocument();
+            else if (FindChild<System.Windows.Controls.Primitives.ButtonBase>(DocCommands.Visibility == Visibility.Visible ? DocCommands : CommandBar) is { } first)
+                first.Focus();
+            e.Handled = true;
+        }
+    }
+
+    private static bool IsInside(DependencyObject? d, DependencyObject container)
+    {
+        for (var x = d; x is not null; x = VisualTreeHelper.GetParent(x) ?? LogicalTreeHelper.GetParent(x))
+            if (x == container) return true;
+        return false;
+    }
+
+    private static T? FindChild<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var c = VisualTreeHelper.GetChild(root, i);
+            if (c is T t && (c is not UIElement u || u.IsVisible && u.IsEnabled)) return t;
+            if (FindChild<T>(c) is { } found) return found;
+        }
+        return null;
     }
 
     private void OnTabCloseClick(object sender, RoutedEventArgs e)
@@ -338,14 +418,45 @@ public partial class MainWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         var open = _tabs.Where(t => t.Tab.Session.FilePath is not null).Select(t => t.Tab.Session.FilePath!).ToList();
-        foreach (var model in _tabs.ToList())
-            if (!CloseTab(model))
-            {
-                e.Cancel = true;
-                return;
-            }
+        if (_tabs.FirstOrDefault(t => t.Tab.IsBusy) is { } busy)
+        {
+            TabStrip.SelectedItem = busy;
+            ShowStatus($"Wait a moment: {busy.Title} is still being updated.");
+            e.Cancel = true;
+            return;
+        }
+        if (!ConfirmUnsaved(_tabs.ToList()))
+        {
+            e.Cancel = true;
+            return;
+        }
+        foreach (var model in _tabs.ToList()) Discard(model);
         AppSettings.Current.OpenTabs = open;
         SavePlacement();
+    }
+
+    /// <summary>Asks about each unsaved document first; nothing closes unless every answer allows it.</summary>
+    private bool ConfirmUnsaved(IEnumerable<TabModel> models)
+    {
+        foreach (var model in models.Where(m => m.Tab.Session.IsDirty))
+        {
+            TabStrip.SelectedItem = model;
+            switch (Prompt.SaveChanges(this, model.Tab.Session.DisplayName))
+            {
+                case SaveChoice.Cancel:
+                    return false;
+                case SaveChoice.Save when !Save(model.Tab):
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private void Discard(TabModel model)
+    {
+        _tabs.Remove(model);
+        DocsHost.Children.Remove(model.Tab);
+        model.Tab.Dispose();
     }
 
     /// <summary>On startup: reopen last session's documents if the user asked for that.</summary>
@@ -588,7 +699,12 @@ public partial class MainWindow : Window
         Bind(Cmd.SaveAs, t => SaveAs(t));
         Bind(Cmd.ShowInFolder, t => Shell.ShowInFolder(t.Session.FilePath!), t => t.Session.FilePath is not null);
         Bind(Cmd.CloseDoc, _ => { if (TabStrip.SelectedItem is TabModel m) CloseTab(m); });
-        Bind(Cmd.CloseAll, _ => { foreach (var m in _tabs.ToList()) if (!CloseTab(m)) break; });
+        Bind(Cmd.CloseAll, _ =>
+        {
+            if (_tabs.Any(m => m.Tab.IsBusy) || !ConfirmUnsaved(_tabs.ToList())) return;
+            foreach (var m in _tabs.ToList()) Discard(m);
+            UpdateUi();
+        });
         Bind(Cmd.Print, t => _ = FileActions.Print(this, t), t => t.PageView.PageCount > 0);
         Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this), t => t.PageView.PageCount > 0);
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));
@@ -609,6 +725,10 @@ public partial class MainWindow : Window
         Bind(Cmd.ToolHand, t => t.PageView.Tool = ViewerTool.Hand, t => !t.IsOrganizing);
         Bind(Cmd.ToolSelect, t => t.PageView.Tool = ViewerTool.SelectText, t => !t.IsOrganizing);
         Bind(Cmd.ToolSnapshot, t => t.PageView.Tool = ViewerTool.Snapshot, t => !t.IsOrganizing);
+        Bind(Cmd.ToolAddText, t => ToggleTool(t, ViewerTool.AddText), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.ToolCheck, t => ToggleTool(t, ViewerTool.AddCheck), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.ToolCross, t => ToggleTool(t, ViewerTool.AddCross), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.HighlightFields, t => t.PageView.HighlightFields = !t.PageView.HighlightFields, t => t.PageView.HasFormFields);
 
         Bind(Cmd.ZoomIn, t => t.PageView.ZoomStep(1), t => !t.IsOrganizing);
         Bind(Cmd.ZoomOut, t => t.PageView.ZoomStep(-1), t => !t.IsOrganizing);
@@ -649,6 +769,19 @@ public partial class MainWindow : Window
         BindEdit(Cmd.CropPages, t => Organize.Crop(this, t));
     }
 
+    /// <summary>Fill and Sign tools toggle: clicking the active one goes back to the hand tool.</summary>
+    private void ToggleTool(DocumentTab t, ViewerTool tool)
+    {
+        t.PageView.Tool = t.PageView.Tool == tool ? ViewerTool.Hand : tool;
+        if (t.PageView.Tool == tool) ShowStatus(tool switch
+        {
+            ViewerTool.AddText => "Click on the page where the text should go, then type",
+            ViewerTool.AddCheck => "Click where each check mark should go; click a mark again to remove it",
+            _ => "Click where each cross should go; click one again to remove it",
+        });
+        UpdateUi();
+    }
+
     private void CopySelection(DocumentTab t)
     {
         if (Keyboard.FocusedElement is TextBox tb)
@@ -685,11 +818,6 @@ public partial class MainWindow : Window
             ClosePalette();
             e.Handled = true;
         }
-        else if (e.Key == Key.Escape && _fullScreen)
-        {
-            ToggleFullScreen();
-            e.Handled = true;
-        }
     }
 
     private void ToggleFullScreen()
@@ -697,6 +825,8 @@ public partial class MainWindow : Window
         _fullScreen = !_fullScreen;
         TitleBar.Visibility = CommandBar.Visibility = _fullScreen ? Visibility.Collapsed : Visibility.Visible;
         Root.RowDefinitions[0].Height = new GridLength(_fullScreen ? 0 : 40);
+        // No title-bar drag strip over the page in full screen.
+        if (System.Windows.Shell.WindowChrome.GetWindowChrome(this) is { } chrome) chrome.CaptionHeight = _fullScreen ? 0 : 40;
         if (_fullScreen)
         {
             _preFullScreenState = WindowState;
@@ -724,10 +854,10 @@ public partial class MainWindow : Window
         PaletteBox.Focus();
     }
 
-    private void ClosePalette()
+    private void ClosePalette(bool focus = true)
     {
         Palette.Visibility = Visibility.Collapsed;
-        ActiveTab?.PageView.Focus();
+        if (focus) FocusDocument();
     }
 
     /// <summary>Every menu command (so the palette never drifts from the menus), plus recent files.</summary>
@@ -748,6 +878,7 @@ public partial class MainWindow : Window
                 if (name.Length == 0 || items.Exists(i => i.Name == name)) continue;
                 if (mi.Command is RoutedUICommand cmd)
                 {
+                    if (!cmd.CanExecute(null, this)) continue; // only offer what can run right now
                     var gesture = cmd.InputGestures.OfType<KeyGesture>().FirstOrDefault()?.GetDisplayStringForCulture(System.Globalization.CultureInfo.CurrentCulture)
                                   ?? mi.InputGestureText ?? "";
                     items.Add(new PaletteItem(name, category, gesture, "", () => { if (cmd.CanExecute(null, this)) cmd.Execute(null, this); }));
@@ -870,12 +1001,17 @@ public partial class MainWindow : Window
         DocsHost.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
         StartPage.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         AppTitle.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
+        DocCommands.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
         Title = t is null ? "PdfDesk" : $"{(t.Session.IsDirty ? "● " : "")}{t.Session.DisplayName} – PdfDesk";
 
         var v = t?.PageView;
         HandButton.IsChecked = HandMenu.IsChecked = v?.Tool == ViewerTool.Hand;
         SelectButton.IsChecked = SelectMenu.IsChecked = v?.Tool == ViewerTool.SelectText;
         SnapshotButton.IsChecked = SnapshotMenu.IsChecked = v?.Tool == ViewerTool.Snapshot;
+        AddTextButton.IsChecked = AddTextMenu.IsChecked = v?.Tool == ViewerTool.AddText;
+        CheckButton.IsChecked = CheckMenu.IsChecked = v?.Tool == ViewerTool.AddCheck;
+        CrossButton.IsChecked = CrossMenu.IsChecked = v?.Tool == ViewerTool.AddCross;
+        HighlightFieldsMenu.IsChecked = v is { HasFormFields: true, HighlightFields: true };
         FitWidthMenu.IsChecked = v?.ZoomMode == ZoomMode.FitWidth;
         FitPageMenu.IsChecked = v?.ZoomMode == ZoomMode.FitPage;
         SingleMenu.IsChecked = v?.Layout == ViewLayout.SinglePage;

@@ -28,6 +28,8 @@ public sealed class DocumentSession : IDisposable
     public bool IsPdf => FileType == InputFileTypes.PDF;
 
     public bool CanUndo => _undo.Count > 0;
+    /// <summary>Number of undo steps; lets a toast's Undo act only on the edit it announced.</summary>
+    public int UndoDepth => _undo.Count;
     public bool CanRedo => _redo.Count > 0;
     public string? UndoLabel => _undo.Last?.Value.Label;
     public string? RedoLabel => _redo.TryPeek(out var r) ? r.Label : null;

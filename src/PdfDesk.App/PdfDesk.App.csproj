@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <Resource Include="..\..\assets\PdfDesk.ico" Link="PdfDesk.ico" />
+    <Resource Include="..\..\assets\PdfDesk-512.png" Link="PdfDeskLogo.png" />
   </ItemGroup>
 </Project>

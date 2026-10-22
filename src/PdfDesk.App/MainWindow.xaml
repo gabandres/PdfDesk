@@ -27,8 +27,8 @@
             <DockPanel Grid.Column="1" LastChildFill="False">
                 <ListBox x:Name="TabStrip" DockPanel.Dock="Left" Background="Transparent" BorderThickness="0" Padding="0"
                          ItemContainerStyle="{StaticResource TitleTab}" WindowChrome.IsHitTestVisibleInChrome="True"
-                         ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                         AutomationProperties.Name="Open documents">
+                         ScrollViewer.HorizontalScrollBarVisibility="Hidden" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                         ScrollViewer.CanContentScroll="False" AutomationProperties.Name="Open documents">
                     <ListBox.ItemsPanel>
                         <ItemsPanelTemplate>
                             <StackPanel Orientation="Horizontal" />
@@ -50,7 +50,7 @@
                 <Button x:Name="NewTabButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" FontSize="12" Height="30" MinWidth="30"
                         Margin="4,6,0,0" Content="&#xE710;" ToolTip="Open a file (Ctrl+O)" Command="app:Cmd.Open"
                         WindowChrome.IsHitTestVisibleInChrome="True" />
-                <TextBlock x:Name="AppTitle" DockPanel.Dock="Left" Text="PdfDesk" VerticalAlignment="Center" Margin="2,0,0,0" FontSize="12" />
+                <TextBlock x:Name="AppTitle" DockPanel.Dock="Left" Text="PdfDesk" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="12" />
             </DockPanel>
         </Grid>
 
@@ -64,7 +64,7 @@
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
                             <Button Style="{StaticResource CommandButton}" Command="app:Cmd.CommandPalette" ToolTip="Search all commands (Ctrl+K)">
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE721;" FontSize="13" />
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE765;" FontSize="14" />
                                     <TextBlock Text="Commands" Margin="8,0,8,0" VerticalAlignment="Center" />
                                     <Border CornerRadius="3" Padding="5,0" BorderThickness="1" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}">
                                         <TextBlock Text="Ctrl+K" FontSize="11" Style="{StaticResource Caption}" />
@@ -111,6 +111,10 @@
                                     <MenuItem x:Name="SelectMenu" Command="app:Cmd.ToolSelect" InputGestureText="T" />
                                     <MenuItem x:Name="SnapshotMenu" Command="app:Cmd.ToolSnapshot" InputGestureText="G" />
                                     <Separator />
+                                    <MenuItem x:Name="AddTextMenu" Command="app:Cmd.ToolAddText" InputGestureText="A" />
+                                    <MenuItem x:Name="CheckMenu" Command="app:Cmd.ToolCheck" InputGestureText="K" />
+                                    <MenuItem x:Name="CrossMenu" Command="app:Cmd.ToolCross" InputGestureText="X" />
+                                    <Separator />
                                     <MenuItem Command="app:Cmd.CommandPalette" />
                                 </MenuItem>
                                 <MenuItem Header="_View">
@@ -136,6 +140,7 @@
                                     <MenuItem x:Name="NavPaneMenu" Command="app:Cmd.NavPane" />
                                     <MenuItem Header="_Bookmarks" Click="OnShowBookmarks" />
                                     <MenuItem x:Name="DarkPagesMenu" Command="app:Cmd.DarkPages" />
+                                    <MenuItem x:Name="HighlightFieldsMenu" Command="app:Cmd.HighlightFields" />
                                     <MenuItem Command="app:Cmd.FullScreen" />
                                 </MenuItem>
                                 <MenuItem Header="_Organize">
@@ -168,39 +173,44 @@
                                     <MenuItem Header="_About PdfDesk" Click="OnAbout" />
                                 </MenuItem>
                             </Menu>
-                            <Border Style="{StaticResource BarSeparator}" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Save" ToolTip="Save (Ctrl+S)" Content="&#xE74E;" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Print" ToolTip="Print (Ctrl+P)" Content="&#xE749;" />
-                            <Button x:Name="UndoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Undo" ToolTip="Undo (Ctrl+Z)" Content="&#xE7A7;" />
-                            <Button x:Name="RedoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redo" ToolTip="Redo (Ctrl+Y)" Content="&#xE7A6;" />
-                            <Border Style="{StaticResource BarSeparator}" />
-                            <ToggleButton x:Name="HandButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolHand" ToolTip="Hand tool: drag to scroll (H)" Content="&#xE7C9;" />
-                            <ToggleButton x:Name="SelectButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSelect" ToolTip="Select text (T)" Content="&#xE8E9;" />
-                            <ToggleButton x:Name="SnapshotButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSnapshot" ToolTip="Snapshot: drag to copy an area as an image (G)" Content="&#xE722;" />
-                            <Border Style="{StaticResource BarSeparator}" />
-                            <ToggleButton x:Name="OrganizeButton" Style="{StaticResource CommandButton}" Command="app:Cmd.Organize" ToolTip="Organize pages: reorder, rotate, delete in a grid (Ctrl+Shift+O)">
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8A9;" FontSize="15" />
-                                    <TextBlock Text="Organize" Margin="8,0,0,0" VerticalAlignment="Center" />
-                                </StackPanel>
-                            </ToggleButton>
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateLeft" ToolTip="Rotate counterclockwise (Ctrl+Shift+-)" Content="&#xE7AD;" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateRight" ToolTip="Rotate clockwise (Ctrl+Shift++)" Content="&#xE7AD;" RenderTransformOrigin="0.5,0.5">
-                                <Button.RenderTransform>
-                                    <ScaleTransform ScaleX="-1" />
-                                </Button.RenderTransform>
-                            </Button>
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.DeleteSelected" ToolTip="Delete selected pages (Del)" Content="&#xE74D;" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.InsertPages" ToolTip="Insert pages from a file (Ctrl+Shift+I)" Content="&#xE8F4;" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.ExtractPages" ToolTip="Extract pages (Ctrl+Shift+E)" Content="&#xE8B7;" />
-                            <Button Style="{StaticResource CommandButton}" Command="app:Cmd.Combine" ToolTip="Combine several PDFs into one">
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8F1;" FontSize="15" />
-                                    <TextBlock Text="Combine" Margin="8,0,0,0" VerticalAlignment="Center" />
-                                </StackPanel>
-                            </Button>
-                            <Border Style="{StaticResource BarSeparator}" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Find" ToolTip="Find (Ctrl+F)" Content="&#xE721;" />
+                            <StackPanel x:Name="DocCommands" Orientation="Horizontal">
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Save" ToolTip="Save (Ctrl+S)" Content="&#xE74E;" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Print" ToolTip="Print (Ctrl+P)" Content="&#xE749;" />
+                                <Button x:Name="UndoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Undo" ToolTip="Undo (Ctrl+Z)" Content="&#xE7A7;" />
+                                <Button x:Name="RedoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redo" ToolTip="Redo (Ctrl+Y)" Content="&#xE7A6;" />
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <ToggleButton x:Name="HandButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolHand" ToolTip="Hand tool: drag to scroll (H)" Content="&#xE7C9;" />
+                                <ToggleButton x:Name="SelectButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSelect" ToolTip="Select text (T)" Content="&#xE8E9;" />
+                                <ToggleButton x:Name="SnapshotButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSnapshot" ToolTip="Snapshot: drag to copy an area as an image (G)" Content="&#xE722;" />
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <ToggleButton x:Name="AddTextButton" Style="{StaticResource CommandButton}" Command="app:Cmd.ToolAddText"
+                                              ToolTip="Fill and Sign: click anywhere on a page to type text, e.g. on a scanned form (A)">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8D2;" FontSize="15" />
+                                        <TextBlock Text="Add text" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </ToggleButton>
+                                <ToggleButton x:Name="CheckButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCheck" Content="&#xE73E;" ToolTip="Add a check mark: click where it goes (K)" />
+                                <ToggleButton x:Name="CrossButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCross" Content="&#xE711;" ToolTip="Add a cross: click where it goes (X)" />
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <ToggleButton x:Name="OrganizeButton" Style="{StaticResource CommandButton}" Command="app:Cmd.Organize" ToolTip="Organize pages: reorder, rotate, delete in a grid (Ctrl+Shift+O)">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8B3;" FontSize="15" />
+                                        <TextBlock Text="Organize" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </ToggleButton>
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateLeft" ToolTip="Rotate counterclockwise (Ctrl+Shift+-)" Content="&#xE7AD;" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateRight" ToolTip="Rotate clockwise (Ctrl+Shift++)" Content="&#xE7AD;" RenderTransformOrigin="0.5,0.5">
+                                    <Button.RenderTransform>
+                                        <ScaleTransform ScaleX="-1" />
+                                    </Button.RenderTransform>
+                                </Button>
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.DeleteSelected" ToolTip="Delete selected pages (Del)" Content="&#xE74D;" />
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Find" ToolTip="Find in document (Ctrl+F)" Content="&#xE721;" />
+                            </StackPanel>
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Combine" ToolTip="Combine several PDFs into one" Content="&#xE8F1;" />
                         </WrapPanel>
                     </DockPanel>
                 </Border>
@@ -299,7 +309,7 @@
                     </Border>
 
                     <!-- Toasts (bottom-left) -->
-                    <StackPanel x:Name="Toasts" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="20,0,0,20" />
+                    <StackPanel x:Name="Toasts" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,76" />
 
                     <!-- Command palette -->
                     <Grid x:Name="Palette" Visibility="Collapsed" Background="#01000000">

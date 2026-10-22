@@ -31,7 +31,8 @@
             <Setter Property="Margin" Value="1,0" />
             <Setter Property="MinWidth" Value="34" />
             <Setter Property="Height" Value="34" />
-            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
             <Setter Property="Cursor" Value="Arrow" />
             <Setter Property="ToolTipService.ShowOnDisabled" Value="True" />
             <Setter Property="ToolTipService.InitialShowDelay" Value="500" />
@@ -188,8 +189,9 @@
         <Style x:Key="TitleTab" TargetType="ListBoxItem">
             <Setter Property="Padding" Value="12,0,6,0" />
             <Setter Property="Margin" Value="0,6,2,0" />
-            <Setter Property="MinWidth" Value="120" />
-            <Setter Property="MaxWidth" Value="260" />
+            <Setter Property="MinWidth" Value="90" />
+            <Setter Property="MaxWidth" Value="240" />
+            <Setter Property="AutomationProperties.Name" Value="{Binding Title}" />
             <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="Template">

@@ -155,6 +155,7 @@ public partial class OrganizerView : UserControl
     }
 
     public int[] SelectedPages => [.. _items.Where(i => i.IsSelected).Select(i => i.Index)];
+    public int PageCount => _items.Count;
 
     public void Attach(DocumentTab tab, RenderScheduler scheduler)
     {
@@ -190,7 +191,8 @@ public partial class OrganizerView : UserControl
         var engine = _tab.Session.Engine;
         var gen = _generation;
         var scale = item.Width / item.PageWidth * VisualTreeHelper.GetDpi(this).DpiScaleX;
-        _scheduler.Enqueue($"o{item.Index}", 900 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale)), r =>
+        var invert = _tab.PageView.InvertColors;
+        _scheduler.Enqueue($"o{item.Index}", 900 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale), invert), r =>
         {
             if (gen == _generation && r is BitmapSource bmp) item.Image = bmp;
         });
@@ -260,13 +262,22 @@ public partial class OrganizerView : UserControl
 
     private void BringIntoView(int index)
     {
-        if (_scroller is null || _columns <= 0) return;
-        var row = index / _columns;
-        var rowHeight = SizeSlider.Value + 20 + 8 + 30;
-        var top = row * rowHeight;
-        if (top < _scroller.VerticalOffset) _scroller.ScrollToVerticalOffset(top);
-        else if (top + rowHeight > _scroller.VerticalOffset + _scroller.ViewportHeight)
-            _scroller.ScrollToVerticalOffset(top + rowHeight - _scroller.ViewportHeight);
+        if (_columns <= 0 || _rows.Count == 0) return;
+        var row = Math.Clamp(index / _columns, 0, _rows.Count - 1);
+        // Let the virtualizing panel realize and reveal the row (row heights vary with page shapes).
+        if (Panel(Rows) is { } panel) panel.BringIndexIntoViewPublic(row);
+        if (Rows.ItemContainerGenerator.ContainerFromIndex(row) is FrameworkElement container) container.BringIntoView();
+    }
+
+    private static VirtualizingStackPanel? Panel(DependencyObject root)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var c = VisualTreeHelper.GetChild(root, i);
+            if (c is VirtualizingStackPanel v) return v;
+            if (Panel(c) is { } found) return found;
+        }
+        return null;
     }
 
     private void OnKey(object sender, KeyEventArgs e)
@@ -422,7 +433,41 @@ public partial class OrganizerView : UserControl
                 }
             }
         }
+        // In a gap between cards or rows: use the nearest card, not "the end of the document".
+        Border? nearest = null;
+        var best = double.MaxValue;
+        foreach (var card in Cards(Rows))
+        {
+            var tl = card.TranslatePoint(new Point(0, 0), Rows);
+            var r = new Rect(tl, card.RenderSize);
+            var dx = p.X < r.Left ? r.Left - p.X : p.X > r.Right ? p.X - r.Right : 0;
+            var dy = p.Y < r.Top ? r.Top - p.Y : p.Y > r.Bottom ? p.Y - r.Bottom : 0;
+            var d = dx * dx + dy * dy * 4; // prefer the same row
+            if (d < best)
+            {
+                best = d;
+                nearest = card;
+            }
+        }
+        if (nearest is { DataContext: OrganizerItem near })
+        {
+            var tl = nearest.TranslatePoint(new Point(0, 0), Rows);
+            var after = p.X > tl.X + nearest.ActualWidth / 2;
+            var x = after ? tl.X + nearest.ActualWidth + 2 : tl.X - 2;
+            return (after ? near.Index + 1 : near.Index, new Rect(x - 1.5, tl.Y + 4, 3, nearest.ActualHeight - 8));
+        }
         return _items.Count == 0 ? null : (_items.Count, Rect.Empty);
+    }
+
+    private static IEnumerable<Border> Cards(DependencyObject root)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var c = VisualTreeHelper.GetChild(root, i);
+            if (c is Border { Name: "Card" } b) yield return b;
+            else
+                foreach (var x in Cards(c)) yield return x;
+        }
     }
 
     private void OnDragOver(object sender, DragEventArgs e)
