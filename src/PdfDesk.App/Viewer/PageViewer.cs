@@ -31,7 +31,8 @@ public sealed class PageViewer : ScrollViewer
 {
     private const double Pad = 12;
     private const double PtToDip = 96.0 / 72.0;
-    private const long MaxFullPixels = 12_000_000;
+    private const long MaxFullPixels = 4_000_000;      // per-page base render cap; sharper detail comes from tiles
+    private const long CacheBudgetPixels = 24_000_000; // all cached page bitmaps together (~72 MB as BGR)
     private const double MinZoom = 0.05, MaxZoom = 64;
     private static readonly double[] ZoomSteps =
         [0.05, 0.0833, 0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
@@ -635,10 +636,17 @@ public sealed class PageViewer : ScrollViewer
             }
         }
 
-        // Drop bitmaps far from the viewport.
+        // Drop bitmaps far from the viewport, then the farthest ones until the cache fits its pixel budget.
         var keepFrom = visible[0] - 4;
         var keepTo = visible[^1] + 4;
         foreach (var p in _full.Keys.Where(p => p < keepFrom || p > keepTo).ToList()) _full.Remove(p);
+        var total = _full.Values.Sum(b => (long)b.Image.PixelWidth * b.Image.PixelHeight);
+        foreach (var p in _full.Keys.Where(p => !visible.Contains(p)).OrderByDescending(p => Math.Abs((_rects[p].Top + _rects[p].Bottom) / 2 - center)).ToList())
+        {
+            if (total <= CacheBudgetPixels) break;
+            total -= (long)_full[p].Image.PixelWidth * _full[p].Image.PixelHeight;
+            _full.Remove(p);
+        }
         foreach (var p in _detail.Keys.Where(p => !visible.Contains(p)).ToList()) _detail.Remove(p);
         _scheduler.Clear(key => key[0] is 'p' or 'd' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
     }

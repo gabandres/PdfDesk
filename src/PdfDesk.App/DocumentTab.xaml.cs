@@ -57,6 +57,7 @@ public partial class DocumentTab : UserControl, IDisposable
     private readonly ObservableCollection<SearchHit> _results = [];
     private int _thumbGeneration;
     private bool _syncingSelection;
+    private bool _protectionWarned;
 
     // Search state
     private CancellationTokenSource? _searchCts;
@@ -180,6 +181,14 @@ public partial class DocumentTab : UserControl, IDisposable
             return false;
         }
         if (IsBusy) return false;
+        if (Session.Engine.IsEncrypted && !_protectionWarned)
+        {
+            var answer = MessageBox.Show(Window.GetWindow(this)!,
+                "This PDF is password-protected. After a page edit it is saved without the password protection.\n\nContinue?",
+                label, MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.OK) return false;
+            _protectionWarned = true;
+        }
 
         SetBusy($"{label}…");
         try

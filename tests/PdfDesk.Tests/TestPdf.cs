@@ -29,6 +29,17 @@ internal static class TestPdf
         return ms.ToArray();
     }
 
+    /// <summary>The same document protected with a user password.</summary>
+    public static byte[] Encrypted(int pages, string userPassword)
+    {
+        using var doc = PdfSharp.Pdf.IO.PdfReader.Open(new MemoryStream(Make(pages)), PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify);
+        doc.SecuritySettings.UserPassword = userPassword;
+        doc.SecuritySettings.OwnerPassword = userPassword + "-owner";
+        using var ms = new MemoryStream();
+        doc.Save(ms, false);
+        return ms.ToArray();
+    }
+
     /// <summary>The "Page N" number on each page, in order, read back through MuPDF (0 = no number).</summary>
     public static int[] PageNumbers(byte[] data)
     {

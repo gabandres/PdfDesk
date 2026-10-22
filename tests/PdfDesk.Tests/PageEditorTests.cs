@@ -137,6 +137,23 @@ public class PageEditorTests
     }
 
     [Fact]
+    public void EditsEncryptedDocumentWithOwnerPassword()
+    {
+        var locked = TestPdf.Encrypted(3, "secret");
+        Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(locked, InputFileTypes.PDF, null));
+        Assert.True(Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(locked, InputFileTypes.PDF, "nope")).WrongPassword);
+
+        // Editing needs the owner password; the open (user) password alone is refused with a clear message.
+        Assert.Contains("owner password", Assert.Throws<InvalidOperationException>(() => PageEditor.Delete(locked, "secret", [0])).Message);
+        var edited = PageEditor.Delete(locked, "secret-owner", [0]);
+        // PDFsharp saves edits without the protection (the app warns before the first edit).
+        using var engine = PdfEngine.Open(edited, InputFileTypes.PDF, null);
+        Assert.False(engine.IsEncrypted);
+        Assert.Equal(2, engine.PageCount);
+        Assert.Contains("Page 2", engine.GetText(0).Text);
+    }
+
+    [Fact]
     public void SessionUndoRedoAndSave()
     {
         var path = Path.Combine(Path.GetTempPath(), $"pdfdesk-{Guid.NewGuid():N}.pdf");

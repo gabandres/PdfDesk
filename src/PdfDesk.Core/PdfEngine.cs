@@ -56,7 +56,9 @@ public sealed class PdfEngine : IDisposable
     /// <exception cref="PasswordRequiredException">The document is encrypted and the password is missing or wrong.</exception>
     public static PdfEngine Open(byte[] data, InputFileTypes type, string? password)
     {
-        var ctx = new MuPDFContext();
+        // MuPDF's resource cache (decoded images, fonts) defaults to 256 MB per document; 128 MB keeps re-renders fast
+        // without letting several open tabs balloon.
+        var ctx = new MuPDFContext(128 * 1024 * 1024);
         MuPDFDocument? doc = null;
         try
         {
@@ -71,7 +73,7 @@ public sealed class PdfEngine : IDisposable
         }
         catch
         {
-            doc?.Dispose();
+            if (doc is not null) DisposeDocument(doc);
             ctx.Dispose();
             throw;
         }
@@ -244,8 +246,18 @@ public sealed class PdfEngine : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            _doc.Dispose();
+            DisposeDocument(_doc);
             _ctx.Dispose();
         }
+    }
+
+    /// <summary>
+    /// MuPDFCore throws from a finalizer (crashing the process) if a page outlives its context, so pages must be
+    /// disposed explicitly, before the document and the context.
+    /// </summary>
+    private static void DisposeDocument(MuPDFDocument doc)
+    {
+        doc.Pages.Dispose();
+        doc.Dispose();
     }
 }

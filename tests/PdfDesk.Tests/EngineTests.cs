@@ -57,6 +57,25 @@ public class EngineTests
     }
 
     [Fact]
+    public void DisposedEnginesLeaveNothingForTheFinalizer()
+    {
+        // MuPDFCore crashes the process from a finalizer if a page outlives its context.
+        for (var i = 0; i < 3; i++)
+        {
+            using var engine = PdfEngine.Open(TestPdf.Make(4), InputFileTypes.PDF, null);
+            engine.Render(1, 0.3);
+            engine.GetText(2);
+            engine.GetLinks(3);
+            engine.GetOutline();
+        }
+        Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(TestPdf.Encrypted(2, "pw"), InputFileTypes.PDF, null));
+        Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(TestPdf.Encrypted(2, "pw"), InputFileTypes.PDF, "wrong"));
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    [Fact]
     public void UnencryptedDocumentIgnoresPassword()
     {
         using var engine = PdfEngine.Open(TestPdf.Make(1), InputFileTypes.PDF, "whatever");

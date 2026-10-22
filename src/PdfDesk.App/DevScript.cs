@@ -16,6 +16,8 @@ namespace PdfDesk.App;
 /// </summary>
 internal static class DevScript
 {
+    public static long Started { get; } = Environment.TickCount64;
+
     public static async Task RunAsync(MainWindow window, string scriptPath)
     {
         var log = new List<string>();
@@ -54,6 +56,15 @@ internal static class DevScript
                     case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
                     case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
                     case "log": log.Add(arg); break;
+                    case "mem":
+                    {
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+                        log.Add($"mem: working set {proc.WorkingSet64 / 1048576} MB, private {proc.PrivateMemorySize64 / 1048576} MB, managed {GC.GetTotalMemory(false) / 1048576} MB");
+                        break;
+                    }
+                    case "time": log.Add($"time: {Environment.TickCount64 - Started} ms since start"); break;
                     case "xps":
                     {
                         var sw = System.Diagnostics.Stopwatch.StartNew();
