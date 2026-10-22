@@ -56,6 +56,16 @@ internal static class DevScript
                     case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
                     case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
                     case "log": log.Add(arg); break;
+                    case "screen": await ScreenShot(window, arg); break;
+                    case "organize": tab!.SetOrganizing(arg != "off"); break;
+                    case "theme": Application.Current.ThemeMode = arg == "dark" ? ThemeMode.Dark : ThemeMode.Light; break;
+                    case "darkpages": Cmd.DarkPages.Execute(null, window); break;
+                    case "toast": window.ShowToast(new Toast(arg, "Undo", () => { })); break;
+                    case "palette":
+                        Cmd.CommandPalette.Execute(null, window);
+                        if (window.FindName("PaletteBox") is System.Windows.Controls.TextBox pb) pb.Text = arg;
+                        break;
+                    case "closepalette": window.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice, PresentationSource.FromVisual(window)!, 0, System.Windows.Input.Key.Escape) { RoutedEvent = UIElement.PreviewKeyDownEvent }); break;
                     case "mem":
                     {
                         GC.Collect();
@@ -118,10 +128,48 @@ internal static class DevScript
         if (tab.FindName("FindBox") is System.Windows.Controls.TextBox box) box.Text = text;
     }
 
-    private static void Nav(DocumentTab tab, string which)
+    private static void Nav(DocumentTab tab, string which) =>
+        tab.ShowPane(which switch { "bookmarks" => NavPaneKind.Bookmarks, "search" => NavPaneKind.Search, "none" => NavPaneKind.None, _ => NavPaneKind.Pages });
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out Rect32 r);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+    private struct Rect32 { public int Left, Top, Right, Bottom; }
+
+    /// <summary>Shows the window on screen for a moment and captures only its own rectangle (real Mica and caption buttons).</summary>
+    private static async Task ScreenShot(Window window, string path)
     {
-        if (tab.FindName("NavTabs") is not System.Windows.Controls.TabControl tabs) return;
-        tabs.SelectedIndex = which switch { "bookmarks" => 1, "search" => 2, _ => 0 };
+        var (left, top, topmost) = (window.Left, window.Top, window.Topmost);
+        window.Left = 40;
+        window.Top = 40;
+        window.Topmost = true;
+        await Task.Delay(1200);
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        GetWindowRect(hwnd, out var r);
+        int w = r.Right - r.Left, h = r.Bottom - r.Top;
+        var screen = GetDC(IntPtr.Zero);
+        var mem = CreateCompatibleDC(screen);
+        var hbm = CreateCompatibleBitmap(screen, w, h);
+        var old = SelectObject(mem, hbm);
+        BitBlt(mem, 0, 0, w, h, screen, r.Left, r.Top, 0x00CC0020 | 0x40000000);
+        SelectObject(mem, old);
+        var bmp = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(hbm, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+        DeleteObject(hbm);
+        DeleteDC(mem);
+        ReleaseDC(IntPtr.Zero, screen);
+        window.Topmost = topmost;
+        window.Left = left;
+        window.Top = top;
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(bmp));
+        using var fs = File.Create(path);
+        enc.Save(fs);
     }
 
     private static void Shot(Window window, string path)

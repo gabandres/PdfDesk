@@ -54,6 +54,11 @@ public sealed class ThumbItem(int index, double width, double height, Action<Thu
 /// <summary>Drag payload for thumbnails: pages of a document, possibly dropped into another tab.</summary>
 public sealed record PageDragData(DocumentTab Source, int[] Pages);
 
+/// <summary>A transient message for the toast area, optionally with an action such as Undo.</summary>
+public sealed record Toast(string Message, string? ActionLabel = null, Action? Action = null, bool IsError = false);
+
+public enum NavPaneKind { None, Pages, Bookmarks, Search }
+
 public partial class DocumentTab : UserControl, IDisposable
 {
     private const double ThumbBox = 130;
@@ -76,6 +81,13 @@ public partial class DocumentTab : UserControl, IDisposable
     private bool _jumpWhenFound;
     private bool _searchBackwards;
 
+    // Panes, busy veil, view-state persistence
+    private NavPaneKind _pane = NavPaneKind.None;
+    private readonly System.Windows.Threading.DispatcherTimer _busyDelay = new() { Interval = TimeSpan.FromMilliseconds(350) };
+    private readonly System.Windows.Threading.DispatcherTimer _saveViewDelay = new() { Interval = TimeSpan.FromSeconds(2) };
+    private bool _updatingPill;
+    private NavPaneKind _paneBeforeOrganize;
+
     // Thumbnail drag state
     private Point _dragStart;
     private bool _dragArmed;
@@ -87,7 +99,11 @@ public partial class DocumentTab : UserControl, IDisposable
 
     /// <summary>Page, zoom, selection, dirty state or busy state changed (refresh toolbar/status/header).</summary>
     public event EventHandler? StateChanged;
-    public event EventHandler<string>? Status;
+    public event EventHandler<Toast>? Toast;
+    public bool IsOrganizing { get; private set; }
+
+    private void Notify(string message, string? actionLabel = null, Action? action = null, bool error = false) =>
+        Toast?.Invoke(this, new Toast(message, actionLabel, action, error));
 
     public DocumentTab(DocumentSession session)
     {
@@ -99,20 +115,75 @@ public partial class DocumentTab : UserControl, IDisposable
         SearchResults.ItemsSource = _results;
 
         var settings = AppSettings.Current;
-        NavColumn.Width = new GridLength(Math.Clamp(settings.NavPaneWidth, 120, 600));
-        SetNavPaneVisible(settings.NavPaneVisible);
+        ShowPane(settings.NavPaneVisible ? NavPaneKind.Pages : NavPaneKind.None);
         if (Enum.TryParse<ViewLayout>(settings.Layout, out var layout)) Viewer.SetLayout(layout);
         if (Enum.TryParse<ZoomMode>(settings.ZoomMode, out var zoomMode) && zoomMode != ZoomMode.Custom) Viewer.SetZoomMode(zoomMode);
+        Viewer.InvertColors = settings.DarkPages;
 
         Viewer.SetEngine(session.Engine, _scheduler, keepPosition: false);
         RebuildThumbs();
         LoadOutline();
+        RestoreViewState();
+        Organizer.Attach(this, _scheduler);
+        Organizer.SelectionChanged += (_, _) => RaiseState();
+        Organizer.OpenPage += (_, page) =>
+        {
+            SetOrganizing(false);
+            Viewer.GoToPage(page);
+        };
+        Organizer.Done += (_, _) => SetOrganizing(false);
 
-        Viewer.CurrentPageChanged += (_, _) => { SyncThumbSelection(); RaiseState(); };
+        // Rail and pane
+        PagesRail.Click += (_, _) => TogglePane(NavPaneKind.Pages);
+        BookmarksRail.Click += (_, _) => TogglePane(NavPaneKind.Bookmarks);
+        SearchRail.Click += (_, _) => TogglePane(NavPaneKind.Search);
+        ClosePaneButton.Click += (_, _) => ShowPane(NavPaneKind.None, remember: true);
+
+        // Page / zoom pill
+        ZoomBox.ItemsSource = new[] { "Fit width", "Fit page", "25%", "50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%", "800%" };
+        ZoomBox.SelectionChanged += (_, _) => { if (!_updatingPill && ZoomBox.SelectedItem is string z) ApplyZoomText(z); };
+        ZoomBox.AddHandler(KeyDownEvent, new KeyEventHandler((_, e) =>
+        {
+            if (e.Key != Key.Enter) return;
+            ApplyZoomText(ZoomBox.Text);
+            Viewer.Focus();
+            e.Handled = true;
+        }), handledEventsToo: true);
+        ZoomBox.LostKeyboardFocus += (_, _) => UpdatePill();
+        PageBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter && int.TryParse(PageBox.Text.Trim(), out var n))
+            {
+                Viewer.GoToPage(n - 1);
+                Viewer.Focus();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                UpdatePill();
+                Viewer.Focus();
+                e.Handled = true;
+            }
+        };
+        PageBox.GotKeyboardFocus += (_, _) => PageBox.SelectAll();
+        PageBox.LostKeyboardFocus += (_, _) => UpdatePill();
+
+        _busyDelay.Tick += (_, _) =>
+        {
+            _busyDelay.Stop();
+            if (IsBusy) BusyOverlay.Visibility = Visibility.Visible;
+        };
+        _saveViewDelay.Tick += (_, _) =>
+        {
+            _saveViewDelay.Stop();
+            SaveViewState();
+        };
+
+        Viewer.CurrentPageChanged += (_, _) => { SyncThumbSelection(); RaiseState(); _saveViewDelay.Stop(); _saveViewDelay.Start(); };
         Viewer.ZoomChanged += (_, _) => RaiseState();
         Viewer.SelectionChanged += (_, _) => RaiseState();
         Viewer.ToolChanged += (_, _) => RaiseState();
-        Viewer.StatusMessage += (_, m) => Status?.Invoke(this, m);
+        Viewer.StatusMessage += (_, m) => Notify(m);
         Session.ContentChanged += OnContentChanged;
         Session.StateChanged += (_, _) => RaiseState();
 
@@ -165,29 +236,180 @@ public partial class DocumentTab : UserControl, IDisposable
             AppSettings.Current.NavPaneWidth = NavColumn.ActualWidth;
             AppSettings.Current.Save();
         };
+        UpdatePill();
     }
 
     public string Header => (Session.IsDirty ? "● " : "") + Session.DisplayName;
 
-    private void RaiseState() => StateChanged?.Invoke(this, EventArgs.Empty);
+    private void RaiseState()
+    {
+        UpdatePill();
+        UpdatePaneDetail();
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
 
-    /// <summary>Pages the organize commands act on: the thumbnail selection, else the current page.</summary>
+    /// <summary>Pages the organize commands act on: the organizer or thumbnail selection, else the current page.</summary>
     public int[] SelectedPages
     {
         get
         {
-            var sel = Thumbs.SelectedItems.Cast<ThumbItem>().Select(t => t.Index).Order().ToArray();
-            return sel.Length > 0 ? sel : [Viewer.CurrentPage];
+            int[] sel = IsOrganizing ? Organizer.SelectedPages : [.. Thumbs.SelectedItems.Cast<ThumbItem>().Select(t => t.Index).Order()];
+            return sel.Length > 0 ? sel : [Math.Clamp(Viewer.CurrentPage, 0, Math.Max(0, Viewer.PageCount - 1))];
         }
     }
 
-    public bool NavPaneVisible => NavColumn.Width.Value > 0 && NavTabs.Visibility == Visibility.Visible;
+    // ───────────────────────────── Panes ─────────────────────────────
 
-    public void SetNavPaneVisible(bool visible)
+    public bool NavPaneVisible => _pane != NavPaneKind.None;
+
+    /// <summary>F4: show the pages pane, or hide the open one.</summary>
+    public void SetNavPaneVisible(bool visible) => ShowPane(visible ? NavPaneKind.Pages : NavPaneKind.None, remember: true);
+
+    private void TogglePane(NavPaneKind kind) => ShowPane(_pane == kind ? NavPaneKind.None : kind, remember: true);
+
+    public void ShowPane(NavPaneKind kind, bool remember = false)
     {
-        NavTabs.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        NavSplitter.Visibility = NavTabs.Visibility;
-        NavColumn.Width = visible ? new GridLength(Math.Clamp(AppSettings.Current.NavPaneWidth, 120, 600)) : new GridLength(0);
+        _pane = kind;
+        var open = kind != NavPaneKind.None;
+        NavPane.Visibility = NavSplitter.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        NavColumn.Width = open ? new GridLength(Math.Clamp(AppSettings.Current.NavPaneWidth, 160, 600)) : new GridLength(0);
+        Thumbs.Visibility = kind == NavPaneKind.Pages ? Visibility.Visible : Visibility.Collapsed;
+        BookmarksPanel.Visibility = kind == NavPaneKind.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
+        SearchPanel.Visibility = kind == NavPaneKind.Search ? Visibility.Visible : Visibility.Collapsed;
+        PagesRail.IsChecked = kind == NavPaneKind.Pages;
+        BookmarksRail.IsChecked = kind == NavPaneKind.Bookmarks;
+        SearchRail.IsChecked = kind == NavPaneKind.Search;
+        PaneTitle.Text = kind switch { NavPaneKind.Pages => "Pages", NavPaneKind.Bookmarks => "Bookmarks", NavPaneKind.Search => "Search", _ => "" };
+        UpdatePaneDetail();
+        if (kind == NavPaneKind.Pages) SyncThumbSelection();
+        if (remember)
+        {
+            AppSettings.Current.NavPaneVisible = open;
+            AppSettings.Current.Save();
+        }
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdatePaneDetail()
+    {
+        PaneDetail.Text = _pane switch
+        {
+            NavPaneKind.Pages when Thumbs.SelectedItems.Count > 1 => $"{Thumbs.SelectedItems.Count} selected",
+            NavPaneKind.Pages => $"{Viewer.PageCount}",
+            _ => "",
+        };
+    }
+
+    // ───────────────────────────── Page / zoom pill ─────────────────────────────
+
+    private void UpdatePill()
+    {
+        if (!PageBox.IsKeyboardFocusWithin) PageBox.Text = Viewer.PageCount > 0 ? (Viewer.CurrentPage + 1).ToString() : "";
+        PageCountText.Text = $"of {Viewer.PageCount}";
+        if (!ZoomBox.IsKeyboardFocusWithin)
+        {
+            _updatingPill = true;
+            ZoomBox.SelectedItem = null;
+            ZoomBox.Text = $"{Viewer.Zoom * 100:0}%";
+            _updatingPill = false;
+        }
+        FitWidthButton.IsChecked = Viewer.ZoomMode == ZoomMode.FitWidth;
+        FitPageButton.IsChecked = Viewer.ZoomMode == ZoomMode.FitPage;
+    }
+
+    private void ApplyZoomText(string text)
+    {
+        text = text.Trim();
+        if (text.Equals("Fit width", StringComparison.OrdinalIgnoreCase)) SetZoomMode(ZoomMode.FitWidth);
+        else if (text.Equals("Fit page", StringComparison.OrdinalIgnoreCase)) SetZoomMode(ZoomMode.FitPage);
+        else if (double.TryParse(text.TrimEnd('%', ' '), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out var pct) && pct > 0)
+        {
+            Viewer.SetZoom(pct / 100);
+            AppSettings.Current.ZoomMode = nameof(ZoomMode.Custom);
+        }
+        UpdatePill();
+    }
+
+    public void SetZoomMode(ZoomMode mode)
+    {
+        Viewer.SetZoomMode(mode);
+        AppSettings.Current.ZoomMode = mode.ToString();
+        AppSettings.Current.Save();
+        UpdatePill();
+    }
+
+    public void FocusPageBox()
+    {
+        PageBox.Focus();
+        PageBox.SelectAll();
+    }
+
+    // ───────────────────────────── Organize mode ─────────────────────────────
+
+    public void SelectAllPages() => Organizer.SelectAll();
+
+    public void SetOrganizing(bool on)
+    {
+        if (on == IsOrganizing) return;
+        if (on && !Session.IsPdf)
+        {
+            Notify("Organizing pages works on PDF files only.");
+            return;
+        }
+        var selection = SelectedPages;
+        IsOrganizing = on;
+        // The grid needs the room; the side pane comes back when leaving.
+        if (on)
+        {
+            _paneBeforeOrganize = _pane;
+            ShowPane(NavPaneKind.None);
+        }
+        else if (_paneBeforeOrganize != NavPaneKind.None)
+        {
+            ShowPane(_paneBeforeOrganize);
+        }
+        ReadingView.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        Organizer.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (on)
+        {
+            Organizer.Load(Session.Engine, selection.Length > 1 ? selection : [Viewer.CurrentPage], Viewer.CurrentPage);
+            Organizer.Focus();
+        }
+        else
+        {
+            Viewer.Focus();
+        }
+        RaiseState();
+        CommandManager.InvalidateRequerySuggested();
+    }
+
+    // ───────────────────────────── View state ─────────────────────────────
+
+    private void RestoreViewState()
+    {
+        if (!AppSettings.Current.RestorePosition || Session.FilePath is null) return;
+        if (!AppSettings.Current.Files.TryGetValue(Session.FilePath, out var state)) return;
+        if (Enum.TryParse<ZoomMode>(state.ZoomMode, out var mode))
+        {
+            if (mode == ZoomMode.Custom) Viewer.SetZoom(state.Zoom);
+            else Viewer.SetZoomMode(mode);
+        }
+        if (state.Page > 0 && state.Page < Viewer.PageCount)
+        {
+            var page = state.Page;
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () => Viewer.GoToPage(page, record: false));
+        }
+    }
+
+    /// <summary>Remembers page and zoom for this file (reopened there next time).</summary>
+    public void SaveViewState()
+    {
+        if (Session.FilePath is null || Viewer.PageCount == 0) return;
+        var state = AppSettings.Current.StateOf(Session.FilePath);
+        state.Page = Viewer.CurrentPage;
+        state.ZoomMode = Viewer.ZoomMode.ToString();
+        state.Zoom = Viewer.Zoom;
+        AppSettings.Current.Save();
     }
 
     // ───────────────────────────── Editing ─────────────────────────────
@@ -197,16 +419,14 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         if (!Session.IsPdf)
         {
-            MessageBox.Show(Window.GetWindow(this)!, "Page editing works on PDF files only.", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Information);
+            Prompt.Info(Window.GetWindow(this), "Page editing works on PDFs", "This file can be viewed and printed, but only PDF pages can be rearranged.");
             return false;
         }
         if (IsBusy) return false;
         if (Session.Engine.IsEncrypted && !_protectionWarned)
         {
-            var answer = MessageBox.Show(Window.GetWindow(this)!,
-                "This PDF is password-protected. After a page edit it is saved without the password protection.\n\nContinue?",
-                label, MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.OK) return false;
+            if (!Prompt.Confirm(Window.GetWindow(this), "This PDF is password-protected",
+                    "After a page edit it is saved without its password protection.", "Edit anyway", warning: true)) return false;
             _protectionWarned = true;
         }
 
@@ -218,13 +438,13 @@ public partial class DocumentTab : UserControl, IDisposable
             var result = await Task.Run(() => edit(data, password));
             Session.Commit(result, label);
             if (goToPage is { } p) Viewer.GoToPage(Math.Clamp(p, 0, Viewer.PageCount - 1), record: false);
-            Status?.Invoke(this, $"{label}: done");
+            Notify(label, "Undo", Undo);
             return true;
         }
         catch (Exception ex) // top-level UI action: report any failure, never lose it
         {
             Log.Write($"{label} failed: {ex}");
-            MessageBox.Show(Window.GetWindow(this)!, $"{label} failed.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(Window.GetWindow(this), $"{label} didn't work", ex.Message);
             return false;
         }
         finally
@@ -241,11 +461,11 @@ public partial class DocumentTab : UserControl, IDisposable
         try
         {
             action();
-            Status?.Invoke(this, $"{verb}: {label}");
+            Notify($"{verb}: {label}");
         }
         catch (Exception ex) when (ex is InvalidOperationException or MuPDFCore.MuPDFException)
         {
-            MessageBox.Show(Window.GetWindow(this)!, $"{verb} failed.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(Window.GetWindow(this), $"{verb} didn't work", ex.Message);
         }
     }
 
@@ -253,7 +473,11 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         IsBusy = text is not null;
         BusyText.Text = text ?? "";
-        BusyOverlay.Visibility = IsBusy ? Visibility.Visible : Visibility.Collapsed;
+        // Most edits finish in a blink; only show the veil if one takes noticeably long.
+        _busyDelay.Stop();
+        if (IsBusy) _busyDelay.Start();
+        else BusyOverlay.Visibility = Visibility.Collapsed;
+        Cursor = IsBusy ? Cursors.AppStarting : null;
         RaiseState();
         CommandManager.InvalidateRequerySuggested();
     }
@@ -268,10 +492,12 @@ public partial class DocumentTab : UserControl, IDisposable
         Viewer.ShowHit(null);
         FindStatus.Text = SearchStatus.Text = "";
 
+        int[] organizerSelection = IsOrganizing ? Organizer.SelectedPages : [];
         _scheduler.Clear();
         Viewer.SetEngine(Session.Engine, _scheduler, keepPosition: true);
         RebuildThumbs();
         LoadOutline();
+        if (IsOrganizing) Organizer.Load(Session.Engine, organizerSelection, organizerSelection.FirstOrDefault(Viewer.CurrentPage));
         RaiseState();
     }
 
@@ -329,6 +555,7 @@ public partial class DocumentTab : UserControl, IDisposable
     public void SelectPages(IEnumerable<int> pages)
     {
         var list = pages.Where(p => p >= 0 && p < _thumbs.Count).ToList();
+        if (IsOrganizing) Organizer.Load(Session.Engine, list, list.FirstOrDefault(-1));
         if (list.Count <= 1) return;
         _syncingSelection = true;
         Thumbs.SelectedItems.Clear();
@@ -394,9 +621,14 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         e.Handled = true;
         HideInsertion();
-        if (!Session.IsPdf || IsBusy) return;
         var (before, _) = InsertionPoint(e.GetPosition(Thumbs));
+        await DropPages(e, before);
+    }
 
+    /// <summary>Handles pages dragged from this or another tab, or PDF files from Explorer, dropped before page <paramref name="before"/>.</summary>
+    public async Task DropPages(DragEventArgs e, int before)
+    {
+        if (!Session.IsPdf || IsBusy) return;
         if (e.Data.GetData(PagesFormat) is PageDragData d)
         {
             if (d.Source == this)
@@ -404,12 +636,13 @@ public partial class DocumentTab : UserControl, IDisposable
                 var order = PageEditor.MoveOrder(Viewer.PageCount, d.Pages, before);
                 if (order.SequenceEqual(Enumerable.Range(0, order.Length))) return;
                 var newFirst = Array.IndexOf(order, d.Pages[0]);
-                await RunEdit("Move pages", (data, pw) => PageEditor.Reorder(data, pw, order), newFirst);
+                if (await RunEdit($"Move {Plural(d.Pages.Length)}", (data, pw) => PageEditor.Reorder(data, pw, order), newFirst))
+                    SelectPages(Enumerable.Range(newFirst, d.Pages.Length));
             }
             else
             {
                 var src = new PdfSource(d.Source.Session.Data, d.Source.Session.Password, d.Source.Session.DisplayName);
-                await RunEdit($"Insert {d.Pages.Length} page(s) from {src.Name}", (data, pw) => PageEditor.Insert(data, pw, src, d.Pages, before), before);
+                await RunEdit($"Copy {Plural(d.Pages.Length)} from {src.Name}", (data, pw) => PageEditor.Insert(data, pw, src, d.Pages, before), before);
             }
             return;
         }
@@ -421,7 +654,9 @@ public partial class DocumentTab : UserControl, IDisposable
         }
     }
 
-    private static string[] DroppedPdfs(DragEventArgs e) =>
+    private static string Plural(int n) => n == 1 ? "1 page" : $"{n} pages";
+
+    public static string[] DroppedPdfs(DragEventArgs e) =>
         e.Data.GetData(DataFormats.FileDrop) is string[] files
             ? [.. files.Where(f => f.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) && File.Exists(f))]
             : [];
@@ -506,8 +741,7 @@ public partial class DocumentTab : UserControl, IDisposable
 
     public void ShowBookmarks()
     {
-        if (!NavPaneVisible) SetNavPaneVisible(true);
-        NavTabs.SelectedItem = BookmarksTab;
+        ShowPane(NavPaneKind.Bookmarks);
     }
 
     // ───────────────────────────── Search ─────────────────────────────
@@ -526,8 +760,7 @@ public partial class DocumentTab : UserControl, IDisposable
 
     public void ShowSearchPane()
     {
-        if (!NavPaneVisible) SetNavPaneVisible(true);
-        NavTabs.SelectedItem = SearchTab;
+        ShowPane(NavPaneKind.Search);
         if (string.IsNullOrEmpty(SearchBox.Text)) SearchBox.Text = FindBox.Text;
         SearchBox.Focus();
         SearchBox.SelectAll();
@@ -588,7 +821,7 @@ public partial class DocumentTab : UserControl, IDisposable
             if (next < 0 || next >= _results.Count)
             {
                 next = (next + _results.Count) % _results.Count;
-                Status?.Invoke(this, backwards ? "Search wrapped to the end" : "Search wrapped to the beginning");
+                Notify(backwards ? "Search wrapped to the end" : "Search wrapped to the beginning");
             }
         }
         ShowHit(next);
@@ -714,6 +947,9 @@ public partial class DocumentTab : UserControl, IDisposable
 
     public void Dispose()
     {
+        _saveViewDelay.Stop();
+        _busyDelay.Stop();
+        SaveViewState();
         CancelSearch();
         _scheduler.Dispose();
         Session.Dispose();

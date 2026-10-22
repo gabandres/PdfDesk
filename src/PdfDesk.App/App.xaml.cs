@@ -13,7 +13,8 @@ public partial class App : Application
         if (script >= 0 && script + 1 < e.Args.Length)
         {
             // Dev mode: run UI steps off-screen, separate from any running instance.
-            AppSettings.ReadOnly = true;
+            // Never touch the user's settings: save to PDFDESK_DATA if given, else not at all.
+            AppSettings.ReadOnly = Environment.GetEnvironmentVariable("PDFDESK_DATA") is not { Length: > 0 };
             base.OnStartup(e);
             var dev = new MainWindow { WindowStartupLocation = WindowStartupLocation.Manual, Left = -20000, Top = 0, Width = 1400, Height = 900, ShowActivated = false };
             dev.WindowState = WindowState.Normal;
@@ -40,10 +41,12 @@ public partial class App : Application
         };
 
         base.OnStartup(e);
+        ApplyTheme();
         var window = new MainWindow();
         MainWindow = window;
         window.Show();
-        window.OpenFiles(e.Args);
+        if (e.Args.Length > 0) window.OpenFiles(e.Args);
+        else window.ReopenLastSession();
 
         _instance.Listen(args => Dispatcher.BeginInvoke(() =>
         {
@@ -52,11 +55,21 @@ public partial class App : Application
         }));
     }
 
+    /// <summary>Applies the theme chosen in Settings (System follows Windows light/dark).</summary>
+    public static void ApplyTheme()
+    {
+        Current.ThemeMode = AppSettings.Current.Theme switch
+        {
+            "Light" => ThemeMode.Light,
+            "Dark" => ThemeMode.Dark,
+            _ => ThemeMode.System,
+        };
+    }
+
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         Log.Write($"Unhandled: {e.Exception}");
-        MessageBox.Show($"Something went wrong:\n\n{e.Exception.Message}\n\nDetails are in {Log.FilePath}", "PdfDesk",
-            MessageBoxButton.OK, MessageBoxImage.Error);
+        Prompt.Error(null, "Something went wrong", $"{e.Exception.Message}  Details were written to {Log.FilePath}");
         e.Handled = true;
     }
 

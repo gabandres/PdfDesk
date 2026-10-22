@@ -149,10 +149,19 @@ public sealed class AppSettings
 {
     private const int MaxRecent = 15;
 
-    public static string DataDirectory { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PdfDesk");
+    /// <summary>%LOCALAPPDATA%\PdfDesk, or PDFDESK_DATA when set (dev/script runs use a throwaway folder).</summary>
+    public static string DataDirectory { get; } = Environment.GetEnvironmentVariable("PDFDESK_DATA") is { Length: > 0 } dev
+        ? dev
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PdfDesk");
 
     private static string FilePath => Path.Combine(DataDirectory, "settings.json");
+
+    // The window position starts as NaN ("not set yet"), which plain JSON can't represent.
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
+    };
 
     public static AppSettings Current { get; } = Load();
 
@@ -171,13 +180,50 @@ public sealed class AppSettings
     public string ZoomMode { get; set; } = "FitWidth";
     public string LastFolder { get; set; } = "";
 
+    /// <summary>"System", "Light" or "Dark".</summary>
+    public string Theme { get; set; } = "System";
+    /// <summary>Reopen each file at the page and zoom it was left at.</summary>
+    public bool RestorePosition { get; set; } = true;
+    /// <summary>Reopen the documents that were open when PdfDesk was closed.</summary>
+    public bool ReopenTabs { get; set; }
+    public List<string> OpenTabs { get; set; } = [];
+    /// <summary>Show pages with inverted colors (night reading).</summary>
+    public bool DarkPages { get; set; }
+    public double OrganizerThumbSize { get; set; } = 170;
+    /// <summary>Per-file view state, keyed by full path (most recent 300 kept).</summary>
+    public Dictionary<string, FileState> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public sealed class FileState
+    {
+        public int Page { get; set; }
+        public string ZoomMode { get; set; } = "FitWidth";
+        public double Zoom { get; set; } = 1;
+        public DateTime LastOpened { get; set; }
+    }
+
     public void AddRecent(string path)
     {
         RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
         RecentFiles.Insert(0, path);
         if (RecentFiles.Count > MaxRecent) RecentFiles.RemoveRange(MaxRecent, RecentFiles.Count - MaxRecent);
         LastFolder = Path.GetDirectoryName(path) ?? LastFolder;
+        StateOf(path).LastOpened = DateTime.Now;
         Save();
+    }
+
+    public void RemoveRecent(string path)
+    {
+        RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+        Save();
+    }
+
+    public FileState StateOf(string path)
+    {
+        if (!Files.TryGetValue(path, out var state)) Files[path] = state = new FileState();
+        if (Files.Count > 300)
+            foreach (var old in Files.OrderBy(f => f.Value.LastOpened).Take(Files.Count - 300).Select(f => f.Key).ToList())
+                Files.Remove(old);
+        return state;
     }
 
     public void Save()
@@ -186,10 +232,11 @@ public sealed class AppSettings
         try
         {
             Directory.CreateDirectory(DataDirectory);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
+            // Settings are a convenience: failing to save them must never block opening or saving a document.
             Log.Write($"Could not save settings: {ex.Message}");
         }
     }
@@ -199,9 +246,9 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), JsonOptions) ?? new AppSettings();
         }
-        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
             Log.Write($"Settings unreadable, using defaults: {ex.Message}");
         }

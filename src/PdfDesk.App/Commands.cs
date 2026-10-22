@@ -57,7 +57,14 @@ public static class Cmd
     public static readonly RoutedUICommand Back = Make("Previous _View", nameof(Back), K(Key.Left, ModifierKeys.Alt));
     public static readonly RoutedUICommand Forward = Make("Next Vie_w", nameof(Forward), K(Key.Right, ModifierKeys.Alt));
 
+    // App
+    public static readonly RoutedUICommand CommandPalette = Make("Command _Palette…", nameof(CommandPalette), K(Key.K, ModifierKeys.Control), K(Key.P, ModifierKeys.Control | ModifierKeys.Shift));
+    public static readonly RoutedUICommand Settings = Make("_Settings…", nameof(Settings), K(Key.OemComma, ModifierKeys.Control, "Ctrl+,"));
+    public static readonly RoutedUICommand Shortcuts = Make("_Keyboard Shortcuts", nameof(Shortcuts), K(Key.F1));
+    public static readonly RoutedUICommand DarkPages = Make("_Dark Pages (Night Reading)", nameof(DarkPages));
+
     // Organize
+    public static readonly RoutedUICommand Organize = Make("_Organize Pages", nameof(Organize), K(Key.O, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand RotateRight = Make("Rotate _Clockwise", nameof(RotateRight), K(Key.OemPlus, ModifierKeys.Control | ModifierKeys.Shift, "Ctrl+Shift++"));
     public static readonly RoutedUICommand RotateLeft = Make("Rotate C_ounterclockwise", nameof(RotateLeft), K(Key.OemMinus, ModifierKeys.Control | ModifierKeys.Shift, "Ctrl+Shift+-"));
     public static readonly RoutedUICommand RotatePages = Make("_Rotate Pages…", nameof(RotatePages));

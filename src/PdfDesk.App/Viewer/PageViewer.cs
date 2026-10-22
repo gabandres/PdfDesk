@@ -90,6 +90,28 @@ public sealed class PageViewer : ScrollViewer
         Background = new SolidColorBrush(Color.FromRgb(0x80, 0x84, 0x8C));
         RenderOptions.SetBitmapScalingMode(_surface, BitmapScalingMode.HighQuality);
 
+        IsManipulationEnabled = true;
+        ManipulationStarting += (_, e) =>
+        {
+            e.ManipulationContainer = this;
+            e.Mode = ManipulationModes.Scale | ManipulationModes.Translate;
+            e.Handled = true;
+        };
+        ManipulationDelta += (_, e) =>
+        {
+            var d = e.DeltaManipulation;
+            var scale = (d.Scale.X + d.Scale.Y) / 2;
+            if (Math.Abs(scale - 1) > 0.001) SetZoom(_zoom * scale, e.ManipulationOrigin);
+            ScrollToHorizontalOffset(HorizontalOffset - d.Translation.X);
+            ScrollToVerticalOffset(VerticalOffset - d.Translation.Y);
+            e.Handled = true;
+        };
+        ManipulationInertiaStarting += (_, e) =>
+        {
+            e.TranslationBehavior.DesiredDeceleration = 0.003;
+            e.Handled = true;
+        };
+
         _surface.MouseLeftButtonDown += OnSurfaceDown;
         _surface.MouseMove += OnSurfaceMove;
         _surface.MouseLeftButtonUp += OnSurfaceUp;
@@ -105,6 +127,25 @@ public sealed class PageViewer : ScrollViewer
     }
 
     public PdfEngine? Engine => _engine;
+
+    private bool _invert;
+
+    /// <summary>Night reading: pages are shown with inverted colors (white paper becomes black).</summary>
+    public bool InvertColors
+    {
+        get => _invert;
+        set
+        {
+            if (_invert == value) return;
+            _invert = value;
+            _generation++;
+            _full.Clear();
+            _detail.Clear();
+            _scheduler?.Clear(k => k[0] is 'p' or 'd');
+            _surface.InvalidateVisual();
+            QueueUpdate();
+        }
+    }
     public int PageCount => _engine?.PageCount ?? 0;
     public int CurrentPage => _currentPage;
     public double Zoom => _zoom;
@@ -561,6 +602,7 @@ public sealed class PageViewer : ScrollViewer
         if (_engine is null || _scheduler is null || _rects.Length == 0) return;
         var engine = _engine;
         var gen = _generation;
+        var invert = _invert;
         var vp = Viewport;
         var visible = VisiblePages(vp).ToList();
         if (visible.Count == 0) return;
@@ -591,7 +633,7 @@ public sealed class PageViewer : ScrollViewer
                 {
                     var img = engine.Render(p, s);
                     var links = engine.GetLinks(p);
-                    return (ToBitmap(img), links);
+                    return (ToBitmap(img, invert), links);
                 }, result =>
                 {
                     if (gen != _generation || result is not (BitmapSource bmp, IReadOnlyList<PageLink> links)) return;
@@ -619,7 +661,7 @@ public sealed class PageViewer : ScrollViewer
                     {
                         var p = page;
                         var s = scale;
-                        _scheduler.Enqueue($"d{page}", priority + 0.5, () => ToBitmap(engine.Render(p, s, region)), result =>
+                        _scheduler.Enqueue($"d{page}", priority + 0.5, () => ToBitmap(engine.Render(p, s, region), invert), result =>
                         {
                             if (gen != _generation || result is not BitmapSource bmp) return;
                             _detail[p] = new PageBitmap(bmp, s, region);
@@ -660,6 +702,29 @@ public sealed class PageViewer : ScrollViewer
         _scheduler.Clear(key => key[0] is 'p' or 'd' or 'x' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
     }
 
+    internal static BitmapSource ToBitmap(RenderedImage img, bool invert)
+    {
+        if (invert) NightColors(img.Pixels);
+        return ToBitmap(img);
+    }
+
+    /// <summary>
+    /// Night reading: flips lightness but keeps hue (red stays red, blue stays blue), then softens the range so white
+    /// paper becomes dark gray and black text becomes light gray rather than harsh pure white on black.
+    /// </summary>
+    private static void NightColors(byte[] px)
+    {
+        const int Low = 26, Span = 200;
+        for (var i = 0; i + 2 < px.Length; i += 3)
+        {
+            int b = px[i], g = px[i + 1], r = px[i + 2];
+            var shift = 255 - Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b));
+            px[i] = (byte)(Low + (b + shift) * Span / 255);
+            px[i + 1] = (byte)(Low + (g + shift) * Span / 255);
+            px[i + 2] = (byte)(Low + (r + shift) * Span / 255);
+        }
+    }
+
     internal static BitmapSource ToBitmap(RenderedImage img)
     {
         var bmp = BitmapSource.Create(img.Width, img.Height, 96, 96, PixelFormats.Bgr24, null, img.Pixels, img.Stride);
@@ -668,6 +733,7 @@ public sealed class PageViewer : ScrollViewer
     }
 
     private static readonly Brush PageBrush = Frozen(Brushes.White);
+    private static readonly Brush DarkPageBrush = Frozen(new SolidColorBrush(Color.FromRgb(26, 26, 26)));
     private static readonly Brush ShadowBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x50, 0, 0, 0)));
     private static readonly Brush HitBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x60, 0xFF, 0xD0, 0x00)));
     private static readonly Brush ActiveHitBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0x80, 0x00)));
@@ -696,7 +762,7 @@ public sealed class PageViewer : ScrollViewer
         {
             var r = _rects[i];
             dc.DrawRectangle(ShadowBrush, null, new Rect(r.X + 2, r.Y + 2, r.Width, r.Height));
-            dc.DrawRectangle(PageBrush, null, r);
+            dc.DrawRectangle(_invert ? DarkPageBrush : PageBrush, null, r);
 
             if (_full.TryGetValue(i, out var full))
             {
@@ -1005,9 +1071,8 @@ public sealed class PageViewer : ScrollViewer
         var safe = Uri.TryCreate(uri, UriKind.Absolute, out var u) && u.Scheme is "http" or "https" or "mailto";
         if (!safe)
         {
-            var answer = MessageBox.Show(Window.GetWindow(this)!,
-                $"This document wants to open:\n\n{uri}\n\nOnly continue if you trust the document.", "Open link", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.OK) return;
+            if (!Prompt.Confirm(Window.GetWindow(this), "Open this link?",
+                $"The document wants to open {uri}. Only continue if you trust the document.", "Open link", warning: true)) return;
         }
         Shell.Open(uri);
     }
@@ -1037,7 +1102,8 @@ public sealed class PageViewer : ScrollViewer
     {
         if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
-            ZoomStep(e.Delta > 0 ? 1 : -1, e.GetPosition(this));
+            if (Math.Abs(e.Delta) >= 120 && e.Delta % 120 == 0) ZoomStep(e.Delta > 0 ? 1 : -1, e.GetPosition(this));
+            else SetZoom(_zoom * Math.Pow(1.2, e.Delta / 120.0), e.GetPosition(this));
             e.Handled = true;
             return;
         }

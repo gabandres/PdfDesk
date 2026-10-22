@@ -1,9 +1,14 @@
-using System.Globalization;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using PdfDesk.App.Viewer;
@@ -11,93 +16,109 @@ using PdfDesk.Core;
 
 namespace PdfDesk.App;
 
-public sealed class FileNameConverter(bool folder) : IValueConverter
+/// <summary>A document tab in the title bar.</summary>
+public sealed class TabModel(DocumentTab tab) : INotifyPropertyChanged
 {
-    public static FileNameConverter Name { get; } = new(false);
-    public static FileNameConverter Folder { get; } = new(true);
+    public DocumentTab Tab { get; } = tab;
+    public string Title => Tab.Session.DisplayName;
+    public string ToolTip => Tab.Session.FilePath ?? $"{Tab.Session.DisplayName} (not saved yet)";
+    public Visibility DirtyVisibility => Tab.Session.IsDirty ? Visibility.Visible : Visibility.Collapsed;
 
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
-        value is string path ? (folder ? Path.GetDirectoryName(path) ?? "" : Path.GetFileName(path)) : "";
+    public void Refresh()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Title)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ToolTip)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DirtyVisibility)));
+    }
 
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotSupportedException();
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
+
+/// <summary>A recent file card on the start page; the first-page preview loads in the background.</summary>
+public sealed class RecentItem(string path, string detail) : INotifyPropertyChanged
+{
+    private BitmapSource? _thumbnail;
+
+    public string Path { get; } = path;
+    public string Name => System.IO.Path.GetFileName(Path);
+    public string Detail { get; } = detail;
+
+    public BitmapSource? Thumbnail
+    {
+        get => _thumbnail;
+        set
+        {
+            _thumbnail = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+/// <summary>A command palette entry.</summary>
+public sealed record PaletteItem(string Name, string Category, string Gesture, string Glyph, Action Run);
 
 public partial class MainWindow : Window
 {
-    private static readonly string[] ZoomPresets = ["Fit Width", "Fit Page", "25%", "50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%", "800%", "1600%"];
-    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(6) };
-    private bool _updatingZoomBox;
+    private readonly ObservableCollection<TabModel> _tabs = [];
     private WindowState _preFullScreenState;
     private bool _fullScreen;
+    private List<PaletteItem> _paletteAll = [];
+    private static readonly Dictionary<string, BitmapSource> RecentThumbs = new(StringComparer.OrdinalIgnoreCase);
 
     public MainWindow()
     {
         InitializeComponent();
+        TabStrip.ItemsSource = _tabs;
         RestorePlacement();
         BindCommands();
         RefreshRecent();
 
-        ZoomBox.ItemsSource = ZoomPresets;
-        ZoomBox.SelectionChanged += (_, _) =>
+        TabStrip.SelectionChanged += (_, _) => ShowActiveTab();
+        TabStrip.PreviewMouseUp += (_, e) =>
         {
-            if (!_updatingZoomBox && ZoomBox.SelectedItem is string s) ApplyZoomText(s);
+            if (e.ChangedButton == MouseButton.Middle && ItemUnder(e.OriginalSource) is { } t) CloseTab(t);
         };
-        ZoomBox.AddHandler(KeyDownEvent, new KeyEventHandler((_, e) =>
+        // Hovering a page drag over a tab switches to it, so pages can be dropped into another document.
+        TabStrip.AllowDrop = true;
+        TabStrip.DragOver += (_, e) =>
         {
-            if (e.Key != Key.Enter) return;
-            ApplyZoomText(ZoomBox.Text);
-            ActiveTab?.PageView.Focus();
-            e.Handled = true;
-        }), handledEventsToo: true);
-        ZoomBox.LostKeyboardFocus += (_, _) => UpdateUi();
+            if (ItemUnder(e.OriginalSource) is { } t) TabStrip.SelectedItem = t;
+        };
 
-        PageBox.KeyDown += (_, e) =>
-        {
-            if (e.Key == Key.Enter && ActiveTab is { } t && int.TryParse(PageBox.Text.Trim(), out var n))
-            {
-                t.PageView.GoToPage(n - 1);
-                t.PageView.Focus();
-                e.Handled = true;
-            }
-            else if (e.Key == Key.Escape)
-            {
-                UpdateUi();
-                ActiveTab?.PageView.Focus();
-            }
-        };
-        PageBox.GotKeyboardFocus += (_, _) => PageBox.SelectAll();
-        PageBox.LostKeyboardFocus += (_, _) => UpdateUi();
-
-        Docs.SelectionChanged += (s, e) =>
-        {
-            if (e.OriginalSource == Docs) UpdateUi();
-        };
+        DragOver += OnWindowDragOver;
+        DragLeave += (_, _) => DropOverlay.Visibility = Visibility.Collapsed;
         Drop += OnFileDrop;
-        DragOver += (_, e) =>
-        {
-            if (e.Handled) return;
-            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
-            e.Handled = true;
-        };
         Closing += OnClosing;
-        PreviewKeyDown += (_, e) =>
+        StateChanged += (_, _) => FitToScreenWhenMaximized();
+        SourceInitialized += (_, _) =>
         {
-            if (e.Key == Key.Escape && _fullScreen)
-            {
-                ToggleFullScreen();
-                e.Handled = true;
-            }
+            FitToScreenWhenMaximized();
+            MeasureCaptionButtons();
         };
-        _statusTimer.Tick += (_, _) =>
+        DpiChanged += (_, _) => MeasureCaptionButtons();
+        PreviewKeyDown += OnPreviewKey;
+
+        PaletteBox.TextChanged += (_, _) => FilterPalette();
+        PaletteBox.PreviewKeyDown += OnPaletteKey;
+        PaletteList.MouseUp += (_, _) => RunPaletteSelection();
+        Palette.MouseDown += (_, e) =>
         {
-            _statusTimer.Stop();
-            StatusText.Text = "";
+            if (e.OriginalSource == Palette) ClosePalette();
         };
         UpdateUi();
     }
 
-    public DocumentTab? ActiveTab => (Docs.SelectedItem as TabItem)?.Content as DocumentTab;
-    private IEnumerable<DocumentTab> Tabs => Docs.Items.OfType<TabItem>().Select(t => (DocumentTab)t.Content);
+    public DocumentTab? ActiveTab => (TabStrip.SelectedItem as TabModel)?.Tab;
+    private IEnumerable<DocumentTab> Tabs => _tabs.Select(t => t.Tab);
+
+    private static TabModel? ItemUnder(object source)
+    {
+        for (var d = source as DependencyObject; d is not null; d = VisualTreeHelper.GetParent(d))
+            if (d is FrameworkElement { DataContext: TabModel t }) return t;
+        return null;
+    }
 
     public void BringToFront()
     {
@@ -108,12 +129,99 @@ public partial class MainWindow : Window
         Focus();
     }
 
-    public void ShowStatus(string text)
+    // ───────────────────────────── Title bar ─────────────────────────────
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
     {
-        StatusText.Text = text;
-        _statusTimer.Stop();
-        _statusTimer.Start();
+        public int Left, Top, Right, Bottom;
     }
+
+    /// <summary>Reserves exactly the width DWM uses for the minimize/maximize/close buttons.</summary>
+    private void MeasureCaptionButtons()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        const int DWMWA_CAPTION_BUTTON_BOUNDS = 5;
+        if (hwnd != IntPtr.Zero && DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, out var r, Marshal.SizeOf<RECT>()) == 0 && r.Right > r.Left)
+            CaptionColumn.Width = new GridLength((r.Right - r.Left) / VisualTreeHelper.GetDpi(this).DpiScaleX + 8);
+    }
+
+    /// <summary>A maximized window overhangs the screen by its resize frame; pad the content so nothing is cut off.</summary>
+    private void FitToScreenWhenMaximized()
+    {
+        var f = SystemParameters.WindowResizeBorderThickness;
+        Root.Margin = WindowState == WindowState.Maximized && !_fullScreen
+            ? new Thickness(f.Left + SystemParameters.FixedFrameVerticalBorderWidth, f.Top + SystemParameters.FixedFrameHorizontalBorderHeight,
+                f.Right + SystemParameters.FixedFrameVerticalBorderWidth, f.Bottom + SystemParameters.FixedFrameHorizontalBorderHeight)
+            : new Thickness(0);
+    }
+
+    // ───────────────────────────── Toasts ─────────────────────────────
+
+    /// <summary>Shows a short message at the bottom-left; with an action (e.g. Undo) it stays a little longer.</summary>
+    public void ShowToast(Toast toast)
+    {
+        var text = new TextBlock { Text = toast.Message, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 };
+        var icon = new TextBlock
+        {
+            Text = toast.IsError ? "" : toast.Action is not null ? "" : "",
+            Style = (Style)FindResource("Icon"),
+            Margin = new Thickness(0, 0, 12, 0),
+            Foreground = (Brush)FindResource(toast.IsError ? "SystemFillColorCriticalBrush" : "AccentTextFillColorPrimaryBrush"),
+        };
+        var row = new DockPanel();
+        var card = new Border
+        {
+            Child = row,
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14, 10, 8, 10),
+            Margin = new Thickness(0, 8, 0, 0),
+            BorderThickness = new Thickness(1),
+            Background = (Brush)FindResource("SolidBackgroundFillColorQuarternaryBrush"),
+            BorderBrush = (Brush)FindResource("CardStrokeColorDefaultBrush"),
+            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 2, Opacity = 0.22 },
+        };
+        AutomationProperties.SetLiveSetting(card, AutomationLiveSetting.Polite);
+        AutomationProperties.SetName(card, toast.Message);
+
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(toast.Action is null ? 3.5 : 7) };
+        void Dismiss()
+        {
+            timer.Stop();
+            Toasts.Children.Remove(card);
+        }
+        timer.Tick += (_, _) => Dismiss();
+        card.MouseEnter += (_, _) => timer.Stop();
+        card.MouseLeave += (_, _) => timer.Start();
+
+        var close = new Button { Style = (Style)FindResource("IconButton"), Content = "", FontSize = 10, Height = 26, MinWidth = 26, ToolTip = "Dismiss" };
+        close.Click += (_, _) => Dismiss();
+        DockPanel.SetDock(close, Dock.Right);
+        row.Children.Add(close);
+        if (toast.Action is { } action)
+        {
+            var act = new Button { Content = toast.ActionLabel ?? "OK", Style = (Style)FindResource("TextButton"), Margin = new Thickness(12, 0, 0, 0), FontWeight = FontWeights.SemiBold };
+            act.Click += (_, _) =>
+            {
+                Dismiss();
+                action();
+            };
+            DockPanel.SetDock(act, Dock.Right);
+            row.Children.Add(act);
+        }
+        DockPanel.SetDock(icon, Dock.Left);
+        row.Children.Add(icon);
+        row.Children.Add(text);
+
+        Toasts.Children.Add(card);
+        while (Toasts.Children.Count > 3) Toasts.Children.RemoveAt(0);
+        timer.Start();
+    }
+
+    public void ShowStatus(string text) => ShowToast(new Toast(text));
 
     // ───────────────────────────── Open / close ─────────────────────────────
 
@@ -127,20 +235,18 @@ public partial class MainWindow : Window
     {
         if (!File.Exists(path))
         {
-            MessageBox.Show(this, $"File not found:\n{path}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
-            AppSettings.Current.RecentFiles.Remove(path);
-            AppSettings.Current.Save();
+            ShowToast(new Toast($"Couldn't find {Path.GetFileName(path)}. It was removed from the recent list.", IsError: true));
+            AppSettings.Current.RemoveRecent(path);
             RefreshRecent();
             return;
         }
 
         var full = Path.GetFullPath(path);
-        foreach (TabItem item in Docs.Items)
-            if (string.Equals(((DocumentTab)item.Content).Session.FilePath, full, StringComparison.OrdinalIgnoreCase))
-            {
-                Docs.SelectedItem = item;
-                return;
-            }
+        if (_tabs.FirstOrDefault(t => string.Equals(t.Tab.Session.FilePath, full, StringComparison.OrdinalIgnoreCase)) is { } open)
+        {
+            TabStrip.SelectedItem = open;
+            return;
+        }
 
         string? password = null;
         var wrong = false;
@@ -167,7 +273,8 @@ public partial class MainWindow : Window
             {
                 Mouse.OverrideCursor = null;
                 Log.Write($"Open {full} failed: {ex}");
-                MessageBox.Show(this, $"Couldn't open {Path.GetFileName(full)}.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Prompt.Error(this, $"Couldn't open {Path.GetFileName(full)}",
+                    $"The file may be damaged or in a format PdfDesk can't read.{Environment.NewLine}{Environment.NewLine}{ex.Message}");
                 return;
             }
         }
@@ -175,76 +282,76 @@ public partial class MainWindow : Window
 
     public void OpenSession(DocumentSession session)
     {
-        var tab = new DocumentTab(session);
-        var title = new TextBlock { VerticalAlignment = VerticalAlignment.Center, MaxWidth = 240, TextTrimming = TextTrimming.CharacterEllipsis };
-        var close = new Button
+        var tab = new DocumentTab(session) { Visibility = Visibility.Collapsed };
+        var model = new TabModel(tab);
+        tab.StateChanged += (_, _) =>
         {
-            Content = "",
-            FontFamily = (System.Windows.Media.FontFamily)FindResource("Icons"),
-            FontSize = 10,
-            Padding = new Thickness(4),
-            Margin = new Thickness(8, 0, -4, 0),
-            Background = System.Windows.Media.Brushes.Transparent,
-            BorderThickness = new Thickness(0),
-            ToolTip = "Close (Ctrl+W)",
-            Focusable = false,
-        };
-        var header = new StackPanel { Orientation = Orientation.Horizontal };
-        header.Children.Add(title);
-        header.Children.Add(close);
-        var item = new TabItem { Header = header, Content = tab, AllowDrop = true, ToolTip = session.FilePath ?? session.DisplayName };
-
-        close.Click += (_, _) => CloseTab(item);
-        header.MouseUp += (_, e) =>
-        {
-            if (e.ChangedButton == MouseButton.Middle) CloseTab(item);
-        };
-        // Hovering a page drag over a tab switches to it, so pages can be dropped into another document.
-        item.DragEnter += (_, _) => Docs.SelectedItem = item;
-
-        void Refresh()
-        {
-            title.Text = tab.Header;
-            item.ToolTip = session.FilePath ?? session.DisplayName;
+            model.Refresh();
             if (ActiveTab == tab) UpdateUi();
-        }
-        tab.StateChanged += (_, _) => Refresh();
-        tab.Status += (_, m) => ShowStatus(m);
-        Refresh();
-
-        Docs.Items.Add(item);
-        Docs.SelectedItem = item;
+        };
+        tab.Toast += (_, t) => ShowToast(t);
+        DocsHost.Children.Add(tab);
+        _tabs.Add(model);
+        TabStrip.SelectedItem = model;
         Dispatcher.BeginInvoke(DispatcherPriority.Input, () => tab.PageView.Focus());
     }
 
-    /// <summary>Closes a tab, asking to save unsaved changes. False if the user cancelled.</summary>
-    private bool CloseTab(TabItem item)
+    private void ShowActiveTab()
     {
-        var tab = (DocumentTab)item.Content;
+        var active = ActiveTab;
+        foreach (var t in Tabs) t.Visibility = t == active ? Visibility.Visible : Visibility.Collapsed;
+        UpdateUi();
+        if (active is not null) Dispatcher.BeginInvoke(DispatcherPriority.Input, () => active.PageView.Focus());
+    }
+
+    private void OnTabCloseClick(object sender, RoutedEventArgs e)
+    {
+        if (ItemUnder(e.OriginalSource) is { } t) CloseTab(t);
+        e.Handled = true;
+    }
+
+    /// <summary>Closes a tab, offering to save unsaved changes. False if the user cancelled.</summary>
+    private bool CloseTab(TabModel model)
+    {
+        var tab = model.Tab;
         if (tab.IsBusy) return false;
         if (tab.Session.IsDirty)
         {
-            Docs.SelectedItem = item;
-            var answer = MessageBox.Show(this, $"Save changes to \"{tab.Session.DisplayName}\" before closing?", "PdfDesk",
-                MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-            if (answer == MessageBoxResult.Cancel) return false;
-            if (answer == MessageBoxResult.Yes && !Save(tab)) return false;
+            TabStrip.SelectedItem = model;
+            switch (Prompt.SaveChanges(this, tab.Session.DisplayName))
+            {
+                case SaveChoice.Cancel:
+                    return false;
+                case SaveChoice.Save when !Save(tab):
+                    return false;
+            }
         }
-        Docs.Items.Remove(item);
+        var index = _tabs.IndexOf(model);
+        _tabs.Remove(model);
+        DocsHost.Children.Remove(tab);
         tab.Dispose();
+        if (_tabs.Count > 0) TabStrip.SelectedItem = _tabs[Math.Clamp(index, 0, _tabs.Count - 1)];
         UpdateUi();
         return true;
     }
 
-    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private void OnClosing(object? sender, CancelEventArgs e)
     {
-        foreach (var item in Docs.Items.OfType<TabItem>().ToList())
-            if (!CloseTab(item))
+        var open = _tabs.Where(t => t.Tab.Session.FilePath is not null).Select(t => t.Tab.Session.FilePath!).ToList();
+        foreach (var model in _tabs.ToList())
+            if (!CloseTab(model))
             {
                 e.Cancel = true;
                 return;
             }
+        AppSettings.Current.OpenTabs = open;
         SavePlacement();
+    }
+
+    /// <summary>On startup: reopen last session's documents if the user asked for that.</summary>
+    public void ReopenLastSession()
+    {
+        if (AppSettings.Current.ReopenTabs) OpenFiles(AppSettings.Current.OpenTabs.Where(File.Exists).ToList());
     }
 
     private bool Save(DocumentTab tab)
@@ -276,20 +383,44 @@ public partial class MainWindow : Window
             tab.Session.SaveAs(path);
             AppSettings.Current.AddRecent(path);
             RefreshRecent();
-            ShowStatus($"Saved {Path.GetFileName(path)}");
+            ShowToast(new Toast($"Saved {Path.GetFileName(path)}", "Show in folder", () => Shell.ShowInFolder(path)));
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Log.Write($"Save {path} failed: {ex}");
-            MessageBox.Show(this, $"Couldn't save {Path.GetFileName(path)}.\n\n{ex.Message}\n\nIf another program has the file open, close it or use Save As.",
-                "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(this, $"Couldn't save {Path.GetFileName(path)}",
+                $"{ex.Message}{Environment.NewLine}{Environment.NewLine}If another program has the file open, close it there, or use Save As to save a copy.");
             return false;
         }
     }
 
+    // ───────────────────────────── Drag and drop ─────────────────────────────
+
+    private void OnWindowDragOver(object sender, DragEventArgs e)
+    {
+        // Thumbnails and the organizer handle their own drops (insert pages); elsewhere, files open in tabs.
+        if (e.Handled)
+        {
+            DropOverlay.Visibility = Visibility.Collapsed;
+            return;
+        }
+        if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
+        {
+            e.Effects = DragDropEffects.Copy;
+            DropText.Text = files.Length == 1 ? $"Drop to open {Path.GetFileName(files[0])}" : $"Drop to open {files.Length} files";
+            DropOverlay.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            e.Effects = DragDropEffects.None;
+        }
+        e.Handled = true;
+    }
+
     private void OnFileDrop(object sender, DragEventArgs e)
     {
+        DropOverlay.Visibility = Visibility.Collapsed;
         if (e.Handled || e.Data.GetData(DataFormats.FileDrop) is not string[] files) return;
         e.Handled = true;
         Activate();
@@ -308,17 +439,22 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) == true) OpenFiles(dlg.FileNames);
     }
 
+    // ───────────────────────────── Recent files ─────────────────────────────
+
     private void RefreshRecent()
     {
         var recent = AppSettings.Current.RecentFiles.ToList();
-        RecentList.ItemsSource = recent;
+        var items = recent.Select(p => new RecentItem(p, Describe(p))).ToList();
+        RecentList.ItemsSource = items;
         RecentHeader.Visibility = recent.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        NoRecent.Visibility = recent.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+        LoadRecentThumbnails(items);
 
         RecentMenu.Items.Clear();
         for (var i = 0; i < recent.Count; i++)
         {
             var path = recent[i];
-            var mi = new MenuItem { Header = $"_{(i + 1) % 10} {Path.GetFileName(path)}", ToolTip = path };
+            var mi = new MenuItem { Header = $"_{(i + 1) % 10} {Path.GetFileName(path).Replace("_", "__")}", ToolTip = path };
             mi.Click += (_, _) => OpenFile(path);
             RecentMenu.Items.Add(mi);
         }
@@ -326,20 +462,96 @@ public partial class MainWindow : Window
         {
             RecentMenu.Items.Add(new Separator());
             var clear = new MenuItem { Header = "_Clear Recent" };
-            clear.Click += (_, _) =>
-            {
-                AppSettings.Current.RecentFiles.Clear();
-                AppSettings.Current.Save();
-                RefreshRecent();
-            };
+            clear.Click += OnClearRecent;
             RecentMenu.Items.Add(clear);
         }
         RecentMenu.IsEnabled = recent.Count > 0;
     }
 
+    private static string Describe(string path)
+    {
+        var when = AppSettings.Current.Files.TryGetValue(path, out var s) && s.LastOpened != default ? Ago(s.LastOpened) : null;
+        var folder = Path.GetFileName(Path.GetDirectoryName(path)) ?? "";
+        return when is null ? folder : $"{when} · {folder}";
+
+        static string Ago(DateTime t)
+        {
+            var d = DateTime.Now - t;
+            return d.TotalMinutes < 1 ? "Just now"
+                : d.TotalHours < 1 ? $"{(int)d.TotalMinutes} min ago"
+                : d.TotalDays < 1 ? $"{(int)d.TotalHours} h ago"
+                : d.TotalDays < 2 ? "Yesterday"
+                : d.TotalDays < 7 ? $"{(int)d.TotalDays} days ago"
+                : t.ToString("MMM d");
+        }
+    }
+
+    /// <summary>Renders each recent file's first page in the background (cached for the session).</summary>
+    private void LoadRecentThumbnails(List<RecentItem> items)
+    {
+        var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        foreach (var item in items)
+            if (RecentThumbs.TryGetValue(item.Path, out var cached)) item.Thumbnail = cached;
+
+        var todo = items.Where(i => i.Thumbnail is null).ToList();
+        if (todo.Count == 0) return;
+        _ = Task.Run(() =>
+        {
+            foreach (var item in todo)
+            {
+                try
+                {
+                    if (!File.Exists(item.Path)) continue;
+                    using var engine = PdfEngine.OpenPreview(item.Path);
+                    if (engine is null || engine.PageCount == 0) continue;
+                    var g = engine.GetPage(0);
+                    var scale = Math.Min(140 / g.Width, 170 / g.Height) * dpi;
+                    var bmp = PageViewer.ToBitmap(engine.Render(0, scale));
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        RecentThumbs[item.Path] = bmp;
+                        item.Thumbnail = bmp;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"Preview of {item.Path} failed: {ex.Message}");
+                }
+            }
+        });
+    }
+
     private void OnRecentClick(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { Tag: string path }) OpenFile(path);
+    }
+
+    private void OnRecentMenuOpen(object sender, RoutedEventArgs e) => OnRecentClick(sender, e);
+
+    private void OnRecentMenuShow(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string path }) Shell.ShowInFolder(path);
+    }
+
+    private void OnRecentMenuRemove(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string path }) return;
+        AppSettings.Current.RemoveRecent(path);
+        RefreshRecent();
+    }
+
+    private void OnClearRecent(object sender, RoutedEventArgs e)
+    {
+        var previous = AppSettings.Current.RecentFiles.ToList();
+        AppSettings.Current.RecentFiles.Clear();
+        AppSettings.Current.Save();
+        RefreshRecent();
+        ShowToast(new Toast("Recent list cleared", "Undo", () =>
+        {
+            AppSettings.Current.RecentFiles = previous;
+            AppSettings.Current.Save();
+            RefreshRecent();
+        }));
     }
 
     // ───────────────────────────── Commands ─────────────────────────────
@@ -353,20 +565,32 @@ public partial class MainWindow : Window
         CommandBindings.Add(new CommandBinding(command, (_, e) => { execute(); e.Handled = true; }, (_, e) => { e.CanExecute = true; e.Handled = true; }));
 
     private void BindEdit(ICommand command, Func<DocumentTab, Task> run, Func<DocumentTab, bool>? can = null) =>
-        Bind(command, t => _ = run(t), t => t.Session.IsPdf && (can?.Invoke(t) ?? true));
+        Bind(command, t => _ = run(t), t => t.Session.IsPdf && t.PageView.PageCount > 0 && (can?.Invoke(t) ?? true));
 
     private void BindCommands()
     {
         BindAlways(Cmd.Open, ShowOpenDialog);
         BindAlways(Cmd.Combine, () => _ = Organize.Combine(this, this));
         BindAlways(Cmd.Exit, Close);
+        BindAlways(Cmd.CommandPalette, OpenPalette);
+        BindAlways(Cmd.Settings, ShowSettings);
+        BindAlways(Cmd.Shortcuts, () => ShortcutsWindow.Show(this, MainMenu));
+        BindAlways(Cmd.FullScreen, ToggleFullScreen);
+        BindAlways(Cmd.DarkPages, () =>
+        {
+            AppSettings.Current.DarkPages = !AppSettings.Current.DarkPages;
+            AppSettings.Current.Save();
+            foreach (var t in Tabs) t.PageView.InvertColors = AppSettings.Current.DarkPages;
+            UpdateUi();
+        });
+
         Bind(Cmd.Save, t => Save(t), t => t.Session.IsDirty || t.Session.FilePath is null);
         Bind(Cmd.SaveAs, t => SaveAs(t));
         Bind(Cmd.ShowInFolder, t => Shell.ShowInFolder(t.Session.FilePath!), t => t.Session.FilePath is not null);
-        Bind(Cmd.CloseDoc, _ => CloseTab((TabItem)Docs.SelectedItem));
-        Bind(Cmd.CloseAll, _ => { foreach (var item in Docs.Items.OfType<TabItem>().ToList()) if (!CloseTab(item)) break; });
-        Bind(Cmd.Print, t => _ = FileActions.Print(this, t));
-        Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this));
+        Bind(Cmd.CloseDoc, _ => { if (TabStrip.SelectedItem is TabModel m) CloseTab(m); });
+        Bind(Cmd.CloseAll, _ => { foreach (var m in _tabs.ToList()) if (!CloseTab(m)) break; });
+        Bind(Cmd.Print, t => _ = FileActions.Print(this, t), t => t.PageView.PageCount > 0);
+        Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this), t => t.PageView.PageCount > 0);
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));
 
         Bind(Cmd.Undo, t => t.Undo(), t => t.Session.CanUndo);
@@ -375,21 +599,22 @@ public partial class MainWindow : Window
         Bind(Cmd.SelectAll, t =>
         {
             if (Keyboard.FocusedElement is TextBox tb) tb.SelectAll();
+            else if (t.IsOrganizing) t.SelectAllPages();
             else t.PageView.SelectAll();
         });
-        Bind(Cmd.Find, t => t.ShowFindBar());
+        Bind(Cmd.Find, t => { t.SetOrganizing(false); t.ShowFindBar(); });
         Bind(Cmd.FindNext, t => t.FindNext(false));
         Bind(Cmd.FindPrevious, t => t.FindNext(true));
         Bind(Cmd.SearchPane, t => t.ShowSearchPane());
-        Bind(Cmd.ToolHand, t => t.PageView.Tool = ViewerTool.Hand);
-        Bind(Cmd.ToolSelect, t => t.PageView.Tool = ViewerTool.SelectText);
-        Bind(Cmd.ToolSnapshot, t => t.PageView.Tool = ViewerTool.Snapshot);
+        Bind(Cmd.ToolHand, t => t.PageView.Tool = ViewerTool.Hand, t => !t.IsOrganizing);
+        Bind(Cmd.ToolSelect, t => t.PageView.Tool = ViewerTool.SelectText, t => !t.IsOrganizing);
+        Bind(Cmd.ToolSnapshot, t => t.PageView.Tool = ViewerTool.Snapshot, t => !t.IsOrganizing);
 
-        Bind(Cmd.ZoomIn, t => t.PageView.ZoomStep(1));
-        Bind(Cmd.ZoomOut, t => t.PageView.ZoomStep(-1));
-        Bind(Cmd.ActualSize, t => t.PageView.SetZoom(1));
-        Bind(Cmd.FitWidth, t => SetZoomMode(t, ZoomMode.FitWidth));
-        Bind(Cmd.FitPage, t => SetZoomMode(t, ZoomMode.FitPage));
+        Bind(Cmd.ZoomIn, t => t.PageView.ZoomStep(1), t => !t.IsOrganizing);
+        Bind(Cmd.ZoomOut, t => t.PageView.ZoomStep(-1), t => !t.IsOrganizing);
+        Bind(Cmd.ActualSize, t => t.PageView.SetZoom(1), t => !t.IsOrganizing);
+        Bind(Cmd.FitWidth, t => t.SetZoomMode(ZoomMode.FitWidth), t => !t.IsOrganizing);
+        Bind(Cmd.FitPage, t => t.SetZoomMode(ZoomMode.FitPage), t => !t.IsOrganizing);
         Bind(Cmd.LayoutSingle, t => SetLayout(t, ViewLayout.SinglePage));
         Bind(Cmd.LayoutContinuous, t => SetLayout(t, ViewLayout.Continuous));
         Bind(Cmd.LayoutFacing, t => SetLayout(t, ViewLayout.Facing));
@@ -398,19 +623,17 @@ public partial class MainWindow : Window
         Bind(Cmd.PrevPage, t => t.PageView.PreviousPage(), t => t.PageView.CurrentPage > 0);
         Bind(Cmd.NextPage, t => t.PageView.NextPage(), t => t.PageView.CurrentPage < t.PageView.PageCount - 1);
         Bind(Cmd.LastPage, t => t.PageView.GoToPage(t.PageView.PageCount - 1), t => t.PageView.CurrentPage < t.PageView.PageCount - 1);
-        Bind(Cmd.GoToPage, _ => { PageBox.Focus(); PageBox.SelectAll(); });
+        Bind(Cmd.GoToPage, t => { t.SetOrganizing(false); t.FocusPageBox(); });
         Bind(Cmd.Back, t => t.PageView.GoBack(), t => t.PageView.CanGoBack);
         Bind(Cmd.Forward, t => t.PageView.GoForward(), t => t.PageView.CanGoForward);
         Bind(Cmd.NavPane, t =>
         {
             var show = !t.NavPaneVisible;
             foreach (var tab in Tabs) tab.SetNavPaneVisible(show);
-            AppSettings.Current.NavPaneVisible = show;
-            AppSettings.Current.Save();
             UpdateUi();
         });
-        BindAlways(Cmd.FullScreen, ToggleFullScreen);
 
+        Bind(Cmd.Organize, t => t.SetOrganizing(!t.IsOrganizing), t => t.Session.IsPdf && t.PageView.PageCount > 0);
         BindEdit(Cmd.RotateRight, t => Organize.RotateSelected(t, 90));
         BindEdit(Cmd.RotateLeft, t => Organize.RotateSelected(t, -90));
         BindEdit(Cmd.RotatePages, t => Organize.RotateDialog(this, t));
@@ -440,61 +663,202 @@ public partial class MainWindow : Window
             Clipboard.SetText(text);
             ShowStatus($"Copied {text.Length:N0} characters");
         }
-        catch (System.Runtime.InteropServices.COMException ex)
+        catch (COMException ex)
         {
-            ShowStatus($"Couldn't copy: {ex.Message}");
+            ShowToast(new Toast($"Couldn't copy: {ex.Message}", IsError: true));
         }
-    }
-
-    private void SetZoomMode(DocumentTab t, ZoomMode mode)
-    {
-        t.PageView.SetZoomMode(mode);
-        AppSettings.Current.ZoomMode = mode.ToString();
-        AppSettings.Current.Save();
-        UpdateUi();
     }
 
     private void SetLayout(DocumentTab t, ViewLayout layout)
     {
+        t.SetOrganizing(false);
         t.PageView.SetLayout(layout);
         AppSettings.Current.Layout = layout.ToString();
         AppSettings.Current.Save();
         UpdateUi();
     }
 
-    private void ApplyZoomText(string text)
+    private void OnPreviewKey(object sender, KeyEventArgs e)
     {
-        if (ActiveTab is not { } t) return;
-        text = text.Trim();
-        if (text.Equals("Fit Width", StringComparison.OrdinalIgnoreCase)) SetZoomMode(t, ZoomMode.FitWidth);
-        else if (text.Equals("Fit Page", StringComparison.OrdinalIgnoreCase)) SetZoomMode(t, ZoomMode.FitPage);
-        else if (double.TryParse(text.TrimEnd('%', ' '), NumberStyles.Float, CultureInfo.CurrentCulture, out var pct) && pct > 0)
+        if (e.Key == Key.Escape && Palette.Visibility == Visibility.Visible)
         {
-            t.PageView.SetZoom(pct / 100);
-            AppSettings.Current.ZoomMode = nameof(ZoomMode.Custom);
+            ClosePalette();
+            e.Handled = true;
         }
-        UpdateUi();
+        else if (e.Key == Key.Escape && _fullScreen)
+        {
+            ToggleFullScreen();
+            e.Handled = true;
+        }
     }
 
     private void ToggleFullScreen()
     {
         _fullScreen = !_fullScreen;
-        var chrome = _fullScreen ? Visibility.Collapsed : Visibility.Visible;
-        MainMenu.Visibility = CommandBar.Visibility = StatusBarBorder.Visibility = chrome;
-        foreach (var tab in Tabs) tab.SetNavPaneVisible(!_fullScreen && AppSettings.Current.NavPaneVisible);
+        TitleBar.Visibility = CommandBar.Visibility = _fullScreen ? Visibility.Collapsed : Visibility.Visible;
+        Root.RowDefinitions[0].Height = new GridLength(_fullScreen ? 0 : 40);
         if (_fullScreen)
         {
             _preFullScreenState = WindowState;
             WindowStyle = WindowStyle.None;
             if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal; // re-maximize so the taskbar is covered
             WindowState = WindowState.Maximized;
-            ShowStatus("Press Esc or F11 to leave full screen");
+            ShowStatus("Full screen · press Esc or F11 to leave");
         }
         else
         {
             WindowStyle = WindowStyle.SingleBorderWindow;
             WindowState = _preFullScreenState;
         }
+        FitToScreenWhenMaximized();
+    }
+
+    // ───────────────────────────── Command palette ─────────────────────────────
+
+    private void OpenPalette()
+    {
+        _paletteAll = BuildPaletteItems();
+        Palette.Visibility = Visibility.Visible;
+        PaletteBox.Text = "";
+        FilterPalette();
+        PaletteBox.Focus();
+    }
+
+    private void ClosePalette()
+    {
+        Palette.Visibility = Visibility.Collapsed;
+        ActiveTab?.PageView.Focus();
+    }
+
+    /// <summary>Every menu command (so the palette never drifts from the menus), plus recent files.</summary>
+    private List<PaletteItem> BuildPaletteItems()
+    {
+        var items = new List<PaletteItem>();
+        void Walk(ItemsControl parent, string category)
+        {
+            foreach (var mi in parent.Items.OfType<MenuItem>())
+            {
+                if (mi == RecentMenu) continue;
+                var name = (mi.Header as string ?? (mi.Command as RoutedUICommand)?.Text ?? "").Replace("_", "").TrimEnd('…', '.');
+                if (mi.Items.Count > 0)
+                {
+                    Walk(mi, name);
+                    continue;
+                }
+                if (name.Length == 0 || items.Exists(i => i.Name == name)) continue;
+                if (mi.Command is RoutedUICommand cmd)
+                {
+                    var gesture = cmd.InputGestures.OfType<KeyGesture>().FirstOrDefault()?.GetDisplayStringForCulture(System.Globalization.CultureInfo.CurrentCulture)
+                                  ?? mi.InputGestureText ?? "";
+                    items.Add(new PaletteItem(name, category, gesture, "", () => { if (cmd.CanExecute(null, this)) cmd.Execute(null, this); }));
+                }
+                else
+                {
+                    var item = mi;
+                    items.Add(new PaletteItem(name, category, "", "", () => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent))));
+                }
+            }
+        }
+        Walk(MainMenu, "");
+        foreach (var path in AppSettings.Current.RecentFiles)
+        {
+            var p = path;
+            items.Add(new PaletteItem(Path.GetFileName(p), "Open recent", "", "", () => OpenFile(p)));
+        }
+        return items;
+    }
+
+    private void FilterPalette()
+    {
+        var q = PaletteBox.Text.Trim();
+        List<PaletteItem> result;
+        if (q.Length == 0)
+        {
+            result = [.. _paletteAll.Where(i => i.Category != "Open recent").Take(60)];
+        }
+        else
+        {
+            var words = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            result = [.. _paletteAll
+                .Select(i => (Item: i, Score: Score(i, words)))
+                .Where(x => x.Score > 0)
+                .OrderByDescending(x => x.Score)
+                .Select(x => x.Item)
+                .Take(60)];
+        }
+        if (int.TryParse(q, out var page) && ActiveTab is { } t && page >= 1 && page <= t.PageView.PageCount)
+            result.Insert(0, new PaletteItem($"Go to page {page}", "", "", "", () => { t.SetOrganizing(false); t.PageView.GoToPage(page - 1); }));
+        PaletteList.ItemsSource = result;
+        PaletteList.SelectedIndex = result.Count > 0 ? 0 : -1;
+
+        static int Score(PaletteItem i, string[] words)
+        {
+            var hay = $"{i.Category} {i.Name}";
+            var score = 0;
+            foreach (var w in words)
+            {
+                var at = hay.IndexOf(w, StringComparison.CurrentCultureIgnoreCase);
+                if (at < 0) return 0;
+                score += i.Name.StartsWith(w, StringComparison.CurrentCultureIgnoreCase) ? 30 : at == 0 || hay[at - 1] == ' ' ? 20 : 10;
+            }
+            return score + (i.Category == "Open recent" ? 0 : 5);
+        }
+    }
+
+    private void OnPaletteKey(object sender, KeyEventArgs e)
+    {
+        var count = PaletteList.Items.Count;
+        switch (e.Key)
+        {
+            case Key.Down when count > 0:
+                PaletteList.SelectedIndex = (PaletteList.SelectedIndex + 1) % count;
+                PaletteList.ScrollIntoView(PaletteList.SelectedItem);
+                break;
+            case Key.Up when count > 0:
+                PaletteList.SelectedIndex = (PaletteList.SelectedIndex - 1 + count) % count;
+                PaletteList.ScrollIntoView(PaletteList.SelectedItem);
+                break;
+            case Key.Enter:
+                RunPaletteSelection();
+                break;
+            case Key.Escape:
+                ClosePalette();
+                break;
+            default:
+                return;
+        }
+        e.Handled = true;
+    }
+
+    private void RunPaletteSelection()
+    {
+        if (PaletteList.SelectedItem is not PaletteItem item) return;
+        ClosePalette();
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, item.Run);
+    }
+
+    // ───────────────────────────── Settings ─────────────────────────────
+
+    private void ShowSettings()
+    {
+        var s = AppSettings.Current;
+        var dlg = new FormDialog(this, "Settings", "Save", 460);
+        var theme = dlg.AddChoice("App theme", ["Use my Windows setting", "Light", "Dark"], s.Theme switch { "Light" => 1, "Dark" => 2, _ => 0 });
+        var restore = dlg.AddCheck("Reopen each file at the page where I left off", s.RestorePosition);
+        var reopen = dlg.AddCheck("Reopen the files I had open when I closed PdfDesk", s.ReopenTabs);
+        var dark = dlg.AddCheck("Dark pages (inverted colors for night reading)", s.DarkPages);
+        dlg.AddNote("To make PdfDesk your default PDF app: Windows Settings › Apps › Default apps › PdfDesk.");
+        if (!dlg.ShowModal()) return;
+
+        s.Theme = theme.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "System" };
+        s.RestorePosition = restore.IsChecked == true;
+        s.ReopenTabs = reopen.IsChecked == true;
+        s.DarkPages = dark.IsChecked == true;
+        s.Save();
+        App.ApplyTheme();
+        foreach (var t in Tabs) t.PageView.InvertColors = s.DarkPages;
+        UpdateUi();
+        ShowStatus("Settings saved");
     }
 
     // ───────────────────────────── UI state ─────────────────────────────
@@ -502,50 +866,30 @@ public partial class MainWindow : Window
     private void UpdateUi()
     {
         var t = ActiveTab;
-        var hasDoc = t is not null;
-        Docs.Visibility = Docs.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        StartPage.Visibility = Docs.Items.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
-        Title = t is null ? "PdfDesk" : $"{t.Header} – PdfDesk";
+        var has = _tabs.Count > 0;
+        DocsHost.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
+        StartPage.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
+        AppTitle.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
+        Title = t is null ? "PdfDesk" : $"{(t.Session.IsDirty ? "● " : "")}{t.Session.DisplayName} – PdfDesk";
 
         var v = t?.PageView;
-        if (!PageBox.IsKeyboardFocusWithin) PageBox.Text = v is { PageCount: > 0 } ? (v.CurrentPage + 1).ToString() : "";
-        PageCountText.Text = v is null ? "" : $"/ {v.PageCount}";
-        PageBox.IsEnabled = ZoomBox.IsEnabled = hasDoc;
-
-        if (!ZoomBox.IsKeyboardFocusWithin)
-        {
-            _updatingZoomBox = true;
-            ZoomBox.SelectedItem = null;
-            ZoomBox.Text = v is null ? "" : $"{v.Zoom * 100:0}%";
-            _updatingZoomBox = false;
-        }
-
         HandButton.IsChecked = HandMenu.IsChecked = v?.Tool == ViewerTool.Hand;
         SelectButton.IsChecked = SelectMenu.IsChecked = v?.Tool == ViewerTool.SelectText;
         SnapshotButton.IsChecked = SnapshotMenu.IsChecked = v?.Tool == ViewerTool.Snapshot;
-        FitWidthButton.IsChecked = FitWidthMenu.IsChecked = v?.ZoomMode == ZoomMode.FitWidth;
-        FitPageButton.IsChecked = FitPageMenu.IsChecked = v?.ZoomMode == ZoomMode.FitPage;
+        FitWidthMenu.IsChecked = v?.ZoomMode == ZoomMode.FitWidth;
+        FitPageMenu.IsChecked = v?.ZoomMode == ZoomMode.FitPage;
         SingleMenu.IsChecked = v?.Layout == ViewLayout.SinglePage;
         ContinuousMenu.IsChecked = v?.Layout == ViewLayout.Continuous;
         FacingMenu.IsChecked = v?.Layout == ViewLayout.Facing;
         CoverMenu.IsChecked = v?.Layout == ViewLayout.FacingCover;
-        NavPaneButton.IsChecked = NavPaneMenu.IsChecked = t?.NavPaneVisible ?? AppSettings.Current.NavPaneVisible;
+        NavPaneMenu.IsChecked = t?.NavPaneVisible ?? AppSettings.Current.NavPaneVisible;
+        OrganizeButton.IsChecked = OrganizeMenu.IsChecked = t?.IsOrganizing == true;
+        DarkPagesButton.IsChecked = DarkPagesMenu.IsChecked = AppSettings.Current.DarkPages;
 
         UndoMenu.Header = t?.Session.UndoLabel is { } u ? $"_Undo {u}" : "_Undo";
         RedoMenu.Header = t?.Session.RedoLabel is { } r ? $"_Redo {r}" : "_Redo";
         UndoButton.ToolTip = t?.Session.UndoLabel is { } u2 ? $"Undo {u2} (Ctrl+Z)" : "Undo (Ctrl+Z)";
         RedoButton.ToolTip = t?.Session.RedoLabel is { } r2 ? $"Redo {r2} (Ctrl+Y)" : "Redo (Ctrl+Y)";
-
-        if (v is { PageCount: > 0 } && t is not null)
-        {
-            var g = t.Session.Engine.GetPage(Math.Clamp(v.CurrentPage, 0, v.PageCount - 1));
-            var sel = t.SelectedPages.Length > 1 ? $"{t.SelectedPages.Length} pages selected   ·   " : "";
-            PageSizeText.Text = $"{sel}{Organize.Inches(g.Width)} × {Organize.Inches(g.Height)} in";
-        }
-        else
-        {
-            PageSizeText.Text = "";
-        }
         CommandManager.InvalidateRequerySuggested();
     }
 
@@ -595,53 +939,14 @@ public partial class MainWindow : Window
         Shell.Open(Path.GetDirectoryName(Log.FilePath)!);
     }
 
-    private void OnShortcuts(object sender, RoutedEventArgs e) => MessageBox.Show(this,
-        """
-        Files
-          Ctrl+O  Open          Ctrl+S  Save          Ctrl+Shift+S  Save As
-          Ctrl+P  Print         Ctrl+W  Close tab     Ctrl+D  Properties
-
-        Navigation
-          PgUp / PgDn, Space    Scroll by a screen
-          Ctrl+Home / Ctrl+End  First / last page
-          Ctrl+G                Go to page
-          Alt+Left / Alt+Right  Previous / next view
-
-        Zoom and layout
-          Ctrl+= / Ctrl+-       Zoom in / out  (or Ctrl+mouse wheel)
-          Ctrl+1  Actual size   Ctrl+2  Fit width   Ctrl+0  Fit page
-          Ctrl+4 / 5 / 6 / 7    Single / Continuous / Two pages / Two pages with cover
-          F4  Navigation pane   F11  Full screen
-
-        Tools (click the page first)
-          H  Hand    T  Select text    G  Snapshot (copy an area as an image)
-
-        Text
-          Ctrl+C  Copy          Ctrl+A  Select all text
-          Ctrl+F  Find          F3 / Shift+F3  Next / previous match
-          Ctrl+Shift+F  Search pane
-
-        Pages
-          Ctrl+Shift++ / Ctrl+Shift+-  Rotate selected pages
-          Del (in thumbnails)          Delete selected pages
-          Ctrl+Shift+I  Insert pages   Ctrl+Shift+E  Extract pages
-          Ctrl+Shift+D  Delete pages   Ctrl+Shift+M  Move pages
-          Drag thumbnails to reorder; drag them onto another tab to copy pages there.
-          Ctrl+Z / Ctrl+Y  Undo / redo page edits
-        """, "Keyboard Shortcuts", MessageBoxButton.OK, MessageBoxImage.None);
-
     private void OnAbout(object sender, RoutedEventArgs e)
     {
         var version = typeof(MainWindow).Assembly.GetName().Version;
-        MessageBox.Show(this,
-            $"""
-            PdfDesk {version?.ToString(3)}
-            A fast PDF viewer and page organizer for Windows on ARM.
-            Process: {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}
-
-            Rendering, text and search: MuPDF (AGPL-3.0) via MuPDFCore.
-            Page editing: PDFsharp (MIT).
-            Personal use. No data leaves this computer.
-            """, "About PdfDesk", MessageBoxButton.OK, MessageBoxImage.Information);
+        var dlg = new FormDialog(this, "About PdfDesk", "Close", 420);
+        dlg.Add(null, new Image { Source = new BitmapImage(new Uri("pack://application:,,,/PdfDeskLogo.png")), Width = 56, Height = 56, HorizontalAlignment = HorizontalAlignment.Left });
+        dlg.Add(null, new TextBlock { Text = $"PdfDesk {version?.ToString(3)}", FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 10, 0, 0) });
+        dlg.AddNote($"Read, search, print and organize PDFs. Native {RuntimeInformation.ProcessArchitecture} build.");
+        dlg.AddNote("Rendering, text and search: MuPDF (AGPL-3.0) via MuPDFCore. Page editing: PDFsharp (MIT). Personal use. Nothing you open leaves this computer.");
+        dlg.ShowModal();
     }
 }

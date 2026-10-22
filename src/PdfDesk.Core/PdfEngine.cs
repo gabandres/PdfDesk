@@ -79,6 +79,30 @@ public sealed class PdfEngine : IDisposable
         }
     }
 
+    /// <summary>Opens a file in place (MuPDF reads only what it needs), e.g. for a quick preview. Null if it is encrypted.</summary>
+    public static PdfEngine? OpenPreview(string path)
+    {
+        var ctx = new MuPDFContext(32 * 1024 * 1024);
+        MuPDFDocument? doc = null;
+        try
+        {
+            doc = new MuPDFDocument(ctx, path);
+            if (doc.EncryptionState == EncryptionState.Encrypted)
+            {
+                DisposeDocument(doc);
+                ctx.Dispose();
+                return null;
+            }
+            return new PdfEngine(ctx, doc, false);
+        }
+        catch
+        {
+            if (doc is not null) DisposeDocument(doc);
+            ctx.Dispose();
+            throw;
+        }
+    }
+
     public static InputFileTypes TypeFromPath(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     {
         ".xps" or ".oxps" => InputFileTypes.XPS,

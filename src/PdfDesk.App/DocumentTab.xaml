@@ -6,159 +6,207 @@
              xmlns:core="clr-namespace:PdfDesk.Core;assembly=PdfDesk.Core">
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition x:Name="NavColumn" Width="210" MinWidth="0" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition x:Name="NavColumn" Width="220" MinWidth="0" />
             <ColumnDefinition x:Name="SplitterColumn" Width="Auto" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
+        <!-- Icon rail: one click opens a pane, clicking the open one closes it -->
+        <StackPanel x:Name="Rail" Grid.Column="0" Margin="4,6,4,0" Width="40">
+            <ToggleButton x:Name="PagesRail" Style="{StaticResource RailButton}" Content="&#xE8A9;" ToolTip="Pages (thumbnails)" />
+            <ToggleButton x:Name="BookmarksRail" Style="{StaticResource RailButton}" Content="&#xE8A4;" ToolTip="Bookmarks" />
+            <ToggleButton x:Name="SearchRail" Style="{StaticResource RailButton}" Content="&#xE721;" ToolTip="Search (Ctrl+Shift+F)" />
+        </StackPanel>
+
         <!-- Navigation pane -->
-        <TabControl x:Name="NavTabs" Grid.Column="0" Padding="0" BorderThickness="0">
-            <TabItem x:Name="PagesTab" ToolTip="Page thumbnails">
-                <TabItem.Header>
-                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8A9;" FontSize="15" />
-                </TabItem.Header>
-                <ListBox x:Name="Thumbs" SelectionMode="Extended" AllowDrop="True" BorderThickness="0"
-                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                         VirtualizingPanel.IsVirtualizing="True"
-                         VirtualizingPanel.VirtualizationMode="Recycling"
-                         VirtualizingPanel.ScrollUnit="Pixel"
-                         HorizontalContentAlignment="Center">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate DataType="{x:Type app:ThumbItem}">
-                            <StackPanel Margin="2,6,2,2">
-                                <Border Background="White" BorderBrush="#55000000" BorderThickness="1"
-                                        Width="{Binding Width}" Height="{Binding Height}" HorizontalAlignment="Center">
-                                    <Image Source="{Binding Image}" Stretch="Fill" />
-                                </Border>
-                                <TextBlock Text="{Binding Label}" HorizontalAlignment="Center" Margin="0,4,0,0" FontSize="12" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                    <ListBox.ContextMenu>
-                        <ContextMenu>
-                            <MenuItem Command="app:Cmd.RotateRight" />
-                            <MenuItem Command="app:Cmd.RotateLeft" />
-                            <Separator />
-                            <MenuItem Command="app:Cmd.DeleteSelected" InputGestureText="Del" />
-                            <MenuItem Command="app:Cmd.DuplicatePages" />
-                            <MenuItem Command="app:Cmd.ExtractPages" />
-                            <MenuItem Command="app:Cmd.MovePages" />
-                            <Separator />
-                            <MenuItem Command="app:Cmd.InsertPages" />
-                            <MenuItem Command="app:Cmd.InsertBlank" />
-                            <MenuItem Command="app:Cmd.CropPages" />
-                            <Separator />
-                            <MenuItem Command="app:Cmd.Print" Header="_Print Pages…" />
-                            <MenuItem Command="app:Cmd.ExportImages" />
-                        </ContextMenu>
-                    </ListBox.ContextMenu>
-                </ListBox>
-            </TabItem>
-
-            <TabItem x:Name="BookmarksTab" ToolTip="Bookmarks">
-                <TabItem.Header>
-                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8A4;" FontSize="15" />
-                </TabItem.Header>
+        <Border x:Name="NavPane" Grid.Column="1" Background="{DynamicResource LayerFillColorDefaultBrush}"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1,1,0,0" CornerRadius="8,0,0,0">
+            <DockPanel>
+                <DockPanel DockPanel.Dock="Top" Margin="14,10,6,6" LastChildFill="False">
+                    <TextBlock x:Name="PaneTitle" DockPanel.Dock="Left" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
+                    <TextBlock x:Name="PaneDetail" DockPanel.Dock="Left" Margin="8,0,0,0" VerticalAlignment="Center" Style="{StaticResource Caption}" FontSize="12" />
+                    <Button x:Name="ClosePaneButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="11" Height="28" MinWidth="28"
+                            Content="&#xE711;" ToolTip="Close pane (F4)" />
+                </DockPanel>
                 <Grid>
-                    <TreeView x:Name="Outline" BorderThickness="0" VirtualizingPanel.IsVirtualizing="True">
-                        <TreeView.ItemTemplate>
-                            <HierarchicalDataTemplate DataType="{x:Type core:OutlineNode}" ItemsSource="{Binding Children}">
-                                <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
-                            </HierarchicalDataTemplate>
-                        </TreeView.ItemTemplate>
-                    </TreeView>
-                    <TextBlock x:Name="NoBookmarks" Text="This document has no bookmarks." Margin="12"
-                               TextWrapping="Wrap" Style="{StaticResource Caption}" Visibility="Collapsed" />
-                </Grid>
-            </TabItem>
-
-            <TabItem x:Name="SearchTab" ToolTip="Search">
-                <TabItem.Header>
-                    <TextBlock Style="{StaticResource Icon}" Text="&#xE721;" FontSize="15" />
-                </TabItem.Header>
-                <DockPanel Margin="8">
-                    <TextBox x:Name="SearchBox" DockPanel.Dock="Top" ToolTip="Text to search for" />
-                    <StackPanel DockPanel.Dock="Top" Margin="0,6,0,0">
-                        <CheckBox x:Name="SearchMatchCase" Content="Match case" />
-                        <CheckBox x:Name="SearchWholeWords" Content="Whole words" Margin="0,2,0,0" />
-                        <Button x:Name="SearchButton" Content="Search" Margin="0,6,0,0" HorizontalAlignment="Left" MinWidth="90" />
-                    </StackPanel>
-                    <TextBlock x:Name="SearchStatus" DockPanel.Dock="Top" Margin="0,8,0,4" TextWrapping="Wrap" Style="{StaticResource Caption}" />
-                    <ListBox x:Name="SearchResults" BorderThickness="0"
+                    <ListBox x:Name="Thumbs" SelectionMode="Extended" AllowDrop="True" BorderThickness="0" Background="Transparent"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel">
+                             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                             VirtualizingPanel.ScrollUnit="Pixel" HorizontalContentAlignment="Center"
+                             AutomationProperties.Name="Page thumbnails">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem" BasedOn="{StaticResource SubtleListItem}">
+                                <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                                <Setter Property="Margin" Value="8,2" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
-                            <DataTemplate DataType="{x:Type v:SearchHit}">
-                                <StackPanel Margin="0,2">
-                                    <TextBlock Text="{Binding PageLabel}" FontWeight="SemiBold" FontSize="12" />
-                                    <TextBlock Text="{Binding Excerpt}" TextWrapping="Wrap" FontSize="12" />
+                            <DataTemplate DataType="{x:Type app:ThumbItem}">
+                                <StackPanel Margin="2,6,2,2">
+                                    <Border Background="White" Width="{Binding Width}" Height="{Binding Height}" HorizontalAlignment="Center">
+                                        <Border.Effect>
+                                            <DropShadowEffect BlurRadius="6" ShadowDepth="1" Opacity="0.25" />
+                                        </Border.Effect>
+                                        <Image Source="{Binding Image}" Stretch="Fill" />
+                                    </Border>
+                                    <TextBlock Text="{Binding Label}" HorizontalAlignment="Center" Margin="0,6,0,0" FontSize="12" />
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
+                        <ListBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Command="app:Cmd.RotateRight" />
+                                <MenuItem Command="app:Cmd.RotateLeft" />
+                                <Separator />
+                                <MenuItem Command="app:Cmd.DeleteSelected" InputGestureText="Del" />
+                                <MenuItem Command="app:Cmd.DuplicatePages" />
+                                <MenuItem Command="app:Cmd.ExtractPages" />
+                                <MenuItem Command="app:Cmd.MovePages" />
+                                <Separator />
+                                <MenuItem Command="app:Cmd.InsertPages" />
+                                <MenuItem Command="app:Cmd.InsertBlank" />
+                                <MenuItem Command="app:Cmd.CropPages" />
+                                <Separator />
+                                <MenuItem Command="app:Cmd.Organize" />
+                                <MenuItem Command="app:Cmd.Print" Header="_Print Pages…" />
+                                <MenuItem Command="app:Cmd.ExportImages" />
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
                     </ListBox>
-                </DockPanel>
-            </TabItem>
-        </TabControl>
 
-        <GridSplitter x:Name="NavSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Stretch"
-                      Background="{DynamicResource ControlStrokeColorDefaultBrush}" />
+                    <Grid x:Name="BookmarksPanel" Visibility="Collapsed">
+                        <TreeView x:Name="Outline" BorderThickness="0" Background="Transparent" VirtualizingPanel.IsVirtualizing="True"
+                                  AutomationProperties.Name="Bookmarks">
+                            <TreeView.ItemTemplate>
+                                <HierarchicalDataTemplate DataType="{x:Type core:OutlineNode}" ItemsSource="{Binding Children}">
+                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
+                                </HierarchicalDataTemplate>
+                            </TreeView.ItemTemplate>
+                        </TreeView>
+                        <StackPanel x:Name="NoBookmarks" Margin="16,24" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8A4;" FontSize="28" Opacity="0.5" HorizontalAlignment="Left" />
+                            <TextBlock Text="No bookmarks" FontWeight="SemiBold" Margin="0,10,0,4" />
+                            <TextBlock Text="This document doesn't have a table of contents." TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                        </StackPanel>
+                    </Grid>
 
-        <DockPanel Grid.Column="2">
-            <!-- Find bar (Ctrl+F) -->
-            <Border x:Name="FindBar" DockPanel.Dock="Top" Visibility="Collapsed" Padding="8,6"
-                    Background="{DynamicResource LayerFillColorDefaultBrush}"
-                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
-                <StackPanel Orientation="Horizontal">
-                    <TextBox x:Name="FindBox" Width="260" VerticalContentAlignment="Center" ToolTip="Find (Enter: next, Shift+Enter: previous)" />
-                    <Button x:Name="FindPrevButton" Margin="6,0,0,0" ToolTip="Previous (Shift+F3)" Padding="10,6">
-                        <TextBlock Style="{StaticResource Icon}" Text="&#xE70E;" />
-                    </Button>
-                    <Button x:Name="FindNextButton" Margin="4,0,0,0" ToolTip="Next (F3)" Padding="10,6">
-                        <TextBlock Style="{StaticResource Icon}" Text="&#xE70D;" />
-                    </Button>
-                    <CheckBox x:Name="FindMatchCase" Content="Match case" Margin="12,0,0,0" VerticalAlignment="Center" />
-                    <CheckBox x:Name="FindWholeWords" Content="Whole words" Margin="8,0,0,0" VerticalAlignment="Center" />
-                    <TextBlock x:Name="FindStatus" Margin="12,0,0,0" VerticalAlignment="Center" Style="{StaticResource Caption}" />
-                    <Button x:Name="FindCloseButton" Margin="12,0,0,0" ToolTip="Close (Esc)" Padding="10,6">
-                        <TextBlock Style="{StaticResource Icon}" Text="&#xE711;" />
-                    </Button>
-                </StackPanel>
-            </Border>
-
-            <v:PageViewer x:Name="Viewer">
-                <v:PageViewer.ContextMenu>
-                    <ContextMenu>
-                        <MenuItem Command="app:Cmd.Copy" />
-                        <MenuItem Command="app:Cmd.SelectAll" />
-                        <Separator />
-                        <MenuItem Command="app:Cmd.ToolHand" InputGestureText="H" />
-                        <MenuItem Command="app:Cmd.ToolSelect" InputGestureText="T" />
-                        <MenuItem Command="app:Cmd.ToolSnapshot" InputGestureText="G" />
-                        <Separator />
-                        <MenuItem Command="app:Cmd.Back" />
-                        <MenuItem Command="app:Cmd.Forward" />
-                        <Separator />
-                        <MenuItem Command="app:Cmd.ZoomIn" />
-                        <MenuItem Command="app:Cmd.ZoomOut" />
-                        <MenuItem Command="app:Cmd.FitWidth" />
-                        <MenuItem Command="app:Cmd.FitPage" />
-                        <Separator />
-                        <MenuItem Command="app:Cmd.RotateRight" />
-                        <MenuItem Command="app:Cmd.RotateLeft" />
-                        <MenuItem Command="app:Cmd.Print" />
-                    </ContextMenu>
-                </v:PageViewer.ContextMenu>
-            </v:PageViewer>
-        </DockPanel>
-
-        <!-- Busy overlay for page edits -->
-        <Border x:Name="BusyOverlay" Grid.ColumnSpan="3" Visibility="Collapsed" Background="#33000000">
-            <Border HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Card}">
-                <StackPanel Orientation="Horizontal">
-                    <ProgressBar IsIndeterminate="True" Width="80" Height="4" VerticalAlignment="Center" />
-                    <TextBlock x:Name="BusyText" Margin="12,0,0,0" VerticalAlignment="Center" />
-                </StackPanel>
-            </Border>
+                    <DockPanel x:Name="SearchPanel" Margin="10,0,10,8" Visibility="Collapsed">
+                        <TextBox x:Name="SearchBox" DockPanel.Dock="Top" AutomationProperties.Name="Search text" />
+                        <WrapPanel DockPanel.Dock="Top" Margin="0,8,0,0">
+                            <CheckBox x:Name="SearchMatchCase" Content="Match case" Margin="0,0,12,0" />
+                            <CheckBox x:Name="SearchWholeWords" Content="Whole words" />
+                        </WrapPanel>
+                        <Button x:Name="SearchButton" DockPanel.Dock="Top" Content="Search" Margin="0,8,0,0" HorizontalAlignment="Stretch"
+                                Style="{DynamicResource AccentButtonStyle}" />
+                        <TextBlock x:Name="SearchStatus" DockPanel.Dock="Top" Margin="0,10,0,6" TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                        <ListBox x:Name="SearchResults" BorderThickness="0" Background="Transparent" ItemContainerStyle="{StaticResource SubtleListItem}"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel"
+                                 AutomationProperties.Name="Search results">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type v:SearchHit}">
+                                    <StackPanel Margin="0,3">
+                                        <TextBlock Text="{Binding PageLabel}" FontWeight="SemiBold" FontSize="12" />
+                                        <TextBlock Text="{Binding Excerpt}" TextWrapping="Wrap" FontSize="12" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Grid>
+            </DockPanel>
         </Border>
+
+        <GridSplitter x:Name="NavSplitter" Grid.Column="2" Width="4" HorizontalAlignment="Stretch" Background="Transparent"
+                      AutomationProperties.Name="Resize pane" />
+
+        <Grid Grid.Column="3">
+            <!-- Reading view -->
+            <Grid x:Name="ReadingView">
+                <v:PageViewer x:Name="Viewer" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}"
+                              AutomationProperties.Name="Document pages">
+                    <v:PageViewer.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Command="app:Cmd.Copy" />
+                            <MenuItem Command="app:Cmd.SelectAll" />
+                            <Separator />
+                            <MenuItem Command="app:Cmd.ToolHand" InputGestureText="H" />
+                            <MenuItem Command="app:Cmd.ToolSelect" InputGestureText="T" />
+                            <MenuItem Command="app:Cmd.ToolSnapshot" InputGestureText="G" />
+                            <Separator />
+                            <MenuItem Command="app:Cmd.Back" />
+                            <MenuItem Command="app:Cmd.Forward" />
+                            <Separator />
+                            <MenuItem Command="app:Cmd.ZoomIn" />
+                            <MenuItem Command="app:Cmd.ZoomOut" />
+                            <MenuItem Command="app:Cmd.FitWidth" />
+                            <MenuItem Command="app:Cmd.FitPage" />
+                            <Separator />
+                            <MenuItem Command="app:Cmd.RotateRight" Header="Rotate Page Clockwise" />
+                            <MenuItem Command="app:Cmd.RotateLeft" Header="Rotate Page Counterclockwise" />
+                            <MenuItem Command="app:Cmd.Organize" />
+                            <MenuItem Command="app:Cmd.Print" />
+                        </ContextMenu>
+                    </v:PageViewer.ContextMenu>
+                </v:PageViewer>
+
+                <!-- Find widget (Ctrl+F), floating top-right -->
+                <Border x:Name="FindBar" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,12,28,0" Padding="6"
+                        Visibility="Collapsed" CornerRadius="8" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.22" />
+                    </Border.Effect>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBox x:Name="FindBox" Width="230" VerticalContentAlignment="Center" AutomationProperties.Name="Find in document"
+                                 ToolTip="Enter: next match · Shift+Enter: previous · Esc: close" />
+                        <TextBlock x:Name="FindStatus" Margin="10,0,6,0" VerticalAlignment="Center" MinWidth="64" FontSize="12" Style="{StaticResource Caption}" />
+                        <ToggleButton x:Name="FindMatchCase" Style="{StaticResource CommandButton}" Content="Aa" FontWeight="SemiBold" ToolTip="Match case" Padding="8,4" />
+                        <ToggleButton x:Name="FindWholeWords" Style="{StaticResource CommandButton}" Content="ab|" FontWeight="SemiBold" ToolTip="Whole words" Padding="8,4" />
+                        <Button x:Name="FindPrevButton" Style="{StaticResource IconButton}" Content="&#xE70E;" FontSize="12" ToolTip="Previous match (Shift+F3)" />
+                        <Button x:Name="FindNextButton" Style="{StaticResource IconButton}" Content="&#xE70D;" FontSize="12" ToolTip="Next match (F3)" />
+                        <Button x:Name="FindCloseButton" Style="{StaticResource IconButton}" Content="&#xE711;" FontSize="11" ToolTip="Close (Esc)" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Page and zoom pill, floating bottom-center -->
+                <Border x:Name="Pill" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,18" Padding="6,4"
+                        CornerRadius="20" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="18" ShadowDepth="2" Opacity="0.22" />
+                    </Border.Effect>
+                    <StackPanel Orientation="Horizontal">
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.PrevPage" Content="&#xE76B;" FontSize="12" ToolTip="Previous page (Left / PgUp)" />
+                        <TextBox x:Name="PageBox" Width="48" VerticalAlignment="Center" HorizontalContentAlignment="Center" Margin="2,0"
+                                 AutomationProperties.Name="Page number" ToolTip="Type a page number and press Enter (Ctrl+G)" />
+                        <TextBlock x:Name="PageCountText" VerticalAlignment="Center" Margin="6,0,4,0" MinWidth="32" Style="{StaticResource Caption}" />
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.NextPage" Content="&#xE76C;" FontSize="12" ToolTip="Next page (Right / PgDn)" />
+                        <Border Style="{StaticResource BarSeparator}" />
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomOut" Content="&#xE738;" FontSize="12" ToolTip="Zoom out (Ctrl+-)" />
+                        <ComboBox x:Name="ZoomBox" IsEditable="True" Width="96" VerticalAlignment="Center" Margin="2,0"
+                                  AutomationProperties.Name="Zoom" ToolTip="Zoom (Ctrl+mouse wheel or pinch)" />
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomIn" Content="&#xE710;" FontSize="12" ToolTip="Zoom in (Ctrl+=)" />
+                        <Border Style="{StaticResource BarSeparator}" />
+                        <ToggleButton x:Name="FitWidthButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitWidth" Content="&#xE9A6;" FontSize="14" ToolTip="Fit width (Ctrl+2)" />
+                        <ToggleButton x:Name="FitPageButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitPage" Content="&#xE7C3;" FontSize="14" ToolTip="Fit page (Ctrl+0)" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- Organize pages (grid of large cards) -->
+            <app:OrganizerView x:Name="Organizer" Visibility="Collapsed" />
+
+            <!-- Busy veil for page edits (appears only if an edit takes noticeably long) -->
+            <Border x:Name="BusyOverlay" Visibility="Collapsed" Background="#22000000">
+                <Border HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Card}" Padding="20,14">
+                    <StackPanel Orientation="Horizontal">
+                        <ProgressBar IsIndeterminate="True" Width="80" Height="4" VerticalAlignment="Center" />
+                        <TextBlock x:Name="BusyText" Margin="12,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>

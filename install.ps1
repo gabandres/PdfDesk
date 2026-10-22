@@ -1,5 +1,5 @@
 # Installs (or removes) PdfDesk for the current user. No admin rights needed.
-#   pwsh -File install.ps1              build ARM64 exe, copy it, add Start Menu shortcut and "Open with" entries
+#   pwsh -File install.ps1              build ARM64 exe, copy it, add Start Menu + Desktop shortcuts and "Open with" entries
 #   pwsh -File install.ps1 -NoBuild     install the existing publish\win-arm64\PdfDesk.exe
 #   pwsh -File install.ps1 -Uninstall   remove all of the above
 param([switch]$Uninstall, [switch]$NoBuild)
@@ -7,7 +7,9 @@ $ErrorActionPreference = 'Stop'
 
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\PdfDesk'
 $exe = Join-Path $dest 'PdfDesk.exe'
+$docIcon = Join-Path $dest 'PdfDocument.ico'
 $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'PdfDesk.lnk'
+$desktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'PdfDesk.lnk'
 $classes = 'HKCU:\Software\Classes'
 $progId = 'PdfDesk.Document'
 $types = '.pdf', '.xps', '.oxps', '.epub', '.cbz'
@@ -17,7 +19,7 @@ if (Get-Process PdfDesk -ErrorAction SilentlyContinue | Where-Object { $_.Path -
 }
 
 if ($Uninstall) {
-    Remove-Item $lnk -ErrorAction SilentlyContinue
+    Remove-Item $lnk, $desktopLnk -ErrorAction SilentlyContinue
     Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item "$classes\$progId" -Recurse -ErrorAction SilentlyContinue
     Remove-Item "$classes\Applications\PdfDesk.exe" -Recurse -ErrorAction SilentlyContinue
@@ -37,19 +39,24 @@ if (-not (Test-Path $src)) { throw "Not found: $src (run without -NoBuild)" }
 
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item $src $exe -Force
+Copy-Item (Join-Path $PSScriptRoot 'assets\PdfDocument.ico') $docIcon -Force
 
+# Start Menu and Desktop shortcuts (the exe carries the PdfDesk icon).
 $shell = New-Object -ComObject WScript.Shell
-$s = $shell.CreateShortcut($lnk)
-$s.TargetPath = $exe
-$s.WorkingDirectory = $dest
-$s.Description = 'View, search, print and organize PDF files'
-$s.Save()
+foreach ($path in $lnk, $desktopLnk) {
+    $s = $shell.CreateShortcut($path)
+    $s.TargetPath = $exe
+    $s.WorkingDirectory = $dest
+    $s.IconLocation = "$exe,0"
+    $s.Description = 'View, search, print and organize PDF files'
+    $s.Save()
+}
 
 # "Open with" + Default Apps registration (per user). Windows still asks you to pick the default yourself.
 $open = "`"$exe`" `"%1`""
 New-Item "$classes\$progId\shell\open\command" -Force | Set-ItemProperty -Name '(default)' -Value $open
 Set-ItemProperty "$classes\$progId" -Name '(default)' -Value 'PDF Document'
-New-Item "$classes\$progId\DefaultIcon" -Force | Set-ItemProperty -Name '(default)' -Value "`"$exe`",0"
+New-Item "$classes\$progId\DefaultIcon" -Force | Set-ItemProperty -Name '(default)' -Value "`"$docIcon`""
 New-Item "$classes\Applications\PdfDesk.exe\shell\open\command" -Force | Set-ItemProperty -Name '(default)' -Value $open
 New-Item "$classes\Applications\PdfDesk.exe\SupportedTypes" -Force | Out-Null
 New-Item 'HKCU:\Software\PdfDesk\Capabilities\FileAssociations' -Force | Out-Null

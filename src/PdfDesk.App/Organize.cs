@@ -74,7 +74,7 @@ public static class Organize
     {
         if (pages.Length >= tab.PageView.PageCount)
         {
-            MessageBox.Show(Window.GetWindow(tab)!, "You can't delete every page of a document.", "Delete Pages", MessageBoxButton.OK, MessageBoxImage.Information);
+            Prompt.Info(Window.GetWindow(tab), "A PDF needs at least one page", "Leave at least one page. To get rid of the whole file, delete it in File Explorer.");
             return Task.CompletedTask;
         }
         return tab.RunEdit($"Delete {Pages(pages.Length)}", (d, pw) => PageEditor.Delete(d, pw, pages), pages.Min());
@@ -184,7 +184,7 @@ public static class Organize
         catch (Exception ex)
         {
             Log.Write($"Extract failed: {ex}");
-            MessageBox.Show(owner, $"Extract failed.\n\n{ex.Message}", "Extract Pages", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, "Extract didn't work", ex.Message);
             return;
         }
         finally
@@ -268,7 +268,7 @@ public static class Organize
         }
         catch (Exception ex)
         {
-            MessageBox.Show(owner, $"Split failed.\n\n{ex.Message}", "Split Document", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, "Split didn't work", ex.Message);
         }
         finally
         {
@@ -380,7 +380,7 @@ public static class Organize
         }
         catch (Exception ex)
         {
-            MessageBox.Show(owner, $"Combine failed.\n\n{ex.Message}", "Combine Files", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, "Combine didn't work", ex.Message);
         }
     }
 

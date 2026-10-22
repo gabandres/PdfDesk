@@ -51,7 +51,7 @@ public static class FileActions
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Log.Write($"Print failed: {ex}");
-            MessageBox.Show(owner, $"Printing failed.{Environment.NewLine}{Environment.NewLine}{ex.Message}", "Print", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, "Printing didn't work", ex.Message);
         }
         finally
         {
@@ -78,6 +78,7 @@ public static class FileActions
     {
         var paper = new Size(816, 1056);
         var paginator = new PdfPaginator(engine, pages, paper, new Point(24, 24), new Size(768, 1008));
+        File.Delete(path);
         using var xps = new System.Windows.Xps.Packaging.XpsDocument(path, FileAccess.ReadWrite);
         await WriteAsync(System.Windows.Xps.Packaging.XpsDocument.CreateXpsDocumentWriter(xps), paginator, null);
         return paginator.PageCount;
@@ -208,7 +209,7 @@ public static class FileActions
         }
         catch (Exception ex)
         {
-            MessageBox.Show(owner, $"Export stopped after {done} page(s).\n\n{ex.Message}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, $"Export stopped after {done} page(s)", ex.Message);
         }
         finally
         {

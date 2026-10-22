@@ -13,7 +13,8 @@ namespace PdfDesk.App;
 public sealed class FormDialog : Window
 {
     private readonly StackPanel _rows = new();
-    private readonly TextBlock _error = new() { Foreground = System.Windows.Media.Brushes.IndianRed, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
+    private readonly Border _error = new() { CornerRadius = new CornerRadius(6), Padding = new Thickness(12, 8, 12, 8), Margin = new Thickness(0, 14, 0, 0), Visibility = Visibility.Collapsed };
+    private readonly TextBlock _errorText = new() { TextWrapping = TextWrapping.Wrap };
     private Func<string?>? _validate;
 
     public FormDialog(Window owner, string title, string okText = "OK", double width = 440)
@@ -26,8 +27,9 @@ public sealed class FormDialog : Window
         ShowInTaskbar = false;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
-        var ok = new Button { Content = okText, IsDefault = true, MinWidth = 96, Margin = new Thickness(0, 0, 8, 0) };
-        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 96 };
+        var ok = new Button { Content = okText, IsDefault = true, MinWidth = 104, Margin = new Thickness(0, 0, 8, 0) };
+        ok.SetResourceReference(StyleProperty, "AccentButtonStyle");
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 104 };
         ok.Click += (_, _) =>
         {
             var err = _validate?.Invoke();
@@ -36,18 +38,32 @@ public sealed class FormDialog : Window
                 DialogResult = true;
                 return;
             }
-            _error.Text = err;
+            _errorText.Text = err;
             _error.Visibility = Visibility.Visible;
         };
 
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 20, 0, 0) };
+        var heading = new TextBlock { Text = title, FontSize = 20, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 16) };
+        var body = new StackPanel { Margin = new Thickness(24, 20, 24, 20) };
+        body.Children.Add(heading);
+        body.Children.Add(_rows);
+        body.Children.Add(_error);
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(24, 16, 24, 16) };
         buttons.Children.Add(ok);
         buttons.Children.Add(cancel);
+        var footer = new Border { Child = buttons, BorderThickness = new Thickness(0, 1, 0, 0) };
+        footer.SetResourceReference(Border.BackgroundProperty, "LayerFillColorDefaultBrush");
+        footer.SetResourceReference(Border.BorderBrushProperty, "DividerStrokeColorDefaultBrush");
 
-        var root = new StackPanel { Margin = new Thickness(24, 20, 24, 20) };
-        root.Children.Add(_rows);
-        root.Children.Add(_error);
-        root.Children.Add(buttons);
+        // Validation errors appear inline, like an InfoBar, instead of a separate message box.
+        _error.Child = _errorText;
+        _error.SetResourceReference(Border.BackgroundProperty, "SystemFillColorCriticalBackgroundBrush");
+        _errorText.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+
+        var root = new DockPanel();
+        DockPanel.SetDock(footer, Dock.Bottom);
+        root.Children.Add(footer);
+        root.Children.Add(body);
         Content = root;
     }
 
@@ -219,7 +235,7 @@ public static class PdfFiles
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            MessageBox.Show(owner, $"Couldn't read {Path.GetFileName(path)}.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Prompt.Error(owner, $"Couldn't read {Path.GetFileName(path)}", ex.Message);
             return null;
         }
 
@@ -240,7 +256,7 @@ public static class PdfFiles
             }
             catch (Exception ex) when (ex is MuPDFCore.MuPDFException or InvalidOperationException)
             {
-                MessageBox.Show(owner, $"{Path.GetFileName(path)} isn't a readable PDF.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Prompt.Error(owner, $"{Path.GetFileName(path)} isn't a readable PDF", ex.Message);
                 return null;
             }
         }
@@ -337,7 +353,7 @@ public sealed class CombineDialog : Window
         {
             if (_files.Count == 0)
             {
-                MessageBox.Show(this, "Add at least one PDF file.", Title, MessageBoxButton.OK, MessageBoxImage.Information);
+                Prompt.Info(this, "Nothing to combine yet", "Add at least one PDF with Add Files, or drag PDFs into the list.");
                 return;
             }
             DialogResult = true;
