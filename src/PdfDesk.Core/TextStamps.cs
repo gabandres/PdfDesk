@@ -14,7 +14,8 @@ public sealed record TextStamp(string Id, int PageIndex, RectD Rect, StampKind K
 /// <summary>
 /// "Fill &amp; Sign": typed text, check marks and crosses placed anywhere on a page, for forms without fields (scans).
 /// Each is a standard FreeText annotation with its own appearance, so every viewer shows it and PdfDesk can edit it later.
-/// Text uses the built-in Helvetica (Latin-1: accents work, no font embedding); marks use ZapfDingbats.
+/// Text uses the built-in Helvetica when it can (WinAnsi: accents work, no font embedding) and an embedded, subset
+/// system font for other scripts (Greek, Cyrillic, CJK, ...); marks use ZapfDingbats. Font objects are shared between stamps.
 /// </summary>
 public static class TextStamps
 {
@@ -29,7 +30,7 @@ public static class TextStamps
             if (Resolve(doc.Pages[p].Elements["/Annots"]) is not PdfArray annots) continue;
             foreach (var a in annots.Elements.Select(Resolve).OfType<PdfDictionary>())
             {
-                if (a.Elements.GetName("/Subtype") != "/FreeText") continue;
+                if (PdfObj.NameOf(a, "/Subtype") != "/FreeText") continue;
                 if (Resolve(a.Elements["/NM"]) is not PdfString nm || !nm.Value.StartsWith(IdPrefix, StringComparison.Ordinal)) continue;
                 if (Resolve(a.Elements["/Rect"]) is not PdfArray r || r.Elements.Count < 4) continue;
                 var rect = FormEditor.ToPageSpace(doc.Pages[p], Num(r, 0), Num(r, 1), Num(r, 2), Num(r, 3));
@@ -56,25 +57,41 @@ public static class TextStamps
             page.Elements["/Annots"] = annots;
         }
 
-        var rot = ((page.Rotate % 360) + 360) % 360;
         var (x1, y1, x2, y2) = FromPageSpace(page, rect);
 
         // Appearance: drawn upright in the viewer, i.e. counter-rotated against the page's /Rotate.
-        var content = kind == StampKind.Text ? TextContent(text, fontSize, rect.Height) : MarkContent(kind, rect.Width, rect.Height);
+        // Text the standard Helvetica can encode stays non-embedded; other scripts get an embedded (subset) Unicode font.
+        byte[] content;
+        PdfDictionary resources;
+        if (kind == StampKind.Text && !WinAnsi.CanEncode(text))
+        {
+            var painter = new TextPainter(StdFont.Helvetica, [text]);
+            var leading = fontSize * 1.2;
+            var y = rect.Height - fontSize;
+            foreach (var line in text.Replace("\r", "").Split('\n'))
+            {
+                painter.Draw(line, fontSize * 0.15, y, fontSize);
+                y -= leading;
+            }
+            var (ops, res) = painter.Build(doc, rect.Width, rect.Height, "/Helv", PdfColorValue.Black);
+            content = [.. "/Tx BMC "u8, .. ops, .. " EMC"u8];
+            resources = res;
+        }
+        else
+        {
+            content = kind == StampKind.Text ? TextContent(text, fontSize, rect.Height) : MarkContent(kind, rect.Width, rect.Height);
+            var fonts = new PdfDictionary(doc);
+            fonts.Elements[kind == StampKind.Text ? "/Helv" : "/ZaDb"] = kind == StampKind.Text
+                ? FontResources.Standard(doc, "Helvetica")
+                : FontResources.Standard(doc, "ZapfDingbats");
+            resources = new PdfDictionary(doc);
+            resources.Elements["/Font"] = fonts;
+        }
         var ap = new PdfDictionary(doc);
         ap.Elements["/Type"] = new PdfName("/XObject");
         ap.Elements["/Subtype"] = new PdfName("/Form");
         ap.Elements["/BBox"] = new PdfArray(doc, new PdfReal(0), new PdfReal(0), new PdfReal(rect.Width), new PdfReal(rect.Height));
-        if (rot != 0)
-        {
-            var (a, b, c, d) = rot switch { 90 => (0, 1, -1, 0), 180 => (-1, 0, 0, -1), _ => (0, -1, 1, 0) };
-            ap.Elements["/Matrix"] = new PdfArray(doc, new PdfInteger(a), new PdfInteger(b), new PdfInteger(c), new PdfInteger(d), new PdfInteger(0), new PdfInteger(0));
-        }
-        var fonts = new PdfDictionary(doc);
-        fonts.Elements["/Helv"] = StandardFont(doc, "Helvetica", winAnsi: true);
-        fonts.Elements["/ZaDb"] = StandardFont(doc, "ZapfDingbats", winAnsi: false);
-        var resources = new PdfDictionary(doc);
-        resources.Elements["/Font"] = fonts;
+        if (PdfObj.CounterRotation(doc, page) is { } matrix) ap.Elements["/Matrix"] = matrix;
         ap.Elements["/Resources"] = resources;
         ap.CreateStream(content);
         doc.Internals.AddObject(ap);
@@ -98,18 +115,14 @@ public static class TextStamps
         doc.Internals.AddObject(annot);
         annots.Elements.Add(annot.Reference!);
 
-        using var ms = new MemoryStream();
-        doc.Save(ms, false);
-        return ms.ToArray();
+        return PdfObj.Save(doc);
     }
 
     public static byte[] Remove(byte[] data, string? password, string id)
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
         RemoveFrom(doc, id);
-        using var ms = new MemoryStream();
-        doc.Save(ms, false);
-        return ms.ToArray();
+        return PdfObj.Save(doc);
     }
 
     private static void RemoveFrom(PdfDocument doc, string id)
@@ -154,35 +167,7 @@ public static class TextStamps
         return Encoding.Latin1.GetBytes($"q BT 0 g /ZaDb {size.ToString("0.##", inv)} Tf 1 0 0 1 {x.ToString("0.##", inv)} {y.ToString("0.##", inv)} Tm ({glyph}) Tj ET Q");
     }
 
-    private static string Escape(string s)
-    {
-        var sb = new StringBuilder();
-        foreach (var ch in s)
-        {
-            var c = ch <= 255 ? ch : WinAnsi(ch);
-            if (c is '(' or ')' or '\\') sb.Append('\\');
-            sb.Append(c);
-        }
-        return sb.ToString();
-
-        // Common typography outside Latin-1 that WinAnsi still has (curly quotes, dashes, euro); anything else becomes '?'.
-        static char WinAnsi(char ch) => ch switch
-        {
-            '€' => (char)0x80, '‘' => (char)0x91, '’' => (char)0x92, '“' => (char)0x93, '”' => (char)0x94,
-            '•' => (char)0x95, '–' => (char)0x96, '—' => (char)0x97, '…' => (char)0x85,
-            _ => '?',
-        };
-    }
-
-    private static PdfDictionary StandardFont(PdfDocument doc, string name, bool winAnsi)
-    {
-        var font = new PdfDictionary(doc);
-        font.Elements["/Type"] = new PdfName("/Font");
-        font.Elements["/Subtype"] = new PdfName("/Type1");
-        font.Elements["/BaseFont"] = new PdfName("/" + name);
-        if (winAnsi) font.Elements["/Encoding"] = new PdfName("/WinAnsiEncoding");
-        return font;
-    }
+    private static string Escape(string s) => WinAnsi.Literal(s);
 
     /// <summary>Inverse of <see cref="FormEditor.ToPageSpace"/>: page space (rotated, top-left origin) to PDF user space.</summary>
     internal static (double X1, double Y1, double X2, double Y2) FromPageSpace(PdfPage page, RectD r)

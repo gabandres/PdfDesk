@@ -21,7 +21,8 @@ public sealed class TabModel(DocumentTab tab) : INotifyPropertyChanged
 {
     public DocumentTab Tab { get; } = tab;
     public override string ToString() => Title;
-    public string Title => Tab.Session.DisplayName;
+    /// <summary>The file name, or the document title when the file asks to show it (the tooltip keeps the path).</summary>
+    public string Title => Tab.DisplayTitle;
     public string ToolTip => Tab.Session.FilePath ?? $"{Tab.Session.DisplayName} (not saved yet)";
     public Visibility DirtyVisibility => Tab.Session.IsDirty ? Visibility.Visible : Visibility.Collapsed;
 
@@ -70,6 +71,29 @@ public partial class MainWindow : Window
     private bool _fullScreen;
     private List<PaletteItem> _paletteAll = [];
     private static readonly Dictionary<string, BitmapSource> RecentThumbs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Start-page previews open files in place; saves wait for the one in progress so they never collide.</summary>
+    private static readonly SemaphoreSlim PreviewGate = new(1, 1);
+
+    private readonly Dictionary<DocumentTab, Task<bool>> _saves = [];
+    private readonly HashSet<DocumentTab> _closingTabs = [];
+    private readonly HashSet<string> _opening = new(StringComparer.OrdinalIgnoreCase);
+    private int _openBusy;
+    private bool _closeApproved;
+    private bool _closeRunning;
+    private bool _closed;
+    private bool _finished;
+    private bool _sessionEnded;
+    private bool _sessionPromptRunning;
+
+    public static readonly DependencyProperty TabMaxWidthProperty =
+        DependencyProperty.Register(nameof(TabMaxWidth), typeof(double), typeof(MainWindow), new PropertyMetadata(240.0));
+
+    /// <summary>Widest a title-bar tab may be: tabs share the room left after the + button and a drag strip.</summary>
+    public double TabMaxWidth
+    {
+        get => (double)GetValue(TabMaxWidthProperty);
+        set => SetValue(TabMaxWidthProperty, value);
+    }
 
     public MainWindow()
     {
@@ -79,10 +103,21 @@ public partial class MainWindow : Window
         BindCommands();
         RefreshRecent();
 
+        TabArea.SizeChanged += (_, _) => LayoutTabs();
+        _tabs.CollectionChanged += (_, _) => LayoutTabs();
+        Activated += (_, _) => ActiveTab?.ScheduleDiskCheck();
+        Application.Current.SessionEnding += OnSessionEnding;
+        Closed += (_, _) =>
+        {
+            _closed = true;
+            Application.Current.SessionEnding -= OnSessionEnding;
+            if (!_finished) FinishClose();
+        };
+
         TabStrip.SelectionChanged += (_, _) => ShowActiveTab();
         TabStrip.PreviewMouseUp += (_, e) =>
         {
-            if (e.ChangedButton == MouseButton.Middle && ItemUnder(e.OriginalSource) is { } t) CloseTab(t);
+            if (e.ChangedButton == MouseButton.Middle && ItemUnder(e.OriginalSource) is { } t) _ = CloseTabAsync(t);
         };
         // Hovering a page drag over a tab switches to it, so pages can be dropped into another document.
         TabStrip.AllowDrop = true;
@@ -101,6 +136,7 @@ public partial class MainWindow : Window
             App.ApplyFrame(this);
             FitToScreenWhenMaximized();
             MeasureCaptionButtons();
+            HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WndProc);
         };
         DpiChanged += (_, _) => MeasureCaptionButtons();
         PreviewKeyDown += OnPreviewKey;
@@ -122,7 +158,17 @@ public partial class MainWindow : Window
         };
         PaletteBox.TextChanged += (_, _) => FilterPalette();
         PaletteBox.PreviewKeyDown += OnPaletteKey;
-        PaletteList.MouseUp += (_, _) => RunPaletteSelection();
+        PaletteList.MouseUp += (_, e) =>
+        {
+            // Only a click on an entry runs it (not the scroll bar).
+            for (var d = e.OriginalSource as DependencyObject; d is not null && d != PaletteList;
+                 d = d is Visual ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
+                if (d is ListBoxItem)
+                {
+                    RunPaletteSelection();
+                    return;
+                }
+        };
         Palette.MouseDown += (_, e) =>
         {
             if (e.OriginalSource == Palette) ClosePalette();
@@ -131,11 +177,12 @@ public partial class MainWindow : Window
     }
 
     public DocumentTab? ActiveTab => (TabStrip.SelectedItem as TabModel)?.Tab;
+    public int TabCount => _tabs.Count;
     private IEnumerable<DocumentTab> Tabs => _tabs.Select(t => t.Tab);
 
     private static TabModel? ItemUnder(object source)
     {
-        for (var d = source as DependencyObject; d is not null; d = VisualTreeHelper.GetParent(d))
+        for (var d = source as DependencyObject; d is not null; d = d is Visual ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
             if (d is FrameworkElement { DataContext: TabModel t }) return t;
         return null;
     }
@@ -177,6 +224,89 @@ public partial class MainWindow : Window
             ? new Thickness(f.Left + SystemParameters.FixedFrameVerticalBorderWidth, f.Top + SystemParameters.FixedFrameHorizontalBorderHeight,
                 f.Right + SystemParameters.FixedFrameVerticalBorderWidth, f.Bottom + SystemParameters.FixedFrameHorizontalBorderHeight)
             : new Thickness(0);
+    }
+
+    /// <summary>Keeps the + button and a strip to drag the window visible: tabs shrink to share the rest, then scroll.</summary>
+    private void LayoutTabs()
+    {
+        const double DragStrip = 56, TabMargin = 2, MinTab = 110, MaxTab = 240;
+        if (TabArea.ActualWidth <= 0) return; // not laid out yet; SizeChanged comes next
+        var plus = NewTabButton.ActualWidth + NewTabButton.Margin.Left + NewTabButton.Margin.Right;
+        var progress = OpenProgress.Visibility == Visibility.Visible ? OpenProgress.Width + OpenProgress.Margin.Left : 0;
+        var room = Math.Max(0, TabArea.ActualWidth - plus - progress - DragStrip);
+        TabStrip.MaxWidth = room;
+        TabMaxWidth = _tabs.Count == 0 ? MaxTab : Math.Clamp(Math.Floor(room / _tabs.Count) - TabMargin, MinTab, MaxTab);
+        if (TabStrip.SelectedItem is not null) Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            if (TabStrip.SelectedItem is { } sel) TabStrip.ScrollIntoView(sel);
+        });
+    }
+
+    private const int WM_SETTINGCHANGE = 0x001A, WM_ENDSESSION = 0x0016;
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_SETTINGCHANGE && lParam != IntPtr.Zero && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
+        {
+            // Windows switched light/dark. WPF re-themes itself in System mode; the frame (DWM) and our icons need a nudge,
+            // a moment later so the registry already holds the new value.
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                if (AppSettings.Current.Theme is "Light" or "Dark") return;
+                foreach (Window w in Application.Current.Windows) App.ApplyFrame(w);
+                UpdateUi();
+            };
+            timer.Start();
+        }
+        else if (msg == WM_ENDSESSION && wParam != IntPtr.Zero)
+        {
+            _sessionEnded = true; // Windows is ending the session now: close without prompts
+        }
+        return IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool ShutdownBlockReasonCreate(IntPtr hwnd, string reason);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShutdownBlockReasonDestroy(IntPtr hwnd);
+
+    /// <summary>
+    /// Sign-out or shutdown with unsaved work: refuse (WPF ignores Cancel in Closing during session end), tell Windows why,
+    /// then ask about each document. When everything is settled the window closes, so signing out again goes through.
+    /// </summary>
+    private void OnSessionEnding(object? sender, SessionEndingCancelEventArgs e)
+    {
+        if (!_tabs.Any(t => t.Tab.Session.IsDirty || t.Tab.HasPendingEdits))
+        {
+            RememberOpenTabs();
+            SavePlacement();
+            return;
+        }
+        e.Cancel = true;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        ShutdownBlockReasonCreate(hwnd, "Unsaved changes in PdfDesk");
+        if (_sessionPromptRunning) return;
+        _sessionPromptRunning = true;
+        Dispatcher.BeginInvoke(async () =>
+        {
+            try
+            {
+                BringToFront();
+                if (await PrepareToCloseAll())
+                {
+                    _closeApproved = true;
+                    Close();
+                }
+            }
+            finally
+            {
+                _sessionPromptRunning = false;
+                ShutdownBlockReasonDestroy(hwnd);
+            }
+        });
     }
 
     // ───────────────────────────── Toasts ─────────────────────────────
@@ -247,59 +377,144 @@ public partial class MainWindow : Window
 
     // ───────────────────────────── Open / close ─────────────────────────────
 
-    public void OpenFiles(IEnumerable<string> paths)
+    public void OpenFiles(IEnumerable<string> paths) => _ = OpenFilesAsync([.. paths]);
+
+    public void OpenFile(string path) => _ = OpenFileAsync(path);
+
+    /// <summary>Opens files one after another (folders: the PDFs directly inside them).</summary>
+    public async Task OpenFilesAsync(IReadOnlyList<string> paths)
     {
-        foreach (var path in paths.Where(p => !string.IsNullOrWhiteSpace(p)))
-            OpenFile(path);
+        foreach (var path in ExpandFolders(paths.Where(p => !string.IsNullOrWhiteSpace(p))))
+        {
+            if (_closed) return;
+            await OpenFileAsync(path);
+        }
     }
 
-    public void OpenFile(string path)
+    private List<string> ExpandFolders(IEnumerable<string> paths)
     {
-        if (!File.Exists(path))
+        const int MaxFromFolder = 30;
+        var result = new List<string>();
+        foreach (var path in paths)
         {
-            ShowToast(new Toast($"Couldn't find {Path.GetFileName(path)}. It was removed from the recent list.", IsError: true));
-            AppSettings.Current.RemoveRecent(path);
-            RefreshRecent();
+            if (!Directory.Exists(path))
+            {
+                result.Add(path);
+                continue;
+            }
+            var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+            List<string> pdfs;
+            try
+            {
+                pdfs = [.. Directory.EnumerateFiles(path, "*.pdf", SearchOption.TopDirectoryOnly).Order(StringComparer.CurrentCultureIgnoreCase)];
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                ShowToast(new Toast($"Couldn't read the folder {name}: {ex.Message}", IsError: true));
+                continue;
+            }
+            if (pdfs.Count == 0)
+            {
+                ShowToast(new Toast($"The folder {name} has no PDF files in it. Drop the files themselves to open them.", IsError: true));
+                continue;
+            }
+            if (pdfs.Count > MaxFromFolder)
+            {
+                ShowToast(new Toast($"Opening the first {MaxFromFolder} of {pdfs.Count} PDFs in {name}"));
+                pdfs = pdfs[..MaxFromFolder];
+            }
+            result.AddRange(pdfs);
+        }
+        return result;
+    }
+
+    /// <summary>Opens a file in a new tab, reading it off the UI thread (big files don't freeze the window).</summary>
+    public async Task OpenFileAsync(string path)
+    {
+        string full;
+        try
+        {
+            full = Path.GetFullPath(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            ShowToast(new Toast($"Couldn't open {path}: {ex.Message}", IsError: true));
             return;
         }
 
-        var full = Path.GetFullPath(path);
         if (_tabs.FirstOrDefault(t => string.Equals(t.Tab.Session.FilePath, full, StringComparison.OrdinalIgnoreCase)) is { } open)
         {
             TabStrip.SelectedItem = open;
+            // Reopening a file that changed on disk: show the new version if nothing here would be lost.
+            open.Tab.ScheduleDiskCheck();
             return;
         }
 
-        string? password = null;
-        var wrong = false;
-        while (true)
+        if (!File.Exists(full))
         {
-            try
+            var recent = AppSettings.Current.RecentFiles.Any(p => string.Equals(p, full, StringComparison.OrdinalIgnoreCase));
+            ShowToast(new Toast(recent ? $"Couldn't find {Path.GetFileName(full)}. It was removed from the recent list." : $"Couldn't find {Path.GetFileName(full)}.", IsError: true));
+            if (recent)
             {
-                Mouse.OverrideCursor = Cursors.Wait;
-                var session = DocumentSession.Open(full, password);
-                Mouse.OverrideCursor = null;
-                OpenSession(session);
-                AppSettings.Current.AddRecent(full);
+                AppSettings.Current.RemoveRecent(full);
                 RefreshRecent();
-                return;
             }
-            catch (PasswordRequiredException ex)
+            return;
+        }
+        if (!_opening.Add(full)) return; // already on its way (e.g. double-clicked twice)
+
+        SetOpenBusy(true);
+        try
+        {
+            string? password = null;
+            var wrong = false;
+            while (true)
             {
-                Mouse.OverrideCursor = null;
-                password = PdfFiles.PromptPassword(this, Path.GetFileName(full), wrong || ex.WrongPassword);
-                if (password is null) return;
-                wrong = true;
-            }
-            catch (Exception ex)
-            {
-                Mouse.OverrideCursor = null;
-                Log.Write($"Open {full} failed: {ex}");
-                Prompt.Error(this, $"Couldn't open {Path.GetFileName(full)}",
-                    $"The file may be damaged or in a format PdfDesk can't read.{Environment.NewLine}{Environment.NewLine}{ex.Message}");
-                return;
+                try
+                {
+                    var pw = password;
+                    var session = await Task.Run(() => DocumentSession.Open(full, pw));
+                    if (_closed)
+                    {
+                        session.Dispose();
+                        return;
+                    }
+                    OpenSession(session);
+                    AppSettings.Current.AddRecent(full);
+                    RefreshRecent();
+                    return;
+                }
+                catch (PasswordRequiredException ex)
+                {
+                    if (_closed) return;
+                    password = PdfFiles.PromptPassword(this, Path.GetFileName(full), wrong || ex.WrongPassword);
+                    if (password is null) return;
+                    wrong = true;
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"Open {Path.GetFileName(full)} failed: {ex}");
+                    if (_closed) return;
+                    Prompt.Error(this, $"Couldn't open {Path.GetFileName(full)}",
+                        $"The file may be damaged or in a format PdfDesk can't read.{Environment.NewLine}{Environment.NewLine}{ex.Message}");
+                    return;
+                }
             }
         }
+        finally
+        {
+            _opening.Remove(full);
+            SetOpenBusy(false);
+        }
+    }
+
+    private void SetOpenBusy(bool on)
+    {
+        _openBusy = Math.Max(0, _openBusy + (on ? 1 : -1));
+        var busy = _openBusy > 0;
+        OpenProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        Mouse.OverrideCursor = busy ? Cursors.AppStarting : null;
+        LayoutTabs();
     }
 
     public void OpenSession(DocumentSession session)
@@ -325,6 +540,7 @@ public partial class MainWindow : Window
         if (TabStrip.SelectedItem is not null) TabStrip.ScrollIntoView(TabStrip.SelectedItem);
         UpdateUi();
         Dispatcher.BeginInvoke(DispatcherPriority.Input, FocusDocument);
+        active?.ScheduleDiskCheck();
     }
 
     /// <summary>Puts keyboard focus where the user works: the organizer grid, the page view, or the window.</summary>
@@ -350,21 +566,55 @@ public partial class MainWindow : Window
             TabStrip.SelectedIndex = (i + (shift ? -1 : 1) + _tabs.Count) % _tabs.Count;
             e.Handled = true;
         }
-        else if (ctrl && !shift && e.Key is >= Key.D1 and <= Key.D9 && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt))
+        else if (ctrl && !shift && e.Key is >= Key.D1 and <= Key.D9 && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt)
+                 && !Keyboard.IsKeyDown(Key.RightAlt))
         {
-            // Ctrl+Alt+1..9 picks a tab (Ctrl+digits are zoom/layout shortcuts).
+            // Ctrl+Alt+1..9 picks a tab (Ctrl+digits are zoom/layout shortcuts). AltGr reports as Ctrl+Alt and types
+            // characters such as @ # [ ] on many layouts, so leave it alone.
             var n = e.Key == Key.D9 ? _tabs.Count - 1 : e.Key - Key.D1;
             if (n < _tabs.Count) TabStrip.SelectedIndex = n;
             e.Handled = true;
         }
-        else if (e.Key == Key.F6)
+        else if (e.Key == Key.F6 && (Keyboard.Modifiers & ~ModifierKeys.Shift) == ModifierKeys.None)
         {
-            // F6 / Shift+F6: move between the command bar, the side pane and the document.
-            if (IsInside(Keyboard.FocusedElement as DependencyObject, CommandBar)) FocusDocument();
-            else if (FindChild<System.Windows.Controls.Primitives.ButtonBase>(DocCommands.Visibility == Visibility.Visible ? DocCommands : CommandBar) is { } first)
-                first.Focus();
+            CycleFocus(shift);
             e.Handled = true;
         }
+    }
+
+    /// <summary>F6 / Shift+F6: command bar → side pane → document (and back).</summary>
+    private void CycleFocus(bool backwards)
+    {
+        var tab = ActiveTab;
+        var zones = tab is null ? 2 : 3; // 0 command bar, 1 side pane, 2 document (no pane without a document)
+        var focused = Keyboard.FocusedElement as DependencyObject;
+        var current = IsInside(focused, CommandBar) ? 0 : tab?.IsPaneFocused == true ? 1 : zones - 1;
+        var next = (current + (backwards ? -1 : 1) + zones) % zones;
+        if (tab is null)
+        {
+            if (next == 0) FocusCommandBar();
+            else FocusDocument();
+            return;
+        }
+        switch (next)
+        {
+            case 0:
+                FocusCommandBar();
+                break;
+            case 1:
+                if (tab.IsOrganizing) tab.FocusContent(); // the organizer hides the pane
+                else tab.FocusPane();
+                break;
+            default:
+                FocusDocument();
+                break;
+        }
+    }
+
+    private void FocusCommandBar()
+    {
+        if (FindChild<System.Windows.Controls.Primitives.ButtonBase>(DocCommands.Visibility == Visibility.Visible ? DocCommands : CommandBar) is { } first)
+            first.Focus();
     }
 
     private static bool IsInside(DependencyObject? d, DependencyObject container)
@@ -387,71 +637,134 @@ public partial class MainWindow : Window
 
     private void OnTabCloseClick(object sender, RoutedEventArgs e)
     {
-        if (ItemUnder(e.OriginalSource) is { } t) CloseTab(t);
+        if (ItemUnder(e.OriginalSource) is { } t) _ = CloseTabAsync(t);
         e.Handled = true;
     }
 
-    /// <summary>Closes a tab, offering to save unsaved changes. False if the user cancelled.</summary>
-    private bool CloseTab(TabModel model)
+    /// <summary>
+    /// Closes a tab: first lets a value still being typed and any edit in flight land, then offers to save. The active tab
+    /// stays active when a background tab closes. False if the user cancelled.
+    /// </summary>
+    private async Task<bool> CloseTabAsync(TabModel model)
     {
         var tab = model.Tab;
-        if (tab.IsBusy) return false;
-        if (tab.Session.IsDirty)
+        if (!_closingTabs.Add(tab)) return false;
+        try
         {
-            TabStrip.SelectedItem = model;
-            switch (Prompt.SaveChanges(this, tab.Session.DisplayName))
+            if (tab.IsBusy && !tab.HasPendingEdits)
             {
-                case SaveChoice.Cancel:
-                    return false;
-                case SaveChoice.Save when !Save(tab):
-                    return false;
+                // Printing or exporting: that work holds the document; closing now would pull it away.
+                TabStrip.SelectedItem = model;
+                ShowStatus($"Wait a moment: {tab.Session.DisplayName} is still busy.");
+                return false;
             }
+            var previous = TabStrip.SelectedItem as TabModel;
+            var wasActive = previous == model;
+            await tab.FlushPendingEditsAsync();
+            if (!_tabs.Contains(model)) return true;
+            if (tab.Session.IsDirty)
+            {
+                TabStrip.SelectedItem = model;
+                var choice = Prompt.SaveChanges(this, tab.Session.DisplayName);
+                if (choice == SaveChoice.Cancel || (choice == SaveChoice.Save && !await SaveAsync(tab)))
+                {
+                    if (!wasActive && previous is not null && _tabs.Contains(previous)) TabStrip.SelectedItem = previous;
+                    return false;
+                }
+                if (!_tabs.Contains(model)) return true;
+            }
+
+            var index = _tabs.IndexOf(model);
+            Discard(model);
+            if (!wasActive && previous is not null && _tabs.Contains(previous)) TabStrip.SelectedItem = previous;
+            else if (_tabs.Count > 0) TabStrip.SelectedItem = _tabs[Math.Clamp(index, 0, _tabs.Count - 1)];
+            UpdateUi();
+            return true;
         }
-        var index = _tabs.IndexOf(model);
-        _tabs.Remove(model);
-        DocsHost.Children.Remove(tab);
-        tab.Dispose();
-        if (_tabs.Count > 0) TabStrip.SelectedItem = _tabs[Math.Clamp(index, 0, _tabs.Count - 1)];
-        UpdateUi();
-        return true;
+        finally
+        {
+            _closingTabs.Remove(tab);
+        }
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        var open = _tabs.Where(t => t.Tab.Session.FilePath is not null).Select(t => t.Tab.Session.FilePath!).ToList();
-        if (_tabs.FirstOrDefault(t => t.Tab.IsBusy) is { } busy)
+        if (_closeApproved || _sessionEnded || _finished)
         {
-            TabStrip.SelectedItem = busy;
-            ShowStatus($"Wait a moment: {busy.Title} is still being updated.");
-            e.Cancel = true;
+            FinishClose();
             return;
         }
-        if (!ConfirmUnsaved(_tabs.ToList()))
+        // Saving may have to wait for a field value to land: say no now, close for real when it's settled. Started a moment
+        // later, so when Windows or Application.Shutdown closes the window regardless, no prompt appears over a closed window.
+        e.Cancel = true;
+        if (_closeRunning) return;
+        _closeRunning = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, () => _ = CloseWindowAsync());
+    }
+
+    private async Task CloseWindowAsync()
+    {
+        _closeRunning = true;
+        try
         {
-            e.Cancel = true;
-            return;
+            if (_closed || !await PrepareToCloseAll() || _closed) return;
+            _closeApproved = true;
+            Close();
         }
-        foreach (var model in _tabs.ToList()) Discard(model);
-        AppSettings.Current.OpenTabs = open;
-        SavePlacement();
+        finally
+        {
+            _closeRunning = false;
+        }
+    }
+
+    /// <summary>Flushes every tab's pending edits, then asks about each unsaved document. False if anything should stay open.</summary>
+    private async Task<bool> PrepareToCloseAll()
+    {
+        foreach (var model in _tabs.ToList())
+        {
+            if (model.Tab.IsBusy && !model.Tab.HasPendingEdits)
+            {
+                TabStrip.SelectedItem = model;
+                ShowStatus($"Wait a moment: {model.Title} is still busy.");
+                return false;
+            }
+            await model.Tab.FlushPendingEditsAsync();
+            if (_closed) return false;
+        }
+        return await ConfirmUnsavedAsync(_tabs.ToList());
     }
 
     /// <summary>Asks about each unsaved document first; nothing closes unless every answer allows it.</summary>
-    private bool ConfirmUnsaved(IEnumerable<TabModel> models)
+    private async Task<bool> ConfirmUnsavedAsync(IEnumerable<TabModel> models)
     {
-        foreach (var model in models.Where(m => m.Tab.Session.IsDirty))
+        foreach (var model in models)
         {
+            if (!_tabs.Contains(model) || !model.Tab.Session.IsDirty) continue;
             TabStrip.SelectedItem = model;
             switch (Prompt.SaveChanges(this, model.Tab.Session.DisplayName))
             {
                 case SaveChoice.Cancel:
                     return false;
-                case SaveChoice.Save when !Save(model.Tab):
+                case SaveChoice.Save when !await SaveAsync(model.Tab):
                     return false;
             }
+            if (_closed) return false;
         }
         return true;
     }
+
+    /// <summary>Last step of closing the window: remember the open files (after any Save As), release everything.</summary>
+    private void FinishClose()
+    {
+        if (_finished) return;
+        _finished = true;
+        RememberOpenTabs();
+        foreach (var model in _tabs.ToList()) Discard(model);
+        SavePlacement();
+    }
+
+    private void RememberOpenTabs() =>
+        AppSettings.Current.OpenTabs = [.. _tabs.Where(t => t.Tab.Session.FilePath is not null).Select(t => t.Tab.Session.FilePath!)];
 
     private void Discard(TabModel model)
     {
@@ -466,13 +779,94 @@ public partial class MainWindow : Window
         if (AppSettings.Current.ReopenTabs) OpenFiles(AppSettings.Current.OpenTabs.Where(File.Exists).ToList());
     }
 
-    private bool Save(DocumentTab tab)
+    // ───────────────────────────── Save ─────────────────────────────
+
+    private bool IsSaving(DocumentTab tab) => _saves.ContainsKey(tab);
+
+    /// <summary>
+    /// Saves a document (Save As if it has no file yet). Waits for a value still being typed and any edit in flight first;
+    /// a second request while one runs gets the same result instead of saving twice.
+    /// </summary>
+    private Task<bool> SaveAsync(DocumentTab tab, bool saveAs = false)
     {
-        if (tab.Session.FilePath is null || !tab.Session.IsPdf) return SaveAs(tab);
-        return WriteTo(tab, tab.Session.FilePath);
+        if (_saves.TryGetValue(tab, out var running)) return running;
+        var done = new TaskCompletionSource<bool>();
+        _saves[tab] = done.Task; // registered before anything runs, so Ctrl+S during the save can't start another
+        UpdateUi();
+        _ = Run();
+        return done.Task;
+
+        async Task Run()
+        {
+            var ok = false;
+            try
+            {
+                ok = await SaveCoreAsync(tab, saveAs);
+            }
+            catch (Exception ex) // top-level UI action: report any failure, never lose it
+            {
+                Log.Write($"Save {tab.Session.DisplayName} failed: {ex}");
+                Prompt.Error(this, $"Couldn't save {tab.Session.DisplayName}", ex.Message);
+            }
+            finally
+            {
+                _saves.Remove(tab);
+                UpdateUi();
+                done.TrySetResult(ok);
+            }
+        }
     }
 
-    private bool SaveAs(DocumentTab tab)
+    private async Task<bool> SaveCoreAsync(DocumentTab tab, bool saveAs)
+    {
+        try
+        {
+            if (tab.HasPendingEdits || tab.IsBusy) ShowStatus($"Saving {tab.Session.DisplayName} after the current change is written…");
+            await tab.FlushPendingEditsAsync();
+            if (tab.IsDisposed) return false;
+            var s = tab.Session;
+            if (saveAs || s.FilePath is null || !s.IsPdf) return await SaveAsDialogAsync(tab);
+            if (!s.IsDirty) return true; // nothing new (e.g. the open field held the value it already had)
+
+            var path = s.FilePath;
+            if (!s.IsMissingOnDisk() && s.HasChangedOnDisk())
+            {
+                switch (AskChangedOnDisk(s.DisplayName))
+                {
+                    case DiskChoice.Cancel:
+                        return false;
+                    case DiskChoice.SaveAs:
+                        return await SaveAsDialogAsync(tab);
+                }
+            }
+            return await WriteToAsync(tab, path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Write($"Save {tab.Session.DisplayName} failed: {ex}");
+            Prompt.Error(this, $"Couldn't save {tab.Session.DisplayName}", ex.Message);
+            return false;
+        }
+    }
+
+    private enum DiskChoice { Overwrite, SaveAs, Cancel }
+
+    private DiskChoice AskChangedOnDisk(string name)
+    {
+        var dlg = new FormDialog(this, $"{name} changed on disk", "Overwrite", 460);
+        dlg.AddNote("Another program changed this file after you opened it. Saving now replaces those changes with your version.");
+        var choice = DiskChoice.Cancel;
+        var saveAs = dlg.Add(null, new Button { Content = "Save as a new file instead…", Style = (Style)FindResource("TextButton"), HorizontalAlignment = HorizontalAlignment.Left });
+        saveAs.Click += (_, _) =>
+        {
+            choice = DiskChoice.SaveAs;
+            dlg.DialogResult = false;
+        };
+        if (dlg.ShowModal()) choice = DiskChoice.Overwrite;
+        return choice;
+    }
+
+    private async Task<bool> SaveAsDialogAsync(DocumentTab tab)
     {
         var s = tab.Session;
         var ext = s.IsPdf ? ".pdf" : Path.GetExtension(s.DisplayName);
@@ -485,26 +879,60 @@ public partial class MainWindow : Window
             AddExtension = true,
             InitialDirectory = Path.GetDirectoryName(s.FilePath) ?? AppSettings.Current.LastFolder,
         };
-        return dlg.ShowDialog(this) == true && WriteTo(tab, dlg.FileName);
+        if (dlg.ShowDialog(this) != true || tab.IsDisposed) return false;
+        var path = Path.GetFullPath(dlg.FileName);
+
+        // Two tabs must never share a file: the other tab's copy would silently go stale (and could overwrite this one).
+        var other = _tabs.FirstOrDefault(t => t.Tab != tab && string.Equals(t.Tab.Session.FilePath, path, StringComparison.OrdinalIgnoreCase));
+        if (other is not null)
+        {
+            if (other.Tab.IsBusy || other.Tab.HasPendingEdits || IsSaving(other.Tab))
+            {
+                Prompt.Info(this, $"{other.Title} is busy in another tab", "Wait until it's done, or choose another name.");
+                return false;
+            }
+            var lose = other.Tab.Session.IsDirty ? " Its unsaved changes will be lost." : "";
+            if (!Prompt.Confirm(this, $"{other.Title} is open in another tab",
+                    $"Saving here replaces that file, so its tab will be closed.{lose}", "Replace and close it", warning: true))
+                return false;
+        }
+
+        if (!await WriteToAsync(tab, path)) return false;
+        if (other is not null && _tabs.Contains(other))
+        {
+            var active = TabStrip.SelectedItem;
+            Discard(other);
+            if (active is TabModel a && _tabs.Contains(a)) TabStrip.SelectedItem = a;
+            UpdateUi();
+        }
+        return true;
     }
 
-    private bool WriteTo(DocumentTab tab, string path)
+    private async Task<bool> WriteToAsync(DocumentTab tab, string path)
     {
+        await PreviewGate.WaitAsync(); // a start-page preview may have this very file open right now
         try
         {
+            if (tab.IsDisposed) return false;
             tab.Session.SaveAs(path);
-            AppSettings.Current.AddRecent(path);
-            RefreshRecent();
-            ShowToast(new Toast($"Saved {Path.GetFileName(path)}", "Show in folder", () => Shell.ShowInFolder(path)));
-            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Log.Write($"Save {path} failed: {ex}");
+            Log.Write($"Save {Path.GetFileName(path)} failed: {ex}");
             Prompt.Error(this, $"Couldn't save {Path.GetFileName(path)}",
                 $"{ex.Message}{Environment.NewLine}{Environment.NewLine}If another program has the file open, close it there, or use Save As to save a copy.");
             return false;
         }
+        finally
+        {
+            PreviewGate.Release();
+        }
+        tab.NoteSaved();
+        lock (RecentThumbs) RecentThumbs.Remove(path); // the start page shows the new first page
+        AppSettings.Current.AddRecent(path);
+        RefreshRecent();
+        ShowToast(new Toast($"Saved {Path.GetFileName(path)}", "Show in folder", () => Shell.ShowInFolder(path)));
+        return true;
     }
 
     // ───────────────────────────── Drag and drop ─────────────────────────────
@@ -520,7 +948,9 @@ public partial class MainWindow : Window
         if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
         {
             e.Effects = DragDropEffects.Copy;
-            DropText.Text = files.Length == 1 ? $"Drop to open {Path.GetFileName(files[0])}" : $"Drop to open {files.Length} files";
+            DropText.Text = files.Length > 1 ? $"Drop to open {files.Length} files"
+                : Directory.Exists(files[0]) ? $"Drop to open the PDFs in {Path.GetFileName(Path.TrimEndingDirectorySeparator(files[0]))}"
+                : $"Drop to open {Path.GetFileName(files[0])}";
             DropOverlay.Visibility = Visibility.Visible;
         }
         else
@@ -535,8 +965,12 @@ public partial class MainWindow : Window
         DropOverlay.Visibility = Visibility.Collapsed;
         if (e.Handled || e.Data.GetData(DataFormats.FileDrop) is not string[] files) return;
         e.Handled = true;
-        Activate();
-        OpenFiles(files);
+        // Open after the drop completes: a dialog shown inside the handler would leave Explorer hanging mid-drag.
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            Activate();
+            OpenFiles(files);
+        });
     }
 
     private void ShowOpenDialog()
@@ -598,36 +1032,46 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Renders each recent file's first page in the background (cached for the session).</summary>
+    /// <summary>
+    /// Renders each recent file's first page in the background (cached for the session). Each preview opens the file only
+    /// while it renders, one at a time, and never while a save is writing (see <see cref="PreviewGate"/>).
+    /// </summary>
     private void LoadRecentThumbnails(List<RecentItem> items)
     {
         var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        foreach (var item in items)
-            if (RecentThumbs.TryGetValue(item.Path, out var cached)) item.Thumbnail = cached;
+        lock (RecentThumbs)
+            foreach (var item in items)
+                if (RecentThumbs.TryGetValue(item.Path, out var cached)) item.Thumbnail = cached;
 
         var todo = items.Where(i => i.Thumbnail is null).ToList();
         if (todo.Count == 0) return;
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
             foreach (var item in todo)
             {
+                if (_closed) return;
+                await PreviewGate.WaitAsync();
                 try
                 {
                     if (!File.Exists(item.Path)) continue;
-                    using var engine = PdfEngine.OpenPreview(item.Path);
-                    if (engine is null || engine.PageCount == 0) continue;
-                    var g = engine.GetPage(0);
-                    var scale = Math.Min(140 / g.Width, 170 / g.Height) * dpi;
-                    var bmp = PageViewer.ToBitmap(engine.Render(0, scale));
-                    Dispatcher.BeginInvoke(() =>
+                    BitmapSource bmp;
+                    using (var engine = PdfEngine.OpenPreview(item.Path))
                     {
-                        RecentThumbs[item.Path] = bmp;
-                        item.Thumbnail = bmp;
-                    });
+                        if (engine is null || engine.PageCount == 0) continue;
+                        var g = engine.GetPage(0);
+                        var scale = Math.Min(140 / g.Width, 170 / g.Height) * dpi;
+                        bmp = PageViewer.ToBitmap(engine.Render(0, scale));
+                    }
+                    lock (RecentThumbs) RecentThumbs[item.Path] = bmp;
+                    _ = Dispatcher.BeginInvoke(() => item.Thumbnail = bmp);
                 }
                 catch (Exception ex)
                 {
-                    Log.Write($"Preview of {item.Path} failed: {ex.Message}");
+                    Log.Write($"Preview of {Path.GetFileName(item.Path)} failed: {ex.Message}");
+                }
+                finally
+                {
+                    PreviewGate.Release();
                 }
             }
         });
@@ -654,14 +1098,12 @@ public partial class MainWindow : Window
 
     private void OnClearRecent(object sender, RoutedEventArgs e)
     {
-        var previous = AppSettings.Current.RecentFiles.ToList();
-        AppSettings.Current.RecentFiles.Clear();
-        AppSettings.Current.Save();
+        var snapshot = AppSettings.Current.ClearRecent();
+        lock (RecentThumbs) RecentThumbs.Clear();
         RefreshRecent();
         ShowToast(new Toast("Recent list cleared", "Undo", () =>
         {
-            AppSettings.Current.RecentFiles = previous;
-            AppSettings.Current.Save();
+            AppSettings.Current.RestoreRecent(snapshot);
             RefreshRecent();
         }));
     }
@@ -672,6 +1114,19 @@ public partial class MainWindow : Window
         CommandBindings.Add(new CommandBinding(command,
             (_, e) => { if (ActiveTab is { } t) execute(t); e.Handled = true; },
             (_, e) => { e.CanExecute = ActiveTab is { IsBusy: false } t && (can?.Invoke(t) ?? true); e.Handled = true; }));
+
+    /// <summary>Like <see cref="Bind"/>, but also available while the tab is busy (the action waits for it).</summary>
+    private void BindTab(ICommand command, Action<DocumentTab> execute, Func<DocumentTab, bool>? can = null) =>
+        CommandBindings.Add(new CommandBinding(command,
+            (_, e) => { if (ActiveTab is { } t) execute(t); e.Handled = true; },
+            (_, e) => { e.CanExecute = ActiveTab is { IsDisposed: false } t && (can?.Invoke(t) ?? true); e.Handled = true; }));
+
+    private async Task CloseAllAsync()
+    {
+        if (!await PrepareToCloseAll()) return;
+        foreach (var m in _tabs.ToList()) Discard(m);
+        UpdateUi();
+    }
 
     private void BindAlways(ICommand command, Action execute) =>
         CommandBindings.Add(new CommandBinding(command, (_, e) => { execute(); e.Handled = true; }, (_, e) => { e.CanExecute = true; e.Handled = true; }));
@@ -697,16 +1152,26 @@ public partial class MainWindow : Window
             UpdateUi();
         });
 
-        Bind(Cmd.Save, t => Save(t), t => t.Session.IsDirty || t.Session.FilePath is null);
-        Bind(Cmd.SaveAs, t => SaveAs(t));
+        // Save works while a field value is still being written (it waits for it) and when the only change is the value in
+        // the open field editor; a save already running isn't started twice.
+        BindTab(Cmd.Save, t => _ = SaveAsync(t),
+            t => !IsSaving(t) && (t.Session.IsDirty || t.Session.FilePath is null || t.HasPendingEdits));
+        BindTab(Cmd.SaveAs, t => _ = SaveAsync(t, saveAs: true), t => !IsSaving(t));
         Bind(Cmd.ShowInFolder, t => Shell.ShowInFolder(t.Session.FilePath!), t => t.Session.FilePath is not null);
-        Bind(Cmd.CloseDoc, _ => { if (TabStrip.SelectedItem is TabModel m) CloseTab(m); });
-        Bind(Cmd.CloseAll, _ =>
+        BindTab(Cmd.CloseDoc, t => { if (_tabs.FirstOrDefault(m => m.Tab == t) is { } m) _ = CloseTabAsync(m); });
+        BindTab(Cmd.CloseAll, t => _ = CloseAllAsync());
+        Bind(Cmd.ReloadFromDisk, t =>
         {
-            if (_tabs.Any(m => m.Tab.IsBusy) || !ConfirmUnsaved(_tabs.ToList())) return;
-            foreach (var m in _tabs.ToList()) Discard(m);
-            UpdateUi();
-        });
+            if (t.Session.IsMissingOnDisk())
+            {
+                ShowToast(new Toast($"{t.Session.DisplayName} is no longer on disk; use Save As to keep this copy.", IsError: true));
+                return;
+            }
+            if ((t.Session.IsDirty || t.HasPendingEdits) && !Prompt.Confirm(this, $"Reload {t.Session.DisplayName}?",
+                    "Your unsaved changes will be discarded and the file reopened as it is on disk.", "Reload", warning: true))
+                return;
+            _ = t.ReloadFromDiskAsync($"Reloaded {t.Session.DisplayName}");
+        }, t => t.Session.FilePath is not null && !IsSaving(t));
         Bind(Cmd.Print, t => _ = FileActions.Print(this, t), t => t.PageView.PageCount > 0);
         Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this), t => t.PageView.PageCount > 0);
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));
@@ -756,19 +1221,50 @@ public partial class MainWindow : Window
         });
 
         Bind(Cmd.Organize, t => t.SetOrganizing(!t.IsOrganizing), t => t.Session.IsPdf && t.PageView.PageCount > 0);
-        BindEdit(Cmd.RotateRight, t => Organize.RotateSelected(t, 90));
-        BindEdit(Cmd.RotateLeft, t => Organize.RotateSelected(t, -90));
+        BindEdit(Cmd.RotateRight, t => Organize.RotateSelected(t, 90), Organize.HasSelection);
+        BindEdit(Cmd.RotateLeft, t => Organize.RotateSelected(t, -90), Organize.HasSelection);
         BindEdit(Cmd.RotatePages, t => Organize.RotateDialog(this, t));
         BindEdit(Cmd.DeletePages, t => Organize.DeleteDialog(this, t), t => t.PageView.PageCount > 1);
-        BindEdit(Cmd.DeleteSelected, Organize.DeleteSelected, t => t.SelectedPages.Length < t.PageView.PageCount);
+        BindEdit(Cmd.DeleteSelected, Organize.DeleteSelected, t => Organize.HasSelection(t) && t.SelectedPages.Length < t.PageView.PageCount);
         BindEdit(Cmd.InsertPages, t => Organize.InsertFromFile(this, t));
         BindEdit(Cmd.InsertBlank, t => Organize.InsertBlank(this, t));
         BindEdit(Cmd.ExtractPages, t => Organize.Extract(this, t, this));
         BindEdit(Cmd.SplitDocument, t => Organize.Split(this, t, this), t => t.PageView.PageCount > 1);
         BindEdit(Cmd.MovePages, t => Organize.Move(this, t), t => t.PageView.PageCount > 1);
-        BindEdit(Cmd.DuplicatePages, Organize.Duplicate);
+        BindEdit(Cmd.DuplicatePages, Organize.Duplicate, Organize.HasSelection);
         BindEdit(Cmd.ReversePages, Organize.Reverse, t => t.PageView.PageCount > 1);
         BindEdit(Cmd.CropPages, t => Organize.Crop(this, t));
+
+        // Review: panes, text markup, notes, redaction
+        Bind(Cmd.ShowComments, t => t.ShowReviewPane(ReviewPane.Comments), t => t.Session.IsPdf);
+        Bind(Cmd.ShowAttachments, t => t.ShowReviewPane(ReviewPane.Attachments), t => t.Session.IsPdf);
+        Bind(Cmd.ShowLayers, t => t.ShowReviewPane(ReviewPane.Layers), t => t.LayerList.Count > 0);
+        Bind(Cmd.ShowSignatures, t => t.ShowReviewPane(ReviewPane.Signatures), t => t.SignatureResults.Count > 0);
+        Bind(Cmd.Highlight, t => _ = t.MarkupSelection(TextMarkupKind.Highlight), t => t.CanMarkup);
+        Bind(Cmd.Underline, t => _ = t.MarkupSelection(TextMarkupKind.Underline), t => t.CanMarkup);
+        Bind(Cmd.StrikeOut, t => _ = t.MarkupSelection(TextMarkupKind.StrikeOut), t => t.CanMarkup);
+        Bind(Cmd.AddNote, t => ToggleTool(t, ViewerTool.AddNote), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
+    }
+
+    private void OnAttachFile(object sender, RoutedEventArgs e)
+    {
+        if (ActiveTab is { IsBusy: false, Session.IsPdf: true } t) _ = t.AddAttachment();
+    }
+
+    private void OnRedactText(object sender, RoutedEventArgs e)
+    {
+        if (ActiveTab is { IsBusy: false } t && t.RedactSelection() == 0) ShowStatus("Select the text to redact first (Select text tool, T)");
+    }
+
+    private void OnRedactHits(object sender, RoutedEventArgs e)
+    {
+        if (ActiveTab is { IsBusy: false } t && t.RedactSearchHits() == 0) ShowStatus("Search first (Ctrl+F or the Search pane), then mark the matches");
+    }
+
+    private void OnApplyRedactions(object sender, RoutedEventArgs e)
+    {
+        if (ActiveTab is { IsBusy: false } t) _ = t.ApplyRedactions();
     }
 
     /// <summary>Fill and Sign tools toggle: clicking the active one goes back to the hand tool.</summary>
@@ -779,6 +1275,8 @@ public partial class MainWindow : Window
         {
             ViewerTool.AddText => "Click on the page where the text should go, then type",
             ViewerTool.AddCheck => "Click where each check mark should go; click a mark again to remove it",
+            ViewerTool.AddNote => "Click on the page where the note should go",
+            ViewerTool.Redact => "Drag over the areas to black out; nothing is removed until you apply the redactions",
             _ => "Click where each cross should go; click one again to remove it",
         });
         UpdateUi();
@@ -791,17 +1289,8 @@ public partial class MainWindow : Window
             tb.Copy();
             return;
         }
-        var text = t.PageView.GetSelectedText();
-        if (text.Length == 0) return;
-        try
-        {
-            Clipboard.SetText(text);
-            ShowStatus($"Copied {text.Length:N0} characters");
-        }
-        catch (COMException ex)
-        {
-            ShowToast(new Toast($"Couldn't copy: {ex.Message}", IsError: true));
-        }
+        // Long selections are read in the background; the viewer reports the outcome (a toast via the tab).
+        _ = t.PageView.CopySelectionAsync();
     }
 
     private void SetLayout(DocumentTab t, ViewLayout layout)
@@ -887,6 +1376,7 @@ public partial class MainWindow : Window
                 }
                 else
                 {
+                    if (!mi.IsEnabled) continue;
                     var item = mi;
                     items.Add(new PaletteItem(name, category, "", "", () => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent))));
                 }
@@ -919,8 +1409,20 @@ public partial class MainWindow : Window
                 .Select(x => x.Item)
                 .Take(60)];
         }
-        if (int.TryParse(q, out var page) && ActiveTab is { } t && page >= 1 && page <= t.PageView.PageCount)
-            result.Insert(0, new PaletteItem($"Go to page {page}", "", "", "", () => { t.SetOrganizing(false); t.PageView.GoToPage(page - 1); }));
+        if (ActiveTab is { } t && q.Length > 0)
+        {
+            // A page label ("iv", "A-3") or a page number; both when they point at different pages.
+            var byLabel = t.HasPageLabels ? DocumentFeatures.FindPageByLabel(Enumerable.Range(0, t.PageView.PageCount).Select(t.PageLabel).ToList(), q) : null;
+            if (int.TryParse(q, out var number) && number >= 1 && number <= t.PageView.PageCount && byLabel != number - 1)
+            {
+                var label = t.PageLabel(number - 1);
+                result.Insert(0, new PaletteItem(label != number.ToString() ? $"Go to page {number} ({label})" : $"Go to page {number}", "", "", "",
+                    () => { t.SetOrganizing(false); t.PageView.GoToPage(number - 1); }));
+            }
+            if (byLabel is { } p)
+                result.Insert(0, new PaletteItem($"Go to page {t.PageLabel(p)} ({p + 1} of {t.PageView.PageCount})", "", "", "",
+                    () => { t.SetOrganizing(false); t.PageView.GoToPage(p); }));
+        }
         PaletteList.ItemsSource = result;
         PaletteList.SelectedIndex = result.Count > 0 ? 0 : -1;
 
@@ -1015,6 +1517,7 @@ public partial class MainWindow : Window
         var restore = dlg.AddCheck("Reopen each file at the page where I left off", s.RestorePosition);
         var reopen = dlg.AddCheck("Reopen the files I had open when I closed PdfDesk", s.ReopenTabs);
         var dark = dlg.AddCheck("Dark pages (inverted colors for night reading)", s.DarkPages);
+        var author = dlg.AddText("Author name on comments", s.AuthorName is { Length: > 0 } a ? a : Environment.UserName);
         dlg.AddNote("To make PdfDesk your default PDF app: Windows Settings › Apps › Default apps › PdfDesk.");
         if (!dlg.ShowModal()) return;
 
@@ -1022,6 +1525,8 @@ public partial class MainWindow : Window
         s.RestorePosition = restore.IsChecked == true;
         s.ReopenTabs = reopen.IsChecked == true;
         s.DarkPages = dark.IsChecked == true;
+        var name = author.Text.Trim();
+        s.AuthorName = name == Environment.UserName ? "" : name; // empty = follow the Windows user name
         s.Save();
         App.ApplyTheme();
         foreach (var t in Tabs) t.SetDarkPages(s.DarkPages);
@@ -1039,7 +1544,7 @@ public partial class MainWindow : Window
         StartPage.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         AppTitle.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         DocCommands.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
-        Title = t is null ? "PdfDesk" : $"{(t.Session.IsDirty ? "● " : "")}{t.Session.DisplayName} – PdfDesk";
+        Title = t is null ? "PdfDesk" : $"{(t.Session.IsDirty ? "● " : "")}{t.DisplayTitle} – PdfDesk";
 
         var v = t?.PageView;
         HandButton.IsChecked = HandMenu.IsChecked = v?.Tool == ViewerTool.Hand;
@@ -1048,6 +1553,13 @@ public partial class MainWindow : Window
         AddTextButton.IsChecked = AddTextMenu.IsChecked = v?.Tool == ViewerTool.AddText;
         CheckButton.IsChecked = CheckMenu.IsChecked = v?.Tool == ViewerTool.AddCheck;
         CrossButton.IsChecked = CrossMenu.IsChecked = v?.Tool == ViewerTool.AddCross;
+        NoteButton.IsChecked = NoteMenu.IsChecked = v?.Tool == ViewerTool.AddNote;
+        RedactButton.IsChecked = RedactMenu.IsChecked = v?.Tool == ViewerTool.Redact;
+        var pdf = t is { IsBusy: false, IsOrganizing: false, Session.IsPdf: true };
+        AttachMenu.IsEnabled = pdf;
+        RedactTextMenu.IsEnabled = pdf && v!.HasSelection;
+        RedactHitsMenu.IsEnabled = pdf && t!.HasSearchResults;
+        ApplyRedactMenu.IsEnabled = pdf && v!.Redactions.Count > 0;
         HighlightFieldsMenu.IsChecked = v is { HasFormFields: true, HighlightFields: true };
         FitWidthMenu.IsChecked = v?.ZoomMode == ZoomMode.FitWidth;
         FitPageMenu.IsChecked = v?.ZoomMode == ZoomMode.FitPage;

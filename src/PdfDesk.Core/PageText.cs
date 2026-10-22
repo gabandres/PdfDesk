@@ -143,39 +143,47 @@ public sealed class PageText
         return (_lines[line].Start, _lines[line].End);
     }
 
-    /// <summary>Finds every occurrence of <paramref name="query"/>; whitespace in the query matches any run of whitespace, including line breaks.</summary>
-    public List<(int Start, int End)> Find(string query, bool matchCase, bool wholeWord)
+    /// <summary>
+    /// Finds every occurrence of <paramref name="query"/>; whitespace in the query matches any run of whitespace,
+    /// including line breaks, and words hyphenated across a line break ("exam-" / "ple") match unhyphenated.
+    /// Match lengths come from the comparer, so ligatures and ignorable characters highlight exactly.
+    /// </summary>
+    /// <param name="ignoreAccents">Treat "é" and "e" alike (diacritics are ignored).</param>
+    public List<(int Start, int End)> Find(string query, bool matchCase, bool wholeWord, bool ignoreAccents = false)
     {
         var hits = new List<(int, int)>();
         var terms = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (terms.Length == 0 || Text.Length == 0) return hits;
 
-        var cmp = matchCase ? CompareOptions.None : CompareOptions.IgnoreCase;
+        var view = _searchView ??= SearchView.For(Text);
+        var text = view.Text;
+        var cmp = (matchCase ? CompareOptions.None : CompareOptions.IgnoreCase) | (ignoreAccents ? CompareOptions.IgnoreNonSpace : CompareOptions.None);
         var ci = CultureInfo.InvariantCulture.CompareInfo;
         var pos = 0;
-        while (pos < Text.Length)
+        while (pos < text.Length)
         {
-            var first = ci.IndexOf(Text, terms[0], pos, cmp);
-            if (first < 0) break;
+            var rel = ci.IndexOf(text.AsSpan(pos), terms[0], cmp, out var length);
+            if (rel < 0 || length == 0) break; // nothing, or a query made only of ignorable characters
 
-            var end = first + terms[0].Length;
+            var first = pos + rel;
+            var end = first + length;
             var ok = true;
             for (var t = 1; t < terms.Length && ok; t++)
             {
                 var ws = end;
-                while (ws < Text.Length && char.IsWhiteSpace(Text[ws])) ws++;
-                if (ws == end || ws + terms[t].Length > Text.Length || ci.Compare(Text, ws, terms[t].Length, terms[t], 0, terms[t].Length, cmp) != 0)
+                while (ws < text.Length && char.IsWhiteSpace(text[ws])) ws++;
+                if (ws == end || !ci.IsPrefix(text.AsSpan(ws), terms[t], cmp, out var termLength) || termLength == 0)
                     ok = false;
                 else
-                    end = ws + terms[t].Length;
+                    end = ws + termLength;
             }
 
-            if (ok && wholeWord && ((first > 0 && IsWordChar(Text[first - 1])) || (end < Text.Length && IsWordChar(Text[end]))))
+            if (ok && wholeWord && ((first > 0 && IsWordChar(text[first - 1])) || (end < text.Length && IsWordChar(text[end]))))
                 ok = false;
 
             if (ok)
             {
-                hits.Add((first, end));
+                hits.Add(view.ToText(first, end));
                 pos = end;
             }
             else
@@ -184,6 +192,41 @@ public sealed class PageText
             }
         }
         return hits;
+    }
+
+    private SearchView? _searchView;
+
+    /// <summary>
+    /// The text as search sees it: a hyphen at a line break between two letters ("exam-\nple") and soft hyphens
+    /// (U+00AD, with a line break after them) are dropped, so the word reads whole. Map holds each character's index in
+    /// <see cref="Text"/> (null when nothing was dropped).
+    /// </summary>
+    private sealed class SearchView(string text, int[]? map)
+    {
+        public string Text { get; } = text;
+
+        public static SearchView For(string text)
+        {
+            if (text.IndexOf('­') < 0 && text.IndexOf("-\n", StringComparison.Ordinal) < 0) return new(text, null);
+            var sb = new StringBuilder(text.Length);
+            var map = new List<int>(text.Length);
+            for (var i = 0; i < text.Length; i++)
+            {
+                var c = text[i];
+                if (c == '­' || (c == '-' && i > 0 && char.IsLetter(text[i - 1]) && i + 2 < text.Length && text[i + 1] == '\n' && char.IsLetter(text[i + 2])))
+                {
+                    if (i + 1 < text.Length && text[i + 1] == '\n') i++;
+                    continue;
+                }
+                sb.Append(c);
+                map.Add(i);
+            }
+            return new(sb.ToString(), [.. map]);
+        }
+
+        /// <summary>A [start, end) range of this view as a range of the page text.</summary>
+        public (int, int) ToText(int start, int end) =>
+            map is null ? (start, end) : (map[start], end > start ? map[end - 1] + 1 : map[start]);
     }
 
     /// <summary>Short excerpt around a match for the search results list.</summary>

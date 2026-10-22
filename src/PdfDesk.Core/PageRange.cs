@@ -18,7 +18,7 @@ public static class PageRange
         var set = new SortedSet<int>();
         foreach (var raw in text.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var dash = raw.IndexOf('-');
+            var dash = raw.IndexOfAny(['-', '–', '—']); // en and em dashes come in from copied text and autocorrect
             int from, to;
             if (dash < 0)
             {
@@ -77,7 +77,7 @@ public static class PageRange
             page = pageCount;
             return true;
         }
-        return int.TryParse(s, out page);
+        return int.TryParse(s, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out page);
     }
 
     private static bool Fail(string raw, out string? error)

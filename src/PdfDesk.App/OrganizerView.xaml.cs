@@ -157,6 +157,9 @@ public partial class OrganizerView : UserControl
     public int[] SelectedPages => [.. _items.Where(i => i.IsSelected).Select(i => i.Index)];
     public int PageCount => _items.Count;
 
+    /// <summary>The page the organizer's "current page" means: the focused card, else the first selected one, else -1.</summary>
+    public int FocusedPage => _focus >= 0 && _focus < _items.Count ? _focus : _items.FirstOrDefault(i => i.IsSelected)?.Index ?? -1;
+
     public void Attach(DocumentTab tab, RenderScheduler scheduler)
     {
         _tab = tab;

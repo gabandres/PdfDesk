@@ -9,7 +9,7 @@ namespace PdfDesk.App.Viewer;
 
 public enum ViewLayout { SinglePage, Continuous, Facing, FacingCover }
 public enum ZoomMode { Custom, FitWidth, FitPage }
-public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross }
+public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact }
 
 public sealed record SearchHit(int Page, int Start, int End, IReadOnlyList<RectD> Rects, string Excerpt)
 {
@@ -37,7 +37,8 @@ public sealed partial class PageViewer : ScrollViewer
     private static readonly double[] ZoomSteps =
         [0.05, 0.0833, 0.125, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
 
-    private sealed record PageBitmap(BitmapSource Image, double Scale, RectD Region);
+    /// <summary>A rendered page or tile; <paramref name="PxX"/>/<paramref name="PxY"/> are MuPDF's rounded device origin of its first pixel.</summary>
+    private sealed record PageBitmap(BitmapSource Image, double Scale, RectD Region, int PxX, int PxY);
     private readonly record struct Anchor(int Page, double Xpt, double Ypt, double ViewX, double ViewY);
 
     private readonly PageSurface _surface;
@@ -51,6 +52,8 @@ public sealed partial class PageViewer : ScrollViewer
     private RenderScheduler? _scheduler;
     private PdfEngine? _engine;
     private Rect[] _rects = [];
+    private double[] _rowTop = [], _rowBottom = []; // per page: the top and bottom of its row (sorted by Y in every layout)
+    private int _singleIndex = -1;                  // single-page layout: the one laid-out page
     private double _zoom = 1;
     private ZoomMode _zoomMode = ZoomMode.FitWidth;
     private ViewLayout _layout = ViewLayout.Continuous;
@@ -92,8 +95,16 @@ public sealed partial class PageViewer : ScrollViewer
         HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
         VerticalScrollBarVisibility = ScrollBarVisibility.Visible;
         CanContentScroll = false;
-        Background = new SolidColorBrush(Color.FromRgb(0x80, 0x84, 0x8C));
         RenderOptions.SetBitmapScalingMode(_surface, BitmapScalingMode.HighQuality);
+        ApplyContrast();
+        Loaded += (_, _) =>
+        {
+            SystemParameters.StaticPropertyChanged -= OnSystemParametersChanged;
+            SystemParameters.StaticPropertyChanged += OnSystemParametersChanged;
+            ApplyContrast();
+        };
+        Unloaded += (_, _) => SystemParameters.StaticPropertyChanged -= OnSystemParametersChanged;
+        _surface.MouseLeave += (_, _) => HideLinkTip();
 
         IsManipulationEnabled = true; // hand tool; switched off for the other tools so touch acts as a mouse
         ManipulationStarting += (_, e) =>
@@ -136,6 +147,7 @@ public sealed partial class PageViewer : ScrollViewer
         {
             // Viewport size changes (window resize, nav pane, scrollbars appearing) re-fit and re-center the pages.
             if (Math.Abs(e.ViewportWidthChange) > 0.5 || Math.Abs(e.ViewportHeightChange) > 0.5) QueueRelayout();
+            if (Math.Abs(e.VerticalChange) > 0.5 || Math.Abs(e.HorizontalChange) > 0.5) HideLinkTip();
             UpdateCurrentPage();
             _surface.InvalidateVisual();
             QueueUpdate();
@@ -153,14 +165,24 @@ public sealed partial class PageViewer : ScrollViewer
         set
         {
             if (_invert == value) return;
+            var was = EffectiveInvert;
             _invert = value;
-            _generation++;
-            _full.Clear();
-            _detail.Clear();
-            _scheduler?.Clear(k => k[0] is 'p' or 'd');
-            _surface.InvalidateVisual();
-            QueueUpdate();
+            if (was != EffectiveInvert) DropPageBitmaps();
         }
+    }
+
+    /// <summary>Night reading is off in Windows high-contrast mode (the system colors decide there).</summary>
+    private bool EffectiveInvert => _invert && !_highContrast;
+
+    private void DropPageBitmaps()
+    {
+        _generation++;
+        _full.Clear();
+        _detail.Clear();
+        _stale.Clear();
+        _scheduler?.Clear(k => k[0] is 'p' or 'd');
+        _surface.InvalidateVisual();
+        QueueUpdate();
     }
     public int PageCount => _engine?.PageCount ?? 0;
     public int CurrentPage => _currentPage;
@@ -182,32 +204,49 @@ public sealed partial class PageViewer : ScrollViewer
             CommitEditor();
             _tool = value;
             IsManipulationEnabled = value == ViewerTool.Hand;
-            if (value != ViewerTool.SelectText) ClearSelection();
+            if (value != ViewerTool.SelectText && !_caretBrowsing) ClearSelection();
             UpdateCursor(Mouse.GetPosition(_surface));
             ToolChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
-    /// <summary>Attaches a (new) engine. With <paramref name="keepPosition"/> the view stays on the same page and zoom.</summary>
-    public void SetEngine(PdfEngine engine, RenderScheduler scheduler, bool keepPosition)
+    /// <summary>
+    /// Attaches a (new) engine. With <paramref name="keepPosition"/> the view stays on the same page and zoom.
+    /// <paramref name="contentOnly"/>: the edit only changed form field values or Fill &amp; Sign items (pages, their
+    /// order, sizes and text are unchanged), so the open field editor, fields, links, text selection and history stay.
+    /// Otherwise fields and Fill &amp; Sign items are dropped until <see cref="SetFormWidgets"/> / <see cref="SetStamps"/>
+    /// deliver the new ones, so clicks can't land on a field that belonged to a moved or deleted page.
+    /// </summary>
+    public void SetEngine(PdfEngine engine, RenderScheduler scheduler, bool keepPosition, bool contentOnly = false)
     {
         var anchor = keepPosition && _engine is not null ? CaptureAnchor() : (Anchor?)null;
+        contentOnly &= anchor is not null && _rects.Length == engine.PageCount;
+        if (!contentOnly)
+        {
+            // Save what the editor holds (by field name, so it lands on the right field wherever it moved) and close it.
+            CommitEditor();
+            CloseEditor();
+            ClearFormState();
+            ResetReview();
+        }
         _engine = engine;
         _scheduler = scheduler;
         _generation++;
         scheduler.Clear(k => !k.StartsWith('t'));
-        CommitEditor();
-        CloseEditor();
+        HideLinkTip();
         _stale.Clear();
-        if (anchor is not null && _rects.Length == engine.PageCount)
-            foreach (var (page, bmp) in _full) _stale[page] = bmp;
+        if (contentOnly)
+            foreach (var (page, bmp) in _full) _stale[page] = bmp; // same pages: show the old look until the re-render lands
         _full.Clear();
         _detail.Clear();
-        _links.Clear();
-        _texts.Clear();
-        _selAnchor = _selActive = null;
-        _back.Clear();
-        _forward.Clear();
+        if (!contentOnly)
+        {
+            _links.Clear();
+            _texts.Clear();
+            _selAnchor = _selActive = null;
+            _back.Clear();
+            _forward.Clear();
+        }
         _currentPage = Math.Clamp(anchor?.Page ?? 0, 0, Math.Max(0, engine.PageCount - 1));
         if (anchor is { } a)
             Relayout(a with { Page = _currentPage });
@@ -216,7 +255,7 @@ public sealed partial class PageViewer : ScrollViewer
             Relayout(null);
             ScrollToVerticalOffset(0);
         }
-        CurrentPageChanged?.Invoke(this, EventArgs.Empty);
+        RaiseCurrentPageChanged();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -300,6 +339,8 @@ public sealed partial class PageViewer : ScrollViewer
         if (n == 0)
         {
             _rects = [];
+            _rowTop = _rowBottom = [];
+            _singleIndex = -1;
             _surface.SetExtent(ViewW, ViewH);
             _surface.InvalidateVisual();
             return;
@@ -307,7 +348,7 @@ public sealed partial class PageViewer : ScrollViewer
         if (_layout == ViewLayout.SinglePage && anchor is { } sa && sa.Page != _currentPage && sa.Page >= 0 && sa.Page < n)
         {
             _currentPage = sa.Page;
-            CurrentPageChanged?.Invoke(this, EventArgs.Empty);
+            RaiseCurrentPageChanged();
         }
         var k = _zoom * PtToDip;
         var dpi = DpiScale;
@@ -370,6 +411,27 @@ public sealed partial class PageViewer : ScrollViewer
                 i = last + 1;
             }
             extentH = Math.Max(ViewH, y);
+        }
+
+        _singleIndex = _layout == ViewLayout.SinglePage ? Math.Clamp(_currentPage, 0, n - 1) : -1;
+        _rowTop = new double[n];
+        _rowBottom = new double[n];
+        for (var i = 0; i < n;)
+        {
+            var (first, last) = RowOf(i);
+            double top = double.PositiveInfinity, bottom = double.NegativeInfinity;
+            for (var j = first; j <= last; j++)
+                if (!_rects[j].IsEmpty)
+                {
+                    top = Math.Min(top, _rects[j].Top);
+                    bottom = Math.Max(bottom, _rects[j].Bottom);
+                }
+            for (var j = first; j <= last; j++)
+            {
+                _rowTop[j] = top;
+                _rowBottom[j] = bottom;
+            }
+            i = last + 1;
         }
 
         _surface.SetExtent(extentW, extentH);
@@ -467,7 +529,7 @@ public sealed partial class PageViewer : ScrollViewer
         {
             _currentPage = page;
             Relayout(null);
-            CurrentPageChanged?.Invoke(this, EventArgs.Empty);
+            RaiseCurrentPageChanged();
         }
         else if (_zoomMode == ZoomMode.FitPage && RowOf(page) != RowOf(_currentPage))
         {
@@ -487,7 +549,7 @@ public sealed partial class PageViewer : ScrollViewer
         if (_currentPage != page)
         {
             _currentPage = page;
-            CurrentPageChanged?.Invoke(this, EventArgs.Empty);
+            RaiseCurrentPageChanged();
         }
     }
 
@@ -539,7 +601,7 @@ public sealed partial class PageViewer : ScrollViewer
         if (best >= 0 && best != _currentPage)
         {
             _currentPage = best;
-            CurrentPageChanged?.Invoke(this, EventArgs.Empty);
+            RaiseCurrentPageChanged();
         }
     }
 
@@ -547,22 +609,26 @@ public sealed partial class PageViewer : ScrollViewer
 
     private IEnumerable<int> VisiblePages(Rect vp)
     {
-        // Rects are sorted by Y in every layout, so binary-search the first candidate.
+        var n = Math.Min(_rects.Length, _rowTop.Length);
+        if (_singleIndex >= 0)
+        {
+            if (_singleIndex < _rects.Length && !_rects[_singleIndex].IsEmpty && _rects[_singleIndex].IntersectsWith(vp)) yield return _singleIndex;
+            yield break;
+        }
+        // Rows are sorted by Y in every layout (pages within a facing row may differ in height, so search by row bounds).
         var lo = 0;
-        var hi = _rects.Length - 1;
+        var hi = n;
         while (lo < hi)
         {
             var mid = (lo + hi) / 2;
-            var r = _rects[mid];
-            if (!r.IsEmpty && r.Bottom < vp.Top) lo = mid + 1;
+            if (_rowBottom[mid] < vp.Top) lo = mid + 1;
             else hi = mid;
         }
-        for (var i = Math.Max(0, lo - 1); i < _rects.Length; i++)
+        for (var i = lo; i < n; i++)
         {
+            if (_rowTop[i] > vp.Bottom) break;
             var r = _rects[i];
-            if (r.IsEmpty) continue;
-            if (r.Top > vp.Bottom) break;
-            if (r.IntersectsWith(vp)) yield return i;
+            if (!r.IsEmpty && r.IntersectsWith(vp)) yield return i;
         }
     }
 
@@ -626,7 +692,7 @@ public sealed partial class PageViewer : ScrollViewer
         if (_engine is null || _scheduler is null || _rects.Length == 0) return;
         var engine = _engine;
         var gen = _generation;
-        var invert = _invert;
+        var invert = EffectiveInvert;
         var vp = Viewport;
         var visible = VisiblePages(vp).ToList();
         if (visible.Count == 0) return;
@@ -643,7 +709,7 @@ public sealed partial class PageViewer : ScrollViewer
             var g = engine.GetPage(page);
             var isVisible = visible.Contains(page);
             var dist = Math.Abs((_rects[page].Top + _rects[page].Bottom) / 2 - center) / Math.Max(1, vp.Height);
-            var priority = (isVisible ? 0 : 50) + dist;
+            var priority = (isVisible ? 0 : 50) + Math.Min(dist, 40); // always on the scheduler's view lane
 
             var fullScale = scale;
             var px = g.Width * g.Height * scale * scale;
@@ -653,19 +719,22 @@ public sealed partial class PageViewer : ScrollViewer
             {
                 var p = page;
                 var s = fullScale;
-                _scheduler.Enqueue($"p{page}", priority, () =>
+                var whole = new RectD(0, 0, g.Width, g.Height);
+                var (ox, oy) = PixelOrigin(g, whole, s);
+                _scheduler.Enqueue($"p{page}", priority, ct =>
                 {
-                    var img = engine.Render(p, s);
+                    var img = engine.Render(p, s, null, ct);
                     var links = engine.GetLinks(p);
                     return (ToBitmap(img, invert), links);
                 }, result =>
                 {
                     if (gen != _generation || result is not (BitmapSource bmp, IReadOnlyList<PageLink> links)) return;
-                    _full[p] = new PageBitmap(bmp, s, new RectD(0, 0, g.Width, g.Height));
+                    _full[p] = new PageBitmap(bmp, s, whole, ox, oy);
                     _stale.Remove(p);
                     _links[p] = links;
                     _surface.InvalidateVisual();
-                });
+                    UpdateCursor(Mouse.GetPosition(_surface));
+                }, tag: (s, gen));
             }
 
             if (fullScale < scale && isVisible)
@@ -682,32 +751,29 @@ public sealed partial class PageViewer : ScrollViewer
                     var visPt = new RectD((vis.X - r.X) / k, (vis.Y - r.Y) / k, vis.Width / k, vis.Height / k);
                     var ok = _detail.TryGetValue(page, out var d) && Math.Abs(d.Scale - scale) < 1e-6
                              && d.Region.Inflate(0.5).Contains(visPt.X, visPt.Y) && d.Region.Inflate(0.5).Contains(visPt.Right, visPt.Bottom);
-                    if (!ok)
+                    if (!ok && !TileCovers(page, scale, visPt))
                     {
                         var p = page;
                         var s = scale;
-                        _scheduler.Enqueue($"d{page}", priority + 0.5, () => ToBitmap(engine.Render(p, s, region), invert), result =>
+                        var (ox, oy) = PixelOrigin(g, region, s);
+                        _pendingTiles[p] = (s, region, gen);
+                        _scheduler.Enqueue($"d{page}", priority + 0.5, ct => ToBitmap(engine.Render(p, s, region, ct), invert), result =>
                         {
                             if (gen != _generation || result is not BitmapSource bmp) return;
-                            _detail[p] = new PageBitmap(bmp, s, region);
+                            _pendingTiles.Remove(p);
+                            _detail[p] = new PageBitmap(bmp, s, region, ox, oy);
                             _surface.InvalidateVisual();
-                        });
+                        }, _ => _pendingTiles.Remove(p), tag: (s, region, gen));
                     }
                 }
             }
             else
             {
                 _detail.Remove(page);
+                _pendingTiles.Remove(page);
             }
 
-            if (!_texts.ContainsKey(page) && !_scheduler.IsQueued($"x{page}"))
-            {
-                var p = page;
-                _scheduler.Enqueue($"x{page}", 100 + priority, () => engine.GetText(p), result =>
-                {
-                    if (gen == _generation && result is PageText t) _texts[p] = t;
-                });
-            }
+            if (!_texts.ContainsKey(page)) RequestText(page, isVisible ? 1 + dist : 20 + dist);
         }
 
         // Drop bitmaps far from the viewport, then the farthest ones until the cache fits its pixel budget.
@@ -723,9 +789,31 @@ public sealed partial class PageViewer : ScrollViewer
             _full.Remove(p);
         }
         foreach (var p in _detail.Keys.Where(p => !visible.Contains(p)).ToList()) _detail.Remove(p);
+        foreach (var p in _pendingTiles.Keys.Where(p => !visible.Contains(p)).ToList()) _pendingTiles.Remove(p);
         // Text layers are small but add up over a long scroll; the engine keeps its own LRU for re-use.
         foreach (var p in _texts.Keys.Where(p => p < keepFrom - 8 || p > keepTo + 8).ToList()) _texts.Remove(p);
-        _scheduler.Clear(key => key[0] is 'p' or 'd' or 'x' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
+        // Cancel (even mid-render) pages that scrolled out of reach and tiles of pages no longer in view.
+        _scheduler.Clear(key => int.TryParse(key.AsSpan(1), out var p) && key[0] switch
+        {
+            'p' => !wanted.Contains(p),
+            'd' => !visible.Contains(p),
+            'x' => p < keepFrom - 8 || p > keepTo + 8,
+            _ => false,
+        });
+    }
+
+    private readonly Dictionary<int, (double Scale, RectD Region, int Generation)> _pendingTiles = [];
+
+    /// <summary>True when the tile being made for <paramref name="page"/> will cover the visible part at this scale.</summary>
+    private bool TileCovers(int page, double scale, RectD visPt) =>
+        _pendingTiles.TryGetValue(page, out var t) && t.Generation == _generation && Math.Abs(t.Scale - scale) < 1e-6
+        && t.Region.Inflate(0.5).Contains(visPt.X, visPt.Y) && t.Region.Inflate(0.5).Contains(visPt.Right, visPt.Bottom);
+
+    /// <summary>MuPDF's device-pixel origin of a render of <paramref name="region"/> (it rounds the area outward).</summary>
+    private static (int X, int Y) PixelOrigin(PageGeometry g, RectD region, double scale)
+    {
+        var r = new MuPDFCore.Rectangle(g.OriginX + region.X, g.OriginY + region.Y, g.OriginX + region.Right, g.OriginY + region.Bottom).Round(scale);
+        return (r.X0, r.Y0);
     }
 
     public static BitmapSource ToBitmap(RenderedImage img, bool invert)
@@ -760,18 +848,19 @@ public sealed partial class PageViewer : ScrollViewer
 
     private static readonly Brush PageBrush = Frozen(Brushes.White);
     private static readonly Brush DarkPageBrush = Frozen(new SolidColorBrush(Color.FromRgb(26, 26, 26)));
-    private static readonly Brush ShadowBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x50, 0, 0, 0)));
-    private static readonly Brush HitBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x60, 0xFF, 0xD0, 0x00)));
-    private static readonly Brush ActiveHitBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0x80, 0x00)));
-    private static readonly Pen ActiveHitPen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(0xE0, 0x60, 0x00)), 1.5));
-    private static readonly Brush SelectionBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x60, 0x30, 0x80, 0xFF)));
-    private static readonly Pen SnapPen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(0x20, 0x70, 0xE0)), 1) { DashStyle = DashStyles.Dash });
-    private static readonly Brush SnapBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x20, 0x20, 0x70, 0xE0)));
 
     private static T Frozen<T>(T f) where T : Freezable
     {
         if (f.CanFreeze) f.Freeze();
         return f;
+    }
+
+    /// <summary>The surface's top-left in device pixels relative to the window (for snapping drawing to pixels).</summary>
+    private Point SurfaceDeviceOrigin(double dpi)
+    {
+        if (PresentationSource.FromVisual(_surface)?.RootVisual is not Visual root || !_surface.IsDescendantOf(root)) return default;
+        var p = _surface.TransformToAncestor(root).Transform(default);
+        return new Point(p.X * dpi, p.Y * dpi);
     }
 
     internal void Paint(DrawingContext dc)
@@ -783,47 +872,73 @@ public sealed partial class PageViewer : ScrollViewer
         var dpi = DpiScale;
         var deviceScale = _zoom * PtToDip * dpi;
         var (selFrom, selTo) = OrderedSelection();
+        var pal = _palette;
+        // Bitmaps must start on a device pixel to stay sharp, whatever the (fractional) scroll offset.
+        var origin = SurfaceDeviceOrigin(dpi);
+        double SnapX(double x) => (Math.Round(origin.X + x * dpi) - origin.X) / dpi;
+        double SnapY(double y) => (Math.Round(origin.Y + y * dpi) - origin.Y) / dpi;
+        var focused = IsKeyboardFocusWithin;
 
         foreach (var i in VisiblePages(vp))
         {
             var r = _rects[i];
-            dc.DrawRectangle(ShadowBrush, null, new Rect(r.X + 2, r.Y + 2, r.Width, r.Height));
-            dc.DrawRectangle(_invert ? DarkPageBrush : PageBrush, null, r);
+            var pr = new Rect(new Point(SnapX(r.Left), SnapY(r.Top)), new Point(SnapX(r.Right), SnapY(r.Bottom)));
+            dc.DrawRectangle(pal.Shadow, null, new Rect(pr.X + 2, pr.Y + 2, pr.Width, pr.Height));
+            dc.DrawRectangle(EffectiveInvert ? DarkPageBrush : PageBrush, null, pr);
 
             if (_full.TryGetValue(i, out var full) || _stale.TryGetValue(i, out full))
             {
                 var exact = Math.Abs(full.Scale - deviceScale) < 1e-6;
-                dc.DrawImage(full.Image, exact ? new Rect(r.X, r.Y, full.Image.PixelWidth / dpi, full.Image.PixelHeight / dpi) : r);
+                dc.DrawImage(full.Image, exact ? new Rect(pr.X, pr.Y, full.Image.PixelWidth / dpi, full.Image.PixelHeight / dpi) : pr);
             }
             if (_detail.TryGetValue(i, out var det) && Math.Abs(det.Scale - deviceScale) < 1e-6)
             {
-                var dr = ToSurfaceRect(i, det.Region);
-                dc.PushClip(new RectangleGeometry(r));
-                dc.DrawImage(det.Image, new Rect(dr.X, dr.Y, det.Image.PixelWidth / dpi, det.Image.PixelHeight / dpi));
+                // The tile's first pixel is MuPDF's rounded origin of its region; place it relative to the page's own
+                // rounded origin (where a full render at this scale starts), so it lines up with the page pixel for pixel.
+                var g = _engine.GetPage(i);
+                var (bx, by) = PixelOrigin(g, new RectD(0, 0, g.Width, g.Height), det.Scale);
+                dc.PushClip(new RectangleGeometry(pr));
+                dc.DrawImage(det.Image, new Rect(pr.X + (det.PxX - bx) / dpi, pr.Y + (det.PxY - by) / dpi, det.Image.PixelWidth / dpi, det.Image.PixelHeight / dpi));
                 dc.Pop();
             }
 
             PaintForms(dc, i);
+            PaintReview(dc, i);
 
             if (_hitsByPage.TryGetValue(i, out var hits))
                 foreach (var hit in hits)
                 {
                     var active = ReferenceEquals(hit, _activeHit);
                     foreach (var hr in hit.Rects)
-                        dc.DrawRectangle(active ? ActiveHitBrush : HitBrush, active ? ActiveHitPen : null, ToSurfaceRect(i, hr.Inflate(0.5)));
+                        dc.DrawRectangle(active ? pal.ActiveHit : pal.Hit, active ? pal.ActiveHitPen : null, ToSurfaceRect(i, hr.Inflate(0.5)));
                 }
 
-            if (selFrom is { } a && selTo is { } b && i >= a.Page && i <= b.Page && _texts.TryGetValue(i, out var text))
+            if (_texts.TryGetValue(i, out var text))
             {
-                var start = i == a.Page ? a.Caret : 0;
-                var end = i == b.Page ? b.Caret : text.Text.Length;
-                foreach (var sr in text.GetRects(start, end)) dc.DrawRectangle(SelectionBrush, null, ToSurfaceRect(i, sr));
+                if (selFrom is { } a && selTo is { } b && i >= a.Page && i <= b.Page)
+                {
+                    var start = i == a.Page ? a.Caret : 0;
+                    var end = i == b.Page ? b.Caret : text.Text.Length;
+                    foreach (var sr in text.GetRects(start, end)) dc.DrawRectangle(pal.Selection, null, ToSurfaceRect(i, sr));
+                }
+                if (_caretBrowsing && focused && _selActive is { } c && c.Page == i && CaretRect(text, c.Caret) is { } cr)
+                {
+                    var cs = ToSurfaceRect(i, cr);
+                    dc.DrawRectangle(pal.Caret, null, new Rect(SnapX(cs.X), cs.Y, Math.Max(1.5, 2 / dpi), cs.Height));
+                }
             }
 
             if (_snapPage == i)
             {
                 var sr = RectD.FromEdges(_snapStartPt.X, _snapStartPt.Y, _snapEndPt.X, _snapEndPt.Y);
-                dc.DrawRectangle(SnapBrush, SnapPen, ToSurfaceRect(i, sr));
+                dc.DrawRectangle(pal.SnapFill, pal.SnapPen, ToSurfaceRect(i, sr));
+            }
+
+            if (focused && _focusLink is { } fl && fl.Page == i)
+            {
+                var fr = ToSurfaceRect(i, fl.Link.Area);
+                fr.Inflate(2, 2);
+                dc.DrawRectangle(null, pal.FocusPen, fr);
             }
         }
     }
@@ -856,61 +971,6 @@ public sealed partial class PageViewer : ScrollViewer
         _surface.InvalidateVisual();
     }
 
-    // ───────────────────────────── Selection ─────────────────────────────
-
-    public bool HasSelection => _selAnchor is { } a && _selActive is { } b && a != b;
-    public bool SelectionIsOnOnePage => _selAnchor is { } a && _selActive is { } b && a.Page == b.Page;
-
-    private (TextPos?, TextPos?) OrderedSelection()
-    {
-        if (_selAnchor is not { } a || _selActive is not { } b || a == b) return (null, null);
-        return a.CompareTo(b) <= 0 ? (a, b) : (b, a);
-    }
-
-    public void ClearSelection()
-    {
-        if (_selAnchor is null && _selActive is null) return;
-        _selAnchor = _selActive = null;
-        _surface.InvalidateVisual();
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-    }
-
-    /// <summary>Selects all text in the document.</summary>
-    public void SelectAll()
-    {
-        if (_engine is null || PageCount == 0) return;
-        if (_tool != ViewerTool.SelectText) Tool = ViewerTool.SelectText;
-        _selAnchor = new TextPos(0, 0);
-        _selActive = new TextPos(PageCount - 1, int.MaxValue);
-        _surface.InvalidateVisual();
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-    }
-
-    public string GetSelectedText()
-    {
-        var (from, to) = OrderedSelection();
-        if (from is not { } a || to is not { } b || _engine is null) return "";
-        var sb = new System.Text.StringBuilder();
-        for (var p = a.Page; p <= b.Page && p < PageCount; p++)
-        {
-            var text = GetPageText(p, cache: b.Page - a.Page < 8);
-            var start = p == a.Page ? a.Caret : 0;
-            var end = p == b.Page ? Math.Min(b.Caret, text.Text.Length) : text.Text.Length;
-            if (sb.Length > 0) sb.Append('\n');
-            sb.Append(text.GetString(start, end));
-        }
-        return sb.ToString().Replace("\n", Environment.NewLine);
-    }
-
-    private PageText GetPageText(int page, bool cache = true)
-    {
-        if (_texts.TryGetValue(page, out var t)) return t;
-        if (_engine is null) return PageText.Empty;
-        t = _engine.GetText(page, cache);
-        if (cache) _texts[page] = t;
-        return t;
-    }
-
     // ───────────────────────────── Mouse & keyboard ─────────────────────────────
 
     private PageLink? LinkAt(int page, Point pt)
@@ -932,8 +992,11 @@ public sealed partial class PageViewer : ScrollViewer
         _dragged = false;
         _pressLink = page >= 0 ? LinkAt(page, ToPagePoint(page, sp)) : null;
         _pressLinkPage = page;
+        HideLinkTip();
+        ClearFocusLink();
         if (e.ChangedButton == MouseButton.Left && HandleFormMouseDown(e, page, sp)) return;
         CommitEditor();
+        if (HandleReviewDown(e, page, sp)) return;
 
         switch (_tool)
         {
@@ -944,7 +1007,7 @@ public sealed partial class PageViewer : ScrollViewer
             {
                 var p = page >= 0 ? page : NearestPage(sp);
                 if (p < 0) break;
-                var text = GetPageText(p);
+                if (TryGetPageText(p) is not { } text) break; // still loading (the cursor stays an arrow until it arrives)
                 var pt = ToPagePoint(p, sp);
                 var caret = text.HitTest(pt.X, pt.Y);
                 if (e.ClickCount == 2 || e.ClickCount == 3)
@@ -966,6 +1029,10 @@ public sealed partial class PageViewer : ScrollViewer
                 _surface.InvalidateVisual();
                 break;
             }
+            case ViewerTool.Redact when page >= 0:
+                _markPage = page;
+                _markStartPt = _markEndPt = ToPagePoint(page, sp);
+                break;
             case ViewerTool.Snapshot when page >= 0:
                 _snapPage = page;
                 _snapStartPt = _snapEndPt = ToPagePoint(page, sp);
@@ -1000,9 +1067,16 @@ public sealed partial class PageViewer : ScrollViewer
                 if (p >= 0)
                 {
                     var pt = ToPagePoint(p, sp);
-                    _selActive = new TextPos(p, GetPageText(p).HitTest(pt.X, pt.Y));
+                    if (TryGetPageText(p) is { } t) _selActive = new TextPos(p, t.HitTest(pt.X, pt.Y));
                     _surface.InvalidateVisual();
                 }
+            }
+            else if (_markPage >= 0)
+            {
+                var pt = ToPagePoint(_markPage, sp);
+                var g = _engine!.GetPage(_markPage);
+                _markEndPt = new Point(Math.Clamp(pt.X, 0, g.Width), Math.Clamp(pt.Y, 0, g.Height));
+                _surface.InvalidateVisual();
             }
             else if (_snapPage >= 0)
             {
@@ -1036,18 +1110,22 @@ public sealed partial class PageViewer : ScrollViewer
         Cursor = null;
         if (FormCursor(page, sp) is { } formCursor)
         {
+            HideLinkTip();
             _surface.Cursor = formCursor;
             return;
         }
-        if (page >= 0 && LinkAt(page, ToPagePoint(page, sp)) is not null)
+        if (page >= 0 && LinkAt(page, ToPagePoint(page, sp)) is { } link)
         {
+            ShowLinkTip(page, link, keyboard: false);
             _surface.Cursor = Cursors.Hand;
             return;
         }
+        if (!ShowAnnotTip(page, sp)) HideLinkTip();
+        if (_tool == ViewerTool.SelectText && page >= 0 && !_texts.ContainsKey(page)) RequestText(page, 0);
         _surface.Cursor = _tool switch
         {
             ViewerTool.SelectText when page >= 0 && _texts.TryGetValue(page, out var t) && IsOverText(t, ToPagePoint(page, sp)) => Cursors.IBeam,
-            ViewerTool.Snapshot => Cursors.Cross,
+            ViewerTool.Snapshot or ViewerTool.AddNote or ViewerTool.Redact => Cursors.Cross,
             _ => Cursors.Arrow,
         };
 
@@ -1058,6 +1136,7 @@ public sealed partial class PageViewer : ScrollViewer
     {
         var sp = e.GetPosition(_surface);
         var wasSnap = _snapPage;
+        var wasMark = _markPage;
         var link = _pressLink;
         var linkPage = _pressLinkPage;
         var dragged = _dragged;
@@ -1073,11 +1152,12 @@ public sealed partial class PageViewer : ScrollViewer
 
         if (wasSelecting)
         {
-            if (_selAnchor == _selActive) _selAnchor = _selActive = null;
+            if (_selAnchor == _selActive && !_caretBrowsing) _selAnchor = _selActive = null; // caret browsing: the click placed the caret
             _surface.InvalidateVisual();
             SelectionChanged?.Invoke(this, EventArgs.Empty);
         }
 
+        if (wasMark >= 0) EndRedactDrag(wasMark, dragged);
         if (wasSnap >= 0 && dragged) CopySnapshot(wasSnap, RectD.FromEdges(_snapStartPt.X, _snapStartPt.Y, _snapEndPt.X, _snapEndPt.Y));
         UpdateCursor(sp);
     }
@@ -1085,6 +1165,11 @@ public sealed partial class PageViewer : ScrollViewer
     private void EndDrag()
     {
         _panning = _selecting = false;
+        if (_markPage >= 0)
+        {
+            _markPage = -1;
+            _surface.InvalidateVisual();
+        }
         if (_snapPage >= 0)
         {
             _snapPage = -1;
@@ -1096,9 +1181,10 @@ public sealed partial class PageViewer : ScrollViewer
 
     private void ActivateLink(PageLink link)
     {
+        HideLinkTip();
         if (link.Uri is null)
         {
-            GoToPage(link.PageIndex);
+            GoToPage(link.PageIndex, link.TargetY);
             return;
         }
 
@@ -1118,7 +1204,7 @@ public sealed partial class PageViewer : ScrollViewer
         var engine = _engine;
         var scale = Math.Max(2, _zoom * PtToDip * DpiScale);
         while (region.Width * region.Height * scale * scale > 40_000_000) scale *= 0.8;
-        _scheduler.Enqueue("snapshot", -1, () => ToBitmap(engine.Render(page, scale, region)), result =>
+        _scheduler.Enqueue("snapshot", -1, ct => ToBitmap(engine.Render(page, scale, region, ct)), result =>
         {
             if (result is not BitmapSource bmp) return;
             try
@@ -1130,7 +1216,9 @@ public sealed partial class PageViewer : ScrollViewer
             {
                 StatusMessage?.Invoke(this, $"Couldn't copy: {ex.Message}");
             }
-        });
+        }, ex => StatusMessage?.Invoke(this, ex is ObjectDisposedException
+            ? "Couldn't copy the snapshot: the document changed meanwhile. Try again."
+            : $"Couldn't copy the snapshot: {ex.Message}"));
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
@@ -1171,7 +1259,10 @@ public sealed partial class PageViewer : ScrollViewer
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (_engine is not null && HandleFormKey(e))
+        // Keys typed into a field or Fill & Sign editor bubble up here. Leave them alone: handling KeyDown makes WPF
+        // drop the character, so viewer shortcuts (H, A, T, Space…) would eat letters from the user's text.
+        if (IsEditorKey(e)) return;
+        if (_engine is not null && (HandleFormKey(e) || HandleCaretKey(e)))
         {
             e.Handled = true;
             return;
@@ -1222,6 +1313,9 @@ public sealed partial class PageViewer : ScrollViewer
                 break;
             case Key.Escape when HasSelection:
                 ClearSelection();
+                break;
+            case Key.Escape when _linkTip?.IsOpen == true:
+                HideLinkTip();
                 break;
             default:
                 base.OnKeyDown(e);

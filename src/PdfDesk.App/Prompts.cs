@@ -125,6 +125,16 @@ public static class ShortcutsWindow
             }
         }
         Walk(menu, "");
+        // Commands the window binds but no menu shows (so new commands appear here as soon as they are bound).
+        foreach (var field in typeof(Cmd).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not RoutedUICommand cmd) continue;
+            var gestures = cmd.InputGestures.OfType<KeyGesture>().ToList();
+            if (gestures.Count == 0 || !owner.CommandBindings.Cast<CommandBinding>().Any(b => b.Command == cmd)) continue;
+            var name = cmd.Text.Replace("_", "").TrimEnd('…');
+            if (rows.Exists(r => r.Name == name)) continue;
+            rows.Add(("Other commands", name, string.Join("  or  ", gestures.Select(g => g.GetDisplayStringForCulture(System.Globalization.CultureInfo.CurrentCulture)))));
+        }
         rows.AddRange(
         [
             ("Reading", "Scroll by a screen", "PgUp / PgDn / Space"),
@@ -180,5 +190,108 @@ public static class ShortcutsWindow
         win.Loaded += (_, _) => filter.Focus();
         win.KeyDown += (_, e) => { if (e.Key == Key.Escape) win.Close(); };
         win.ShowDialog();
+    }
+}
+
+/// <summary>
+/// A small progress window with a Cancel button for long jobs (printing, exporting). It only appears if the job takes
+/// longer than a moment. <see cref="Report"/> may be called from any thread.
+/// </summary>
+public sealed class ProgressPrompt : IDisposable
+{
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Window _win;
+    private readonly TextBlock _text;
+    private readonly ProgressBar _bar;
+    private readonly Button _cancel;
+    private readonly System.Windows.Threading.DispatcherTimer _delay;
+    private bool _closed;
+
+    public CancellationToken Token { get; }
+
+    /// <summary>Raised on the UI thread when the user cancels.</summary>
+    public event Action? Cancelled;
+
+    public ProgressPrompt(Window? owner, string title, string text)
+    {
+        Token = _cts.Token;
+        owner ??= Application.Current.MainWindow;
+        _text = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
+        _bar = new ProgressBar { IsIndeterminate = true, Height = 4, Margin = new Thickness(0, 14, 0, 0) };
+        _cancel = new Button { Content = "Cancel", MinWidth = 104, IsCancel = true, HorizontalAlignment = HorizontalAlignment.Right };
+        _cancel.Click += (_, _) => Cancel();
+        _win = new Window
+        {
+            Title = title,
+            Width = 400,
+            SizeToContent = SizeToContent.Height,
+            ResizeMode = ResizeMode.NoResize,
+            ShowInTaskbar = false,
+            WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
+        };
+        if (owner is { IsLoaded: true }) _win.Owner = owner;
+        // Closing the window counts as Cancel; the job closes it when it ends.
+        _win.Closing += (_, e) =>
+        {
+            if (_closed) return;
+            e.Cancel = true;
+            Cancel();
+        };
+
+        var body = new StackPanel { Margin = new Thickness(24, 20, 24, 20) };
+        body.Children.Add(new TextBlock { Text = title, FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
+        body.Children.Add(_text);
+        body.Children.Add(_bar);
+        var footer = new Border { Padding = new Thickness(24, 14, 24, 14), Child = _cancel, BorderThickness = new Thickness(0, 1, 0, 0) };
+        footer.SetResourceReference(Border.BackgroundProperty, "LayerFillColorDefaultBrush");
+        footer.SetResourceReference(Border.BorderBrushProperty, "DividerStrokeColorDefaultBrush");
+        var root = new DockPanel();
+        DockPanel.SetDock(footer, Dock.Bottom);
+        root.Children.Add(footer);
+        root.Children.Add(body);
+        _win.Content = root;
+        System.Windows.Automation.AutomationProperties.SetName(_bar, title);
+
+        _delay = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _delay.Tick += (_, _) =>
+        {
+            _delay.Stop();
+            if (!_closed) _win.Show();
+        };
+        _delay.Start();
+    }
+
+    /// <summary>Updates the message and (when given, 0..1) the progress bar.</summary>
+    public void Report(string text, double? fraction = null)
+    {
+        if (!_win.Dispatcher.CheckAccess())
+        {
+            _win.Dispatcher.BeginInvoke(() => Report(text, fraction));
+            return;
+        }
+        if (_closed || _cts.IsCancellationRequested) return;
+        _text.Text = text;
+        if (fraction is { } f)
+        {
+            _bar.IsIndeterminate = false;
+            _bar.Value = Math.Clamp(f, 0, 1) * 100;
+        }
+    }
+
+    private void Cancel()
+    {
+        if (_cts.IsCancellationRequested) return;
+        _cts.Cancel();
+        _cancel.IsEnabled = false;
+        _text.Text = "Cancelling…";
+        Cancelled?.Invoke();
+    }
+
+    public void Dispose()
+    {
+        if (_closed) return;
+        _closed = true;
+        _delay.Stop();
+        _win.Close();
     }
 }

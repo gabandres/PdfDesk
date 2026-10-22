@@ -16,6 +16,7 @@ public sealed class DocumentSession : IDisposable
     private int _version;
     private int _savedVersion;
     private int _nextVersion = 1;
+    private (long Length, DateTime WriteTimeUtc)? _onDisk;
 
     public string? FilePath { get; private set; }
     public string DisplayName { get; private set; }
@@ -53,10 +54,12 @@ public sealed class DocumentSession : IDisposable
     /// <exception cref="PasswordRequiredException"/>
     public static DocumentSession Open(string path, string? password = null)
     {
+        // Stamp before reading: a write that lands mid-read then shows up as a change rather than going unnoticed.
+        var stamp = DiskStamp(path);
         var data = File.ReadAllBytes(path);
         var type = PdfEngine.TypeFromPath(path);
         var engine = PdfEngine.Open(data, type, password);
-        return new DocumentSession(Path.GetFullPath(path), Path.GetFileName(path), data, password, type, engine);
+        return new DocumentSession(Path.GetFullPath(path), Path.GetFileName(path), data, password, type, engine) { _onDisk = stamp };
     }
 
     /// <summary>A new, unsaved PDF (e.g. the result of Combine or Extract).</summary>
@@ -97,25 +100,96 @@ public sealed class DocumentSession : IDisposable
         Swap(step.Data, engine, step.Version);
     }
 
-    /// <summary>Writes the current bytes to <paramref name="path"/> atomically (temp file, then replace).</summary>
+    /// <summary>
+    /// Writes the current bytes to <paramref name="path"/> atomically: a flushed temp file in the same folder, then
+    /// swapped in with File.Replace (which keeps the target's ACLs, attributes and creation time).
+    /// </summary>
+    /// <exception cref="UnauthorizedAccessException">The target is read-only (or access is denied).</exception>
     public void SaveAs(string path)
     {
         path = Path.GetFullPath(path);
-        var temp = Path.Combine(Path.GetDirectoryName(path)!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        var target = new FileInfo(path);
+        if (target.Exists && target.IsReadOnly)
+            throw new UnauthorizedAccessException($"\"{target.Name}\" is read-only. Save a copy under another name, or clear its read-only attribute.");
+
+        var temp = Path.Combine(target.DirectoryName!, $".{target.Name}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllBytes(temp, Data);
-            File.Move(temp, path, overwrite: true);
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16))
+            {
+                stream.Write(Data);
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (!File.Exists(path))
+            {
+                File.Move(temp, path);
+            }
+            else
+            {
+                try
+                {
+                    File.Replace(temp, path, destinationBackupFileName: null);
+                }
+                catch (IOException) when (File.Exists(temp))
+                {
+                    // Some file systems (FAT, certain network shares) can't replace; the target may already be gone.
+                    File.Move(temp, path, overwrite: true);
+                }
+            }
         }
         finally
         {
-            if (File.Exists(temp)) File.Delete(temp);
+            // Best effort: a failed cleanup must not hide the real error (or turn a completed save into a failure).
+            try
+            {
+                if (File.Exists(temp)) File.Delete(temp);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
         }
 
         FilePath = path;
         DisplayName = Path.GetFileName(path);
         _savedVersion = _version;
+        _onDisk = DiskStamp(path);
         StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>True when the file is missing or its size or last-write time differ from when it was opened or last saved.</summary>
+    public bool HasChangedOnDisk()
+    {
+        if (FilePath is null) return false;
+        var now = DiskStamp(FilePath);
+        return now is null || (_onDisk is { } then && now != then);
+    }
+
+    /// <summary>True when the document came from a file that no longer exists (moved, renamed or deleted).</summary>
+    public bool IsMissingOnDisk() => FilePath is not null && !File.Exists(FilePath);
+
+    /// <summary>
+    /// Re-reads the file (same password), discarding unsaved changes and undo history; raises ContentChanged then
+    /// StateChanged. On failure (I/O, password, corrupt file) nothing changes.
+    /// </summary>
+    public void ReloadFromDisk()
+    {
+        if (FilePath is null) throw new InvalidOperationException("This document has not been saved to a file.");
+        var stamp = DiskStamp(FilePath);
+        var data = File.ReadAllBytes(FilePath);
+        var engine = PdfEngine.Open(data, FileType, Password);
+        _undo.Clear();
+        _redo.Clear();
+        _onDisk = stamp;
+        var version = _nextVersion++;
+        _savedVersion = version;
+        Swap(data, engine, version);
+    }
+
+    private static (long, DateTime)? DiskStamp(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists ? (info.Length, info.LastWriteTimeUtc) : null;
     }
 
     private void Swap(byte[] data, PdfEngine engine, int version)

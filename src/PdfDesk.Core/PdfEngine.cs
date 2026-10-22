@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using MuPDFCore;
 using MuPDFCore.StructuredText;
 
@@ -8,10 +10,14 @@ public sealed class PasswordRequiredException(bool wrongPassword) : Exception(wr
     public bool WrongPassword { get; } = wrongPassword;
 }
 
-public sealed record OutlineNode(string Title, int PageIndex, IReadOnlyList<OutlineNode> Children);
+/// <summary>A bookmark. TargetY: where on the page it leads (page space, points from the top), when the destination says.</summary>
+public sealed record OutlineNode(string Title, int PageIndex, IReadOnlyList<OutlineNode> Children, double? TargetY = null);
 
-/// <summary>A clickable area on a page: either an internal jump (PageIndex) or an external URI.</summary>
-public sealed record PageLink(RectD Area, int PageIndex, string? Uri);
+/// <summary>
+/// A clickable area on a page: either an internal jump (PageIndex, plus TargetY in the target page's space when the
+/// destination names a position) or an external URI.
+/// </summary>
+public sealed record PageLink(RectD Area, int PageIndex, string? Uri, double? TargetY = null);
 
 /// <summary>Pixels from a render, packed BGR24 (tight stride = Width * 3).</summary>
 public sealed record RenderedImage(int Width, int Height, byte[] Pixels)
@@ -21,30 +27,43 @@ public sealed record RenderedImage(int Width, int Height, byte[] Pixels)
 
 /// <summary>
 /// One open document in MuPDF. MuPDF is not thread-safe per document, so every call takes a lock; callers may use
-/// it from any thread (renders run on a background worker, hit-testing on the UI thread).
+/// it from any thread (renders run on a background worker, hit-testing on the UI thread). Text, links and outline
+/// come from a second MuPDF instance of the same file with its own lock, so the UI never waits behind a render.
 /// </summary>
 public sealed class PdfEngine : IDisposable
 {
     private const int TextCacheSize = 48;
 
+    /// <summary>Largest render or image export allowed, in pixels (200 MP is 600 MB of BGR).</summary>
+    public const long MaxPixels = 200_000_000;
+
+    // Lock order: _gate before _textGate (only Dispose takes both).
     private readonly Lock _gate = new();
+    private readonly Lock _textGate = new();
     private readonly MuPDFContext _ctx;
     private readonly MuPDFDocument _doc;
+    private readonly Func<MuPDFContext, MuPDFDocument> _reopen;
+    private readonly string? _password;
+    private MuPDFContext? _textCtx;
+    private MuPDFDocument? _textDoc;
     private readonly PageGeometry[] _pages;
     private readonly Dictionary<int, PageText> _textCache = [];
     private readonly LinkedList<int> _textLru = [];
     private readonly Dictionary<int, PageLink[]> _links = [];
     private IReadOnlyList<OutlineNode>? _outline;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public int PageCount => _pages.Length;
     public bool IsEncrypted { get; }
 
-    private PdfEngine(MuPDFContext ctx, MuPDFDocument doc, bool encrypted)
+    /// <param name="reopen">Opens the same document again in another context (for the text instance).</param>
+    private PdfEngine(MuPDFContext ctx, MuPDFDocument doc, bool encrypted, Func<MuPDFContext, MuPDFDocument> reopen, string? password)
     {
         _ctx = ctx;
         _doc = doc;
         IsEncrypted = encrypted;
+        _reopen = reopen;
+        _password = password;
         _pages = new PageGeometry[doc.Pages.Count];
         for (var i = 0; i < _pages.Length; i++)
         {
@@ -69,7 +88,7 @@ public sealed class PdfEngine : IDisposable
                 if (string.IsNullOrEmpty(password)) throw new PasswordRequiredException(false);
                 if (!doc.TryUnlock(password)) throw new PasswordRequiredException(true);
             }
-            return new PdfEngine(ctx, doc, encrypted);
+            return new PdfEngine(ctx, doc, encrypted, c => new MuPDFDocument(c, data, type), password);
         }
         catch
         {
@@ -93,7 +112,7 @@ public sealed class PdfEngine : IDisposable
                 ctx.Dispose();
                 return null;
             }
-            return new PdfEngine(ctx, doc, false);
+            return new PdfEngine(ctx, doc, false, c => new MuPDFDocument(c, path), null);
         }
         catch
         {
@@ -121,15 +140,20 @@ public sealed class PdfEngine : IDisposable
     public PageGeometry GetPage(int index) => _pages[index];
 
     /// <summary>Renders a page (or a region of it, in page points) at <paramref name="scale"/> pixels per point.</summary>
-    public RenderedImage Render(int page, double scale, RectD? region = null)
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired (MuPDF stops mid-render).</exception>
+    /// <exception cref="InvalidOperationException">The image would exceed <see cref="MaxPixels"/>.</exception>
+    public RenderedImage Render(int page, double scale, RectD? region = null, CancellationToken cancel = default)
     {
+        cancel.ThrowIfCancellationRequested();
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            cancel.ThrowIfCancellationRequested();
             var g = _pages[page];
             var r = region ?? new RectD(0, 0, g.Width, g.Height);
             var area = new Rectangle(g.OriginX + r.X, g.OriginY + r.Y, g.OriginX + r.Right, g.OriginY + r.Bottom);
             var px = area.Round(scale);
+            CheckSize(px.Width, px.Height);
             var bytes = MuPDFDocument.GetRenderedSize(area, scale, PixelFormats.BGR);
             if (bytes != px.Width * px.Height * 3)
                 throw new InvalidOperationException($"Unexpected render buffer size {bytes} for {px.Width}x{px.Height}.");
@@ -137,28 +161,144 @@ public sealed class PdfEngine : IDisposable
             unsafe
             {
                 fixed (byte* p = pixels)
-                    _doc.Render(page, area, scale, PixelFormats.BGR, (IntPtr)p, includeAnnotations: true);
+                {
+                    if (!cancel.CanBeCanceled || !AbortableRender.TryRender(_ctx, _doc, page, area, scale, (IntPtr)p, cancel))
+                        _doc.Render(page, area, scale, PixelFormats.BGR, (IntPtr)p, includeAnnotations: true);
+                    cancel.ThrowIfCancellationRequested();
+                }
             }
             return new RenderedImage(px.Width, px.Height, pixels);
         }
     }
 
     /// <summary>Renders a page straight to a PNG or JPEG file at the given resolution.</summary>
-    public void SaveImage(int page, double dpi, string path, bool jpeg)
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired before the render started.</exception>
+    /// <exception cref="InvalidOperationException">The image would exceed <see cref="MaxPixels"/>.</exception>
+    public void SaveImage(int page, double dpi, string path, bool jpeg, CancellationToken cancel = default)
     {
+        cancel.ThrowIfCancellationRequested();
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            cancel.ThrowIfCancellationRequested();
             var scale = dpi / 72.0;
+            var g = _pages[page];
+            CheckSize(Math.Ceiling(g.Width * scale), Math.Ceiling(g.Height * scale));
             if (jpeg) _doc.SaveImageAsJPEG(page, scale, path, 90, includeAnnotations: true);
             else _doc.SaveImage(page, scale, PixelFormats.RGB, path, RasterOutputFileTypes.PNG, includeAnnotations: true);
         }
     }
 
+    /// <summary>
+    /// MuPDF renders stop early when their "cookie" says abort, but MuPDFCore's public Render passes no cookie (and the
+    /// Abort of its multi-threaded renderer blocks until the render is done). This calls the native entry point
+    /// MuPDFDocument.Render uses, the same way, with a cookie. Pinned to MuPDFCore 2.0.1's internals: if they differ,
+    /// TryRender returns false and the caller renders without mid-render abort.
+    /// </summary>
+    private static class AbortableRender
+    {
+        private delegate int RenderSubDisplayList(IntPtr ctx, IntPtr list, float x0, float y0, float x1, float y1, float zoom, int format, IntPtr pixels, IntPtr cookie);
+
+        private const BindingFlags Internal = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        private static readonly RenderSubDisplayList? Native;
+        private static readonly FieldInfo? DisplayLists, NativeList, NativeContext, XRes, YRes;
+        private static readonly ConstructorInfo? NewList;
+
+        static AbortableRender()
+        {
+            try
+            {
+                var asm = typeof(MuPDFDocument).Assembly;
+                var listType = asm.GetType("MuPDFCore.MuPDFDisplayList");
+                var native = asm.GetType("MuPDFCore.NativeMethods")?.GetMethod("RenderSubDisplayList", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                DisplayLists = typeof(MuPDFDocument).GetField("DisplayLists", Internal);
+                XRes = typeof(MuPDFDocument).GetField("ImageXRes", Internal);
+                YRes = typeof(MuPDFDocument).GetField("ImageYRes", Internal);
+                NativeContext = typeof(MuPDFContext).GetField("NativeContext", Internal);
+                NativeList = listType?.GetField("NativeDisplayList", Internal);
+                NewList = listType?.GetConstructor(Internal, [typeof(MuPDFContext), typeof(MuPDFPage), typeof(bool)]);
+                if (native is null || DisplayLists?.FieldType.GetElementType() != listType || XRes?.FieldType != typeof(double) || YRes?.FieldType != typeof(double) ||
+                    NativeContext?.FieldType != typeof(IntPtr) || NativeList?.FieldType != typeof(IntPtr) || NewList is null)
+                    return;
+                Native = native.CreateDelegate<RenderSubDisplayList>();
+            }
+            catch (Exception ex) when (ex is ArgumentException or MemberAccessException or TypeLoadException)
+            {
+                Native = null;
+            }
+        }
+
+        /// <summary>Renders like MuPDFDocument.Render (BGR, with annotations); false if it can't (then nothing was drawn).</summary>
+        /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired; the pixels are incomplete.</exception>
+        public static bool TryRender(MuPDFContext ctx, MuPDFDocument doc, int page, Rectangle area, double scale, IntPtr pixels, CancellationToken cancel)
+        {
+            if (Native is null || (double)XRes!.GetValue(doc)! != 72 || (double)YRes!.GetValue(doc)! != 72) return false;
+            // Regions reaching outside the page get clipped by MuPDFCore after rendering: leave those to it.
+            var b = doc.Pages[page].Bounds;
+            if (area.X0 < b.X0 - 0.01 || area.Y0 < b.Y0 - 0.01 || area.X1 > b.X1 + 0.01 || area.Y1 > b.Y1 + 0.01) return false;
+            if (DisplayLists!.GetValue(doc) is not Array lists) return false;
+            var list = lists.GetValue(page);
+            if (list is null)
+            {
+                list = NewList!.Invoke([ctx, doc.Pages[page], true]);
+                lists.SetValue(list, page);
+            }
+
+            var cookie = Marshal.AllocHGlobal(64); // fz_cookie is 24 bytes on 64-bit
+            try
+            {
+                for (var i = 0; i < 64; i += 4) Marshal.WriteInt32(cookie, i, 0);
+                int result;
+                using (cancel.Register(() => Marshal.WriteInt32(cookie, 0, 1)))
+                {
+                    result = Native((IntPtr)NativeContext!.GetValue(ctx)!, (IntPtr)NativeList!.GetValue(list)!,
+                        area.X0, area.Y0, area.X1, area.Y1, (float)scale, (int)PixelFormats.BGR, pixels, cookie);
+                }
+                cancel.ThrowIfCancellationRequested();
+                if (result != 0) throw new InvalidOperationException($"MuPDF could not render page {page + 1} (error {result}).");
+                return true;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(cookie);
+            }
+        }
+    }
+
+    private static void CheckSize(double width, double height)
+    {
+        if (width * height > MaxPixels)
+            throw new InvalidOperationException($"The image would be too large ({width:0} x {height:0} pixels). Use a lower zoom or resolution.");
+    }
+
+    /// <summary>The text instance of the document, opened on first use. Call under _textGate.</summary>
+    private MuPDFDocument TextDoc()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_textDoc is not null) return _textDoc;
+        var ctx = new MuPDFContext(32 * 1024 * 1024);
+        MuPDFDocument? doc = null;
+        try
+        {
+            doc = _reopen(ctx);
+            if (doc.EncryptionState == EncryptionState.Encrypted && !doc.TryUnlock(_password ?? ""))
+                throw new PasswordRequiredException(true);
+            if (doc.Pages.Count != _pages.Length) throw new InvalidOperationException("The document changed while open.");
+        }
+        catch
+        {
+            if (doc is not null) DisposeDocument(doc);
+            ctx.Dispose();
+            throw;
+        }
+        _textCtx = ctx;
+        return _textDoc = doc;
+    }
+
     /// <summary>The page's text layer (cached; cheap to call repeatedly from the UI).</summary>
     public PageText GetText(int page, bool cache = true)
     {
-        lock (_gate)
+        lock (_textGate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_textCache.TryGetValue(page, out var hit))
@@ -187,7 +327,7 @@ public sealed class PdfEngine : IDisposable
     {
         var g = _pages[page];
         var lines = new List<List<(string, RectD)>>();
-        using var st = _doc.GetStructuredTextPage(page, includeAnnotations: false);
+        using var st = TextDoc().GetStructuredTextPage(page, includeAnnotations: false);
         foreach (var block in st)
         {
             if (block is not MuPDFTextStructuredTextBlock tb) continue;
@@ -211,21 +351,21 @@ public sealed class PdfEngine : IDisposable
 
     public IReadOnlyList<PageLink> GetLinks(int page)
     {
-        lock (_gate)
+        lock (_textGate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_links.TryGetValue(page, out var cached)) return cached;
 
             var g = _pages[page];
             var list = new List<PageLink>();
-            foreach (var link in _doc.Pages[page].Links)
+            foreach (var link in TextDoc().Pages[page].Links)
             {
                 var a = link.ActiveArea;
                 var area = RectD.FromEdges(a.X0 - g.OriginX, a.Y0 - g.OriginY, a.X1 - g.OriginX, a.Y1 - g.OriginY);
                 switch (link.Destination)
                 {
                     case MuPDFInternalLinkDestination d when d.PageNumber >= 0 && d.PageNumber < _pages.Length:
-                        list.Add(new PageLink(area, d.PageNumber, null));
+                        list.Add(new PageLink(area, d.PageNumber, null, TargetY(d.PageNumber, d.Y)));
                         break;
                     case MuPDFExternalLinkDestination e when !string.IsNullOrWhiteSpace(e.Uri):
                         list.Add(new PageLink(area, -1, e.Uri));
@@ -238,13 +378,13 @@ public sealed class PdfEngine : IDisposable
 
     public IReadOnlyList<OutlineNode> GetOutline()
     {
-        lock (_gate)
+        lock (_textGate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_outline is not null) return _outline;
             try
             {
-                _outline = Convert(_doc.Outline);
+                _outline = Convert(TextDoc().Outline);
             }
             catch (Exception ex) when (ex is MuPDFException or InvalidOperationException or NullReferenceException)
             {
@@ -254,22 +394,33 @@ public sealed class PdfEngine : IDisposable
             return _outline;
         }
 
-        static List<OutlineNode> Convert(IEnumerable<MuPDFOutlineItem>? items)
+        List<OutlineNode> Convert(IEnumerable<MuPDFOutlineItem>? items)
         {
             var list = new List<OutlineNode>();
             if (items is null) return list;
             foreach (var item in items)
-                list.Add(new OutlineNode(item.Title ?? "", item.PageNumber, Convert(item.Children)));
+                list.Add(new OutlineNode(item.Title ?? "", item.PageNumber, Convert(item.Children), TargetY(item.PageNumber, item.Location.Y)));
             return list;
         }
     }
+
+    /// <summary>A destination's y (MuPDF page space) in our page space, or null when the destination names no position.</summary>
+    private double? TargetY(int page, float y) =>
+        page >= 0 && page < _pages.Length && float.IsFinite(y) ? Math.Clamp(y - _pages[page].OriginY, 0, _pages[page].Height) : null;
 
     public void Dispose()
     {
         lock (_gate)
         {
-            if (_disposed) return;
-            _disposed = true;
+            lock (_textGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                if (_textDoc is not null) DisposeDocument(_textDoc);
+                _textCtx?.Dispose();
+                _textDoc = null;
+                _textCtx = null;
+            }
             DisposeDocument(_doc);
             _ctx.Dispose();
         }

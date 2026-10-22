@@ -83,4 +83,16 @@ public static class Cmd
     public static readonly RoutedUICommand DuplicatePages = Make("D_uplicate Selected Pages", nameof(DuplicatePages));
     public static readonly RoutedUICommand CropPages = Make("Cr_op Pages…", nameof(CropPages));
     public static readonly RoutedUICommand ReversePages = Make("Re_verse Page Order", nameof(ReversePages));
+
+    // Review: panes and markup (bound by MainWindow when the UI for them lands)
+    public static readonly RoutedUICommand ShowComments = Make("_Comments", nameof(ShowComments));
+    public static readonly RoutedUICommand ShowAttachments = Make("_Attachments", nameof(ShowAttachments));
+    public static readonly RoutedUICommand ShowLayers = Make("_Layers", nameof(ShowLayers));
+    public static readonly RoutedUICommand ShowSignatures = Make("_Signatures", nameof(ShowSignatures));
+    public static readonly RoutedUICommand Highlight = Make("_Highlight Text", nameof(Highlight), K(Key.H, ModifierKeys.Control | ModifierKeys.Shift));
+    public static readonly RoutedUICommand Underline = Make("_Underline Text", nameof(Underline));
+    public static readonly RoutedUICommand StrikeOut = Make("_Strike Out Text", nameof(StrikeOut));
+    public static readonly RoutedUICommand AddNote = Make("Add _Note", nameof(AddNote));
+    public static readonly RoutedUICommand Redact = Make("_Redact", nameof(Redact));
+    public static readonly RoutedUICommand ReloadFromDisk = Make("Re_load from Disk", nameof(ReloadFromDisk), K(Key.F5));
 }

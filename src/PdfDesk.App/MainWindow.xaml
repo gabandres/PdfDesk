@@ -24,11 +24,19 @@
                 <ColumnDefinition x:Name="CaptionColumn" Width="140" />
             </Grid.ColumnDefinitions>
             <Image Source="PdfDesk.ico" Width="16" Height="16" Margin="14,0,10,0" VerticalAlignment="Center" />
-            <DockPanel Grid.Column="1" LastChildFill="False">
+            <!-- Tabs get at most the width left after the + button and a drag strip (set in code); they shrink, then scroll. -->
+            <DockPanel x:Name="TabArea" Grid.Column="1" LastChildFill="False">
                 <ListBox x:Name="TabStrip" DockPanel.Dock="Left" Background="Transparent" BorderThickness="0" Padding="0"
-                         ItemContainerStyle="{StaticResource TitleTab}" WindowChrome.IsHitTestVisibleInChrome="True"
+                         WindowChrome.IsHitTestVisibleInChrome="True"
                          ScrollViewer.HorizontalScrollBarVisibility="Hidden" ScrollViewer.VerticalScrollBarVisibility="Disabled"
                          ScrollViewer.CanContentScroll="False" AutomationProperties.Name="Open documents">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource TitleTab}">
+                            <Setter Property="MinWidth" Value="110" />
+                            <Setter Property="MaxWidth" Value="{Binding TabMaxWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
+                        </Style>
+                    </ListBox.ItemContainerStyle>
                     <ListBox.ItemsPanel>
                         <ItemsPanelTemplate>
                             <StackPanel Orientation="Horizontal" />
@@ -50,6 +58,8 @@
                 <Button x:Name="NewTabButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" FontSize="12" Height="30" MinWidth="30"
                         Margin="4,6,0,0" Content="&#xE710;" ToolTip="Open a file (Ctrl+O)" Command="app:Cmd.Open"
                         WindowChrome.IsHitTestVisibleInChrome="True" />
+                <ProgressBar x:Name="OpenProgress" DockPanel.Dock="Left" IsIndeterminate="True" Width="48" Height="4" Margin="10,4,0,0"
+                             VerticalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Opening files" />
                 <TextBlock x:Name="AppTitle" DockPanel.Dock="Left" Text="PdfDesk" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="12" />
             </DockPanel>
         </Grid>
@@ -85,6 +95,7 @@
                                     <MenuItem Command="app:Cmd.Save" />
                                     <MenuItem Command="app:Cmd.SaveAs" />
                                     <MenuItem Command="app:Cmd.ShowInFolder" />
+                                    <MenuItem Command="app:Cmd.ReloadFromDisk" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Print" />
                                     <MenuItem Command="app:Cmd.ExportImages" />
@@ -172,6 +183,24 @@
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Combine" />
                                 </MenuItem>
+                                <MenuItem Header="_Review">
+                                    <MenuItem Command="app:Cmd.ShowComments" />
+                                    <MenuItem Command="app:Cmd.ShowAttachments" />
+                                    <MenuItem Command="app:Cmd.ShowLayers" />
+                                    <MenuItem Command="app:Cmd.ShowSignatures" />
+                                    <Separator />
+                                    <MenuItem Command="app:Cmd.Highlight" />
+                                    <MenuItem Command="app:Cmd.Underline" />
+                                    <MenuItem Command="app:Cmd.StrikeOut" />
+                                    <MenuItem x:Name="NoteMenu" Command="app:Cmd.AddNote" />
+                                    <Separator />
+                                    <MenuItem x:Name="AttachMenu" Header="Attach a _File…" Click="OnAttachFile" />
+                                    <Separator />
+                                    <MenuItem x:Name="RedactMenu" Command="app:Cmd.Redact" />
+                                    <MenuItem x:Name="RedactTextMenu" Header="Mark Selected _Text for Redaction" Click="OnRedactText" />
+                                    <MenuItem x:Name="RedactHitsMenu" Header="Mark Search _Matches for Redaction" Click="OnRedactHits" />
+                                    <MenuItem x:Name="ApplyRedactMenu" Header="_Apply Redactions…" Click="OnApplyRedactions" />
+                                </MenuItem>
                                 <MenuItem Header="_Help">
                                     <MenuItem Command="app:Cmd.Shortcuts" />
                                     <MenuItem Command="app:Cmd.CommandPalette" />
@@ -200,6 +229,10 @@
                                 </ToggleButton>
                                 <ToggleButton x:Name="CheckButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCheck" Content="&#xE73E;" ToolTip="Add a check mark: click where it goes (K)" />
                                 <ToggleButton x:Name="CrossButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCross" Content="&#xE711;" ToolTip="Add a cross: click where it goes (X)" />
+                                <Border Style="{StaticResource BarSeparator}" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text (Ctrl+Shift+H)" AutomationProperties.Name="Highlight" />
+                                <ToggleButton x:Name="NoteButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE90A;" ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />
+                                <ToggleButton x:Name="RedactButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redact" Content="&#xE72E;" ToolTip="Redact: drag over areas to black out, then apply" AutomationProperties.Name="Redact" />
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <ToggleButton x:Name="OrganizeButton" Style="{StaticResource CommandButton}" Command="app:Cmd.Organize" ToolTip="Organize pages: reorder, rotate, delete in a grid (Ctrl+Shift+O)">
                                     <StackPanel Orientation="Horizontal">

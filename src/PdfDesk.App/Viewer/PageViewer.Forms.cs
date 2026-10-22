@@ -31,7 +31,9 @@ public sealed partial class PageViewer
     private FrameworkElement? _editor;
     private FormWidget? _editorWidget;
     private (int Page, Point Pt, string? Id, double Size)? _editorStamp;
+    private double _editorFontPt; // the open editor's text size in points (scaled with the zoom)
     private bool _committing;
+    private IReadOnlyList<int>? _pageRotations;
 
     public event EventHandler<FieldEdit>? FieldEdited;
     public event EventHandler<StampEdit>? StampEdited;
@@ -60,6 +62,18 @@ public sealed partial class PageViewer
             _focusWidget = widgets.FirstOrDefault(w => w.FieldName == _focusWidget.FieldName && w.Rect == _focusWidget.Rect);
         _surface.InvalidateVisual();
     }
+
+    /// <summary>
+    /// Each page's /Rotate (0, 90, 180 or 270; null = all upright), so the inline editor of a field on a turned page
+    /// runs along the field like its printed text.
+    /// </summary>
+    public void SetPageRotations(IReadOnlyList<int>? rotations)
+    {
+        _pageRotations = rotations;
+        PositionEditor();
+    }
+
+    private int RotationOf(int page) => _pageRotations is { } r && page >= 0 && page < r.Count ? ((r[page] % 360) + 360) % 360 : 0;
 
     public void ClearPendingValues()
     {
@@ -90,39 +104,54 @@ public sealed partial class PageViewer
 
     // ───────────────────────────── Painting ─────────────────────────────
 
-    private static readonly Brush FieldBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x2C, 0x33, 0x88, 0xFF)));
-    private static readonly Pen FieldHoverPen = Frozen(new Pen(new SolidColorBrush(Color.FromRgb(0x00, 0x67, 0xC0)), 1.5));
-    private static readonly Pen StampPen = Frozen(new Pen(new SolidColorBrush(Color.FromArgb(0xA0, 0x00, 0x67, 0xC0)), 1) { DashStyle = DashStyles.Dash });
     private static readonly Brush PendingOnBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x10, 0x10, 0x10)));
     private static readonly Brush WhiteBrush = Frozen(Brushes.White);
 
     private void PaintForms(DrawingContext dc, int page)
     {
+        var pal = _palette;
+        var focused = IsKeyboardFocusWithin;
         if (_widgetsByPage.TryGetValue(page, out var widgets))
         {
             foreach (var w in widgets)
             {
                 if (!IsFillable(w)) continue;
                 var r = ToSurfaceRect(page, w.Rect);
-                if (_highlightFields && !_invert) dc.DrawRectangle(FieldBrush, null, r);
+                if (_highlightFields && !EffectiveInvert) dc.DrawRectangle(pal.Field, pal.FieldPen, r);
 
                 // Optimistic check boxes / radios: show the new state until the re-rendered page arrives.
                 if (w.Kind is FormFieldKind.CheckBox or FormFieldKind.Radio && _pendingValues.TryGetValue(w.FieldName, out var pending))
                 {
-                    var on = pending == w.OnState || (pending == "On" && w.Kind == FormFieldKind.CheckBox);
                     var inner = r;
                     inner.Inflate(-Math.Min(r.Width, r.Height) * 0.12, -Math.Min(r.Width, r.Height) * 0.12);
                     dc.DrawRectangle(WhiteBrush, null, inner);
-                    if (on) DrawCheck(dc, inner);
+                    if (IsOnValue(w, pending)) DrawCheck(dc, inner);
                 }
-                if (ReferenceEquals(w, _hoverWidget) || ReferenceEquals(w, _focusWidget))
-                    dc.DrawRectangle(null, FieldHoverPen, r);
+                if (focused && ReferenceEquals(w, _focusWidget) && _editorWidget is null)
+                {
+                    var fr = r;
+                    fr.Inflate(2, 2);
+                    dc.DrawRectangle(null, pal.FocusPen, fr);
+                }
+                else if (ReferenceEquals(w, _hoverWidget) || ReferenceEquals(w, _focusWidget))
+                {
+                    dc.DrawRectangle(null, pal.HoverPen, r);
+                }
             }
         }
         if (_stampsByPage.TryGetValue(page, out var stamps) && _tool is ViewerTool.AddText or ViewerTool.AddCheck or ViewerTool.AddCross)
             foreach (var s in stamps)
-                dc.DrawRectangle(null, StampPen, ToSurfaceRect(page, s.Rect.Inflate(1)));
+                dc.DrawRectangle(null, pal.StampPen, ToSurfaceRect(page, s.Rect.Inflate(1)));
     }
+
+    /// <summary>
+    /// Whether a check box / radio value shows this widget checked, the way FormEditor.SetValues stores it: a widget is
+    /// on when the value is its own "on" state ("On" means the field's first widget that has one); a widget without an
+    /// appearance (no on state) can't be shown checked.
+    /// </summary>
+    private bool IsOnValue(FormWidget w, string value) =>
+        value is not ("Off" or "") && w.OnState is { } on
+        && (value == on || (value == "On" && _fillOrder.Find(x => x.FieldName == w.FieldName && x.OnState is not null)?.OnState == on));
 
     private static void DrawCheck(DrawingContext dc, Rect r)
     {
@@ -153,8 +182,23 @@ public sealed partial class PageViewer
     internal void DevType(string text)
     {
         if (_editor is TextBox tb) tb.Text = text;
+        else if (_editor is PasswordBox pb) pb.Password = text;
         else if (_editor is ComboBox cb) cb.SelectedItem = text;
+        else if (_editor is ListBox lb)
+            foreach (var item in lb.Items.OfType<ListBoxItem>()) item.IsSelected = text.Split('|').Contains(item.Content as string);
     }
+
+    /// <summary>An inline editor (form field or Fill &amp; Sign text) is open; its value isn't in the document yet.</summary>
+    public bool IsEditing => _editor is not null;
+
+    internal string? DevEditorText => _editor switch
+    {
+        TextBox tb => tb.Text,
+        PasswordBox pb => new string('*', pb.Password.Length),
+        ComboBox cb => cb.Text,
+        ListBox lb => string.Join('|', lb.Items.OfType<ListBoxItem>().Where(i => i.IsSelected).Select(i => i.Content)),
+        _ => null,
+    };
 
     internal int FillableCount => _fillOrder.Count;
     internal string DevDescribeField(int i) => i < _fillOrder.Count ? $"{_fillOrder[i].Kind} p{_fillOrder[i].PageIndex + 1} {_fillOrder[i].Rect.X:0},{_fillOrder[i].Rect.Y:0} {_fillOrder[i].Rect.Width:0}x{_fillOrder[i].Rect.Height:0} = {ValueOf(_fillOrder[i])}" : "";
@@ -214,12 +258,17 @@ public sealed partial class PageViewer
 
     private void ActivateWidget(FormWidget w)
     {
+        Focus(); // first: focus arriving from outside resets the focused item
         _focusWidget = w;
-        Focus();
+        _focusLink = null;
         switch (w.Kind)
         {
+            case FormFieldKind.CheckBox when w.OnState is null:
+                // No checked appearance: the document could only store "Off" for it, so don't pretend to check it.
+                StatusMessage?.Invoke(this, "This check box can't be changed: the form doesn't define its checked look.");
+                break;
             case FormFieldKind.CheckBox:
-                SetValue(w, ValueOf(w) is "Off" or "" ? w.OnState ?? "On" : "Off");
+                SetValue(w, ValueOf(w) == w.OnState ? "Off" : w.OnState);
                 break;
             case FormFieldKind.Radio:
                 if (ValueOf(w) != w.OnState && w.OnState is not null) SetValue(w, w.OnState);
@@ -240,36 +289,100 @@ public sealed partial class PageViewer
         FieldEdited?.Invoke(this, new FieldEdit(w.FieldName, value));
     }
 
+    /// <summary>Option texts to show: the display labels when the field has them, else the export values.</summary>
+    private static IReadOnlyList<string> LabelsOf(FormWidget w) => w.OptionLabels is { } l && l.Count == w.Options.Count ? l : w.Options;
+
+    private static string ExportOf(FormWidget w, string label)
+    {
+        if (IndexOf(w.Options, label) >= 0) return label;
+        var i = IndexOf(LabelsOf(w), label);
+        return i >= 0 ? w.Options[i] : label;
+    }
+
+    private static int IndexOf(IReadOnlyList<string> list, string value)
+    {
+        for (var i = 0; i < list.Count; i++)
+            if (list[i] == value) return i;
+        return -1;
+    }
+
     private void OpenFieldEditor(FormWidget w)
     {
         EnsureVisible(w.PageIndex, w.Rect);
-        var k = _zoom * PtToDip;
-        var fontPt = w.Multiline ? Math.Min(11, w.Rect.Height * 0.7) : Math.Clamp(w.Rect.Height * 0.62, 6, 14);
+        // Size the text from the field's own (unrotated) height: on a turned page that's the displayed width.
+        var fieldHeight = RotationOf(w.PageIndex) is 90 or 270 ? w.Rect.Width : w.Rect.Height;
+
+        if (w.Kind == FormFieldKind.Choice && w.MultiSelect)
+        {
+            _editorFontPt = 10;
+            var chosen = ValueOf(w).Split('\n').ToHashSet();
+            var labels = LabelsOf(w);
+            var list = new ListBox
+            {
+                SelectionMode = SelectionMode.Multiple,
+                MinHeight = 0,
+                BorderThickness = new Thickness(1.5),
+                Background = Brushes.White,
+                Foreground = Brushes.Black,
+                ToolTip = "Space or click picks options; Enter or Tab saves; Esc cancels.",
+            };
+            for (var i = 0; i < w.Options.Count; i++)
+                list.Items.Add(new ListBoxItem { Content = labels[i], Tag = w.Options[i], IsSelected = chosen.Contains(w.Options[i]), Padding = new Thickness(4, 0, 4, 0) });
+            list.SetResourceReference(BorderBrushProperty, "AccentFillColorDefaultBrush");
+            System.Windows.Automation.AutomationProperties.SetName(list, w.FieldName);
+            ShowEditor(list, w, null);
+            return;
+        }
 
         if (w.Kind == FormFieldKind.Choice)
         {
+            _editorFontPt = Math.Clamp(fieldHeight * 0.62, 6, 14);
+            var value = ValueOf(w);
             var combo = new ComboBox
             {
-                ItemsSource = w.Options,
+                ItemsSource = LabelsOf(w),
                 IsEditable = w.Editable,
-                Text = ValueOf(w),
-                SelectedItem = w.Options.Contains(ValueOf(w)) ? ValueOf(w) : null,
-                FontSize = Math.Max(11, fontPt * k),
                 MinHeight = 0,
                 Padding = new Thickness(4, 0, 4, 0),
             };
+            var index = IndexOf(w.Options, value);
+            if (index >= 0) combo.SelectedIndex = index;
+            else if (w.Editable) combo.Text = value;
             System.Windows.Automation.AutomationProperties.SetName(combo, w.FieldName);
-            combo.SelectionChanged += (_, _) => { if (!w.Editable && combo.SelectedItem is not null && !_committing) CommitEditor(); };
+            combo.SelectionChanged += (_, _) => { if (!w.Editable && combo.SelectedIndex >= 0 && !_committing) CommitEditor(); };
             ShowEditor(combo, w, null);
             combo.Dispatcher.BeginInvoke(() => combo.IsDropDownOpen = true);
             return;
         }
 
+        if (w.Password)
+        {
+            // Masked like the form asks; the value is still stored as plain text, as in any PDF form.
+            _editorFontPt = Math.Clamp(fieldHeight * 0.62, 6, 14);
+            var secret = new PasswordBox
+            {
+                Password = ValueOf(w),
+                MaxLength = w.MaxLength,
+                Padding = new Thickness(2, 0, 2, 0),
+                MinHeight = 0,
+                BorderThickness = new Thickness(1.5),
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = Brushes.White,
+                Foreground = Brushes.Black,
+                CaretBrush = Brushes.Black,
+            };
+            secret.SetResourceReference(BorderBrushProperty, "AccentFillColorDefaultBrush");
+            System.Windows.Automation.AutomationProperties.SetName(secret, w.FieldName);
+            ShowEditor(secret, w, null);
+            secret.SelectAll();
+            return;
+        }
+
+        _editorFontPt = w.Multiline ? Math.Min(11, fieldHeight * 0.7) : Math.Clamp(fieldHeight * 0.62, 6, 14);
         var box = new TextBox
         {
             Text = ValueOf(w),
             FontFamily = new FontFamily("Arial"),
-            FontSize = Math.Max(6, fontPt * k),
             AcceptsReturn = w.Multiline,
             TextWrapping = w.Multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
             VerticalContentAlignment = w.Multiline ? VerticalAlignment.Top : VerticalAlignment.Center,
@@ -292,6 +405,7 @@ public sealed partial class PageViewer
     private void OpenStampEditor(int page, Point topLeftPt, string text, double sizePt, string? id)
     {
         var k = _zoom * PtToDip;
+        _editorFontPt = sizePt;
         var box = new TextBox
         {
             Text = text,
@@ -325,7 +439,16 @@ public sealed partial class PageViewer
         editor.LostKeyboardFocus += OnEditorLostFocus;
         _overlay.Children.Add(editor);
         PositionEditor();
-        editor.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () => editor.Focus());
+        editor.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+        {
+            if (!ReferenceEquals(_editor, editor)) return;
+            // A list box takes focus on an option, so arrows and Space work at once.
+            if (editor is ListBox lb && (lb.Items.OfType<ListBoxItem>().FirstOrDefault(i => i.IsSelected) ?? lb.Items.OfType<ListBoxItem>().FirstOrDefault()) is { } item)
+                item.Focus();
+            else
+                editor.Focus();
+        });
+        _surface.InvalidateVisual();
     }
 
     /// <summary>Keeps the editor glued to its field or text when zooming or scrolling.</summary>
@@ -333,13 +456,34 @@ public sealed partial class PageViewer
     {
         if (_editor is null || _rects.Length == 0) return;
         var k = _zoom * PtToDip;
+        _editor.Visibility = Visibility.Visible;
         if (_editorWidget is { } w && w.PageIndex < _rects.Length && !_rects[w.PageIndex].IsEmpty)
         {
             var r = ToSurfaceRect(w.PageIndex, w.Rect);
+            var rotation = RotationOf(w.PageIndex);
+            // On a turned page the field's text runs along its long side: lay the editor out unrotated, then turn it.
+            var (length, thickness) = rotation is 90 or 270 ? (r.Height, r.Width) : (r.Width, r.Height);
             Canvas.SetLeft(_editor, r.X);
             Canvas.SetTop(_editor, r.Y);
-            _editor.Width = Math.Max(r.Width, 40);
-            _editor.Height = Math.Max(r.Height, 16);
+            _editor.Width = Math.Max(length, 40);
+            _editor.Height = Math.Max(thickness, 16);
+            _editor.LayoutTransform = rotation == 0 ? Transform.Identity : Frozen(new RotateTransform(rotation));
+            var size = _editorFontPt * k;
+            switch (_editor)
+            {
+                case TextBox tb:
+                    tb.FontSize = Math.Max(6, size);
+                    break;
+                case ComboBox cb:
+                    cb.FontSize = Math.Max(11, size);
+                    break;
+                case ListBox lb:
+                    lb.FontSize = Math.Max(9, size);
+                    break;
+                case PasswordBox pb:
+                    pb.FontSize = Math.Max(6, size);
+                    break;
+            }
         }
         else if (_editorStamp is { } s && s.Page < _rects.Length && !_rects[s.Page].IsEmpty)
         {
@@ -369,9 +513,14 @@ public sealed partial class PageViewer
                 Focus();
                 e.Handled = true;
                 break;
-            case Key.Tab when _editorWidget is { } w:
+            case Key.Enter when _editor is ListBox:
                 CommitEditor();
-                FocusNextField(w, shift);
+                Focus();
+                e.Handled = true;
+                break;
+            case Key.Tab when _editorWidget is { } w && (Keyboard.Modifiers & ~ModifierKeys.Shift) == 0:
+                CommitEditor();
+                if (!MoveFocusStop(shift, w)) LeaveViewer(shift);
                 e.Handled = true;
                 break;
         }
@@ -384,6 +533,10 @@ public sealed partial class PageViewer
         if (e.NewFocus is DependencyObject d && sender is DependencyObject s && IsDescendant(s, d)) return;
         CommitEditor();
     }
+
+    /// <summary>True when a key event comes from the open editor (or its dropdown) rather than the viewer itself.</summary>
+    private bool IsEditorKey(KeyEventArgs e) =>
+        _editor is { } editor && (editor.IsKeyboardFocusWithin || (e.OriginalSource is DependencyObject d && IsDescendant(editor, d)));
 
     private static bool IsDescendant(DependencyObject parent, DependencyObject child)
     {
@@ -404,7 +557,10 @@ public sealed partial class PageViewer
                 var value = _editor switch
                 {
                     TextBox tb => tb.Text,
-                    ComboBox cb => cb.IsEditable ? cb.Text : cb.SelectedItem as string ?? ValueOf(w),
+                    PasswordBox pb => pb.Password,
+                    ComboBox { IsEditable: true } cb => ExportOf(w, cb.Text),
+                    ComboBox cb => cb.SelectedIndex >= 0 && cb.SelectedIndex < w.Options.Count ? w.Options[cb.SelectedIndex] : ValueOf(w),
+                    ListBox lb => string.Join('\n', lb.Items.OfType<ListBoxItem>().Where(i => i.IsSelected).Select(i => (string)i.Tag)),
                     _ => ValueOf(w),
                 };
                 SetValue(w, value);
@@ -432,6 +588,7 @@ public sealed partial class PageViewer
         _editor = null;
         _editorWidget = null;
         _editorStamp = null;
+        _surface.InvalidateVisual();
     }
 
     /// <summary>The page-space box for typed text (Arial metrics match the PDF's Helvetica closely).</summary>
@@ -446,52 +603,6 @@ public sealed partial class PageViewer
             width = Math.Max(width, ft.WidthIncludingTrailingWhitespace);
         }
         return new RectD(topLeft.X, topLeft.Y, width + size * 0.4, lines.Length * size * 1.2 + size * 0.25);
-    }
-
-    // ───────────────────────────── Keyboard ─────────────────────────────
-
-    /// <summary>Tab / Shift+Tab: move through the fields in reading order (text and choice fields open for typing).</summary>
-    private bool FocusNextField(FormWidget? from, bool backwards)
-    {
-        if (_fillOrder.Count == 0) return false;
-        var index = from is null ? -1 : _fillOrder.FindIndex(w => w.FieldName == from.FieldName && w.Rect == from.Rect);
-        if (index < 0)
-        {
-            // Start at the first field on (or after) the current page.
-            index = backwards ? _fillOrder.FindLastIndex(w => w.PageIndex <= _currentPage) : _fillOrder.FindIndex(w => w.PageIndex >= _currentPage);
-            if (index < 0) index = backwards ? _fillOrder.Count - 1 : 0;
-        }
-        else
-        {
-            index = (index + (backwards ? -1 : 1) + _fillOrder.Count) % _fillOrder.Count;
-        }
-
-        var next = _fillOrder[index];
-        _focusWidget = next;
-        EnsureVisible(next.PageIndex, next.Rect);
-        if (next.Kind is FormFieldKind.Text or FormFieldKind.Choice) OpenFieldEditor(next);
-        else Focus();
-        _surface.InvalidateVisual();
-        return true;
-    }
-
-    /// <summary>Viewer keys for forms: Tab moves between fields, Space toggles the focused check box or radio.</summary>
-    private bool HandleFormKey(KeyEventArgs e)
-    {
-        if (e.Key == Key.Tab && (Keyboard.Modifiers & ~ModifierKeys.Shift) == 0 && _fillOrder.Count > 0)
-            return FocusNextField(_focusWidget, (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
-        if (e.Key is Key.Space or Key.Enter && Keyboard.Modifiers == ModifierKeys.None && _focusWidget is { } w && IsFillable(w))
-        {
-            ActivateWidget(w);
-            return true;
-        }
-        if (e.Key == Key.Escape && _focusWidget is not null)
-        {
-            _focusWidget = null;
-            _surface.InvalidateVisual();
-            return true;
-        }
-        return false;
     }
 
     private void EnsureVisible(int page, RectD rect)

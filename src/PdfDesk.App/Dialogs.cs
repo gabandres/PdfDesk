@@ -126,7 +126,7 @@ public sealed class PageRangePicker : StackPanel
     public PageRangePicker(DocumentTab tab, bool preferSelection)
     {
         _pageCount = tab.PageView.PageCount;
-        _currentPage = tab.PageView.CurrentPage;
+        _currentPage = Organize.CurrentPage(tab);
         _selection = tab.SelectedPages;
         var group = $"range{GetHashCode()}";
         _all.GroupName = _range.GroupName = group;
@@ -288,16 +288,94 @@ public static class PdfFiles
         return dlg.ShowDialog(owner) == true ? dlg.FolderName : null;
     }
 
-    /// <summary>Makes a file name safe and unique inside <paramref name="folder"/>.</summary>
-    public static string UniquePath(string folder, string fileName)
+    /// <summary>Longest file name stem PdfDesk generates (bookmark titles can be any length).</summary>
+    private const int MaxStem = 120;
+
+    /// <summary>Full paths stay under the classic MAX_PATH so Explorer and older apps can open them.</summary>
+    private const int MaxPath = 259;
+
+    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    /// <summary>
+    /// Makes a file name safe and unique inside <paramref name="folder"/>: invalid characters replaced, device names
+    /// avoided, and the name shortened so the full path fits. Names in <paramref name="reserved"/> count as taken (and the
+    /// result is added), so a batch can pick all its names before writing anything.
+    /// </summary>
+    /// <exception cref="IOException">The folder path itself is too long for any file name.</exception>
+    public static string UniquePath(string folder, string fileName, ISet<string>? reserved = null)
     {
         foreach (var c in Path.GetInvalidFileNameChars()) fileName = fileName.Replace(c, '_');
-        var path = Path.Combine(folder, fileName);
-        var stem = Path.GetFileNameWithoutExtension(fileName);
         var ext = Path.GetExtension(fileName);
-        for (var n = 2; File.Exists(path); n++) path = Path.Combine(folder, $"{stem} ({n}){ext}");
+        if (ext.Length > 10) ext = "";
+        var stem = (ext.Length > 0 ? fileName[..^ext.Length] : fileName).Trim().TrimEnd('.', ' ');
+        if (stem.Length == 0) stem = "Untitled";
+        if (ReservedNames.Contains(stem.Split('.')[0])) stem = "_" + stem;
+
+        // Room for the folder, a separator, " (999)" and the extension.
+        var room = Math.Min(MaxStem, MaxPath - Path.GetFullPath(folder).TrimEnd('\\').Length - 1 - 6 - ext.Length);
+        if (room < 8) throw new IOException("The folder path is too long. Choose a folder with a shorter path.");
+        if (stem.Length > room) stem = Truncate(stem, room).TrimEnd('.', ' ');
+
+        var path = Path.Combine(folder, stem + ext);
+        for (var n = 2; File.Exists(path) || Directory.Exists(path) || reserved?.Contains(path) == true; n++)
+            path = Path.Combine(folder, $"{stem} ({n}){ext}");
+        reserved?.Add(path);
         return path;
     }
+
+    /// <summary>Cuts to at most <paramref name="max"/> chars without splitting a surrogate pair.</summary>
+    private static string Truncate(string s, int max)
+    {
+        if (s.Length <= max) return s;
+        var cut = char.IsHighSurrogate(s[max - 1]) ? max - 1 : max;
+        return s[..cut];
+    }
+
+    /// <summary>
+    /// Writes a batch of new files (split, extract per page). Stops at the first failure, removes the partial file, and
+    /// throws <see cref="BatchWriteException"/> listing what was already written.
+    /// </summary>
+    public static void WriteBatch(IReadOnlyList<(string Path, Func<byte[]> Bytes)> files, CancellationToken cancel = default)
+    {
+        var written = new List<string>();
+        foreach (var (path, make) in files)
+        {
+            cancel.ThrowIfCancellationRequested();
+            try
+            {
+                var bytes = make();
+                using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) fs.Write(bytes);
+                written.Add(path);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (ex is not IOException { HResult: unchecked((int)0x80070050) }) // don't delete a file that already existed
+                    try { File.Delete(path); } catch (Exception) { }
+                throw new BatchWriteException(written, path, ex);
+            }
+        }
+    }
+
+    /// <summary>True when <paramref name="path"/> is the file behind a document open in any PdfDesk tab.</summary>
+    public static bool IsOpenInTab(string path)
+    {
+        var full = Path.GetFullPath(path);
+        return Application.Current.Windows.OfType<MainWindow>()
+            .SelectMany(w => w.DocsHost.Children.OfType<DocumentTab>())
+            .Any(t => t.Session.FilePath is { } open && string.Equals(Path.GetFullPath(open), full, StringComparison.OrdinalIgnoreCase));
+    }
+}
+
+/// <summary>A batch write failed partway; <see cref="Written"/> lists the files that were completed.</summary>
+public sealed class BatchWriteException(IReadOnlyList<string> written, string failedPath, Exception inner)
+    : IOException($"Couldn't write {Path.GetFileName(failedPath)}: {inner.Message}", inner)
+{
+    public IReadOnlyList<string> Written { get; } = written;
+    public string FailedPath { get; } = failedPath;
 }
 
 /// <summary>Combine Files: an ordered list of PDFs merged into one new document.</summary>

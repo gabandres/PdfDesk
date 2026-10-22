@@ -17,6 +17,21 @@
             <ToggleButton x:Name="PagesRail" Style="{StaticResource RailButton}" Content="&#xE8A9;" ToolTip="Pages (thumbnails)" />
             <ToggleButton x:Name="BookmarksRail" Style="{StaticResource RailButton}" Content="&#xE8A4;" ToolTip="Bookmarks" />
             <ToggleButton x:Name="SearchRail" Style="{StaticResource RailButton}" Content="&#xE721;" ToolTip="Search (Ctrl+Shift+F)" />
+            <ToggleButton x:Name="CommentsRail" Style="{StaticResource RailButton}" Content="&#xE90A;" ToolTip="Comments"
+                          AutomationProperties.Name="Comments" />
+            <Grid x:Name="AttachmentsRailHost">
+                <ToggleButton x:Name="AttachmentsRail" Style="{StaticResource RailButton}" Content="&#xE723;" ToolTip="Attachments"
+                              AutomationProperties.Name="Attachments" />
+                <Border x:Name="AttachmentsBadge" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Right" VerticalAlignment="Top"
+                        Margin="0,4,2,0" MinWidth="16" Height="16" CornerRadius="8" Padding="4,0" Background="{DynamicResource AccentFillColorDefaultBrush}">
+                    <TextBlock x:Name="AttachmentsBadgeText" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" />
+                </Border>
+            </Grid>
+            <ToggleButton x:Name="LayersRail" Style="{StaticResource RailButton}" Content="&#xE81E;" ToolTip="Layers" Visibility="Collapsed"
+                          AutomationProperties.Name="Layers" />
+            <ToggleButton x:Name="SignaturesRail" Style="{StaticResource RailButton}" Content="&#xEB95;" ToolTip="Signatures" Visibility="Collapsed"
+                          AutomationProperties.Name="Signatures" />
         </StackPanel>
 
         <!-- Navigation pane -->
@@ -95,15 +110,31 @@
                         <TextBox x:Name="SearchBox" DockPanel.Dock="Top" AutomationProperties.Name="Search text" />
                         <WrapPanel DockPanel.Dock="Top" Margin="0,8,0,0">
                             <CheckBox x:Name="SearchMatchCase" Content="Match case" Margin="0,0,12,0" />
-                            <CheckBox x:Name="SearchWholeWords" Content="Whole words" />
+                            <CheckBox x:Name="SearchWholeWords" Content="Whole words" Margin="0,0,12,0" />
+                            <CheckBox x:Name="SearchIgnoreAccents" Content="Ignore accents" ToolTip="Find é, è and ê when you type e" />
                         </WrapPanel>
                         <Button x:Name="SearchButton" DockPanel.Dock="Top" Content="Search" Margin="0,8,0,0" HorizontalAlignment="Stretch"
                                 Style="{DynamicResource AccentButtonStyle}" />
                         <TextBlock x:Name="SearchStatus" DockPanel.Dock="Top" Margin="0,10,0,6" TextWrapping="Wrap" Style="{StaticResource Caption}" />
-                        <ListBox x:Name="SearchResults" BorderThickness="0" Background="Transparent" ItemContainerStyle="{StaticResource SubtleListItem}"
+                        <Button x:Name="RedactHitsButton" DockPanel.Dock="Top" Style="{StaticResource TextButton}" HorizontalAlignment="Left" Margin="-8,0,0,4"
+                                Content="Mark all matches for redaction" Visibility="Collapsed"
+                                ToolTip="Marks every match for redaction; review the marks, then apply them from the bar above the pages" />
+                        <ListBox x:Name="SearchResults" BorderThickness="0" Background="Transparent"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel"
                                  AutomationProperties.Name="Search results">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem" BasedOn="{StaticResource SubtleListItem}">
+                                    <Setter Property="AutomationProperties.Name">
+                                        <Setter.Value>
+                                            <MultiBinding StringFormat="{}{0}: {1}">
+                                                <Binding Path="PageLabel" />
+                                                <Binding Path="Excerpt" />
+                                            </MultiBinding>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
                             <ListBox.ItemTemplate>
                                 <DataTemplate DataType="{x:Type v:SearchHit}">
                                     <StackPanel Margin="0,3">
@@ -114,6 +145,174 @@
                             </ListBox.ItemTemplate>
                         </ListBox>
                     </DockPanel>
+
+                    <!-- Comments: grouped by page, filter, edit, delete -->
+                    <DockPanel x:Name="CommentsPanel" Margin="10,0,10,8" Visibility="Collapsed">
+                        <TextBox x:Name="CommentFilter" DockPanel.Dock="Top" AutomationProperties.Name="Filter comments"
+                                 ToolTip="Show only comments containing this text, author or type" />
+                        <WrapPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,6,0,2">
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" FontSize="14"
+                                    ToolTip="Highlight the selected text (Ctrl+Shift+H)" AutomationProperties.Name="Highlight" />
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Underline" Content="&#xE8DC;" FontSize="14"
+                                    ToolTip="Underline the selected text" AutomationProperties.Name="Underline" />
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.StrikeOut" Content="&#xE738;" FontSize="14"
+                                    ToolTip="Strike out the selected text" AutomationProperties.Name="Strike out" />
+                            <ToggleButton x:Name="NoteToolButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE70B;" FontSize="14"
+                                          ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />
+                            <Border Style="{StaticResource BarSeparator}" />
+                            <Button x:Name="CommentEditButton" Style="{StaticResource IconButton}" Content="&#xE70F;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Edit the comment's text (Enter)" AutomationProperties.Name="Edit comment text" />
+                            <Button x:Name="CommentDeleteButton" Style="{StaticResource IconButton}" Content="&#xE74D;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Delete the comment (Del)" AutomationProperties.Name="Delete comment" />
+                        </WrapPanel>
+                        <TextBlock x:Name="CommentsEmpty" DockPanel.Dock="Top" Margin="4,10,4,0" TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                        <ListBox x:Name="CommentList" BorderThickness="0" Background="Transparent" Margin="-4,4,-4,0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True"
+                                 VirtualizingPanel.IsVirtualizingWhenGrouping="True" VirtualizingPanel.ScrollUnit="Pixel"
+                                 AutomationProperties.Name="Comments">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem" BasedOn="{StaticResource SubtleListItem}">
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.GroupStyle>
+                                <GroupStyle>
+                                    <GroupStyle.HeaderTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" Margin="8,10,0,2" Style="{StaticResource Caption}" />
+                                        </DataTemplate>
+                                    </GroupStyle.HeaderTemplate>
+                                </GroupStyle>
+                            </ListBox.GroupStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type app:CommentItem}">
+                                    <DockPanel Margin="{Binding Indent}">
+                                        <Border DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="4" Margin="0,2,8,0" VerticalAlignment="Top"
+                                                Background="{Binding Swatch}">
+                                            <TextBlock Style="{StaticResource Icon}" Text="{Binding Glyph}" FontSize="13" Foreground="{Binding GlyphBrush}" />
+                                        </Border>
+                                        <StackPanel>
+                                            <TextBlock FontSize="12" TextTrimming="CharacterEllipsis">
+                                                <Run Text="{Binding Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                                <Run Text="{Binding Meta, Mode=OneWay}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding Contents}" TextWrapping="Wrap" FontSize="12" Margin="0,2,0,2" MaxHeight="64"
+                                                       TextTrimming="CharacterEllipsis" Visibility="{Binding ContentsVisibility}" />
+                                        </StackPanel>
+                                    </DockPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                            <ListBox.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem x:Name="CommentEditMenu" Header="_Edit Text…" InputGestureText="Enter" />
+                                    <MenuItem x:Name="CommentDeleteMenu" Header="_Delete" InputGestureText="Del" />
+                                </ContextMenu>
+                            </ListBox.ContextMenu>
+                        </ListBox>
+                    </DockPanel>
+
+                    <!-- Attachments -->
+                    <DockPanel x:Name="AttachmentsPanel" Margin="10,0,10,8" Visibility="Collapsed">
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,2">
+                            <Button x:Name="AttachSaveButton" Style="{StaticResource IconButton}" Content="&#xE74E;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Save the attachment as a file…" AutomationProperties.Name="Save attachment as" />
+                            <Button x:Name="AttachOpenButton" Style="{StaticResource IconButton}" Content="&#xE8E5;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Open the attached PDF in a new tab" AutomationProperties.Name="Open attached PDF" />
+                            <Border Style="{StaticResource BarSeparator}" />
+                            <Button x:Name="AttachAddButton" Style="{StaticResource IconButton}" Content="&#xE710;" FontSize="14"
+                                    ToolTip="Attach a file…" AutomationProperties.Name="Add attachment" />
+                            <Button x:Name="AttachRemoveButton" Style="{StaticResource IconButton}" Content="&#xE74D;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Remove the attachment (Del)" AutomationProperties.Name="Remove attachment" />
+                        </StackPanel>
+                        <TextBlock x:Name="AttachmentsEmpty" DockPanel.Dock="Top" Margin="4,10,4,0" TextWrapping="Wrap" Style="{StaticResource Caption}"
+                                   Text="No files are attached to this document. Use + to attach one." />
+                        <ListBox x:Name="AttachmentList" BorderThickness="0" Background="Transparent" Margin="-4,4,-4,0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Attachments">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem" BasedOn="{StaticResource SubtleListItem}">
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding AccessibleName}" />
+                                    <Setter Property="ToolTip" Value="{Binding Tip}" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type app:AttachmentItem}">
+                                    <DockPanel Margin="0,3">
+                                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="{Binding Glyph}" FontSize="18" Margin="0,0,10,0"
+                                                   VerticalAlignment="Top" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Detail}" FontSize="12" TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                                        </StackPanel>
+                                    </DockPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+
+                    <!-- Layers (optional content): visibility for viewing and printing -->
+                    <DockPanel x:Name="LayersPanel" Margin="10,0,10,8" Visibility="Collapsed">
+                        <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Style="{StaticResource Caption}" FontSize="12" Margin="4,0,4,6"
+                                   Text="Show or hide layers for viewing and printing. The file itself doesn't change." />
+                        <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                            <Button x:Name="LayersResetButton" Content="Reset" Margin="0,0,8,4" IsEnabled="False"
+                                    ToolTip="Back to the layers the document shows by default" />
+                            <Button x:Name="LayersSaveButton" Content="Save as default" Margin="0,0,0,4" IsEnabled="False"
+                                    ToolTip="Make these the layers every PDF viewer shows when it opens this file (undoable)" />
+                        </WrapPanel>
+                        <TreeView x:Name="LayerTree" BorderThickness="0" Background="Transparent" AutomationProperties.Name="Layers">
+                            <TreeView.ItemTemplate>
+                                <HierarchicalDataTemplate DataType="{x:Type app:LayerNode}" ItemsSource="{Binding Children}">
+                                    <Grid>
+                                        <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" IsEnabled="{Binding IsEnabled}" MinHeight="0" Padding="6,0,0,0"
+                                                  Visibility="{Binding CheckVisibility}" ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Label}" />
+                                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" Visibility="{Binding GroupVisibility}" />
+                                    </Grid>
+                                </HierarchicalDataTemplate>
+                            </TreeView.ItemTemplate>
+                        </TreeView>
+                    </DockPanel>
+
+                    <!-- Digital signatures -->
+                    <ScrollViewer x:Name="SignaturesPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl x:Name="SignatureList" Margin="10,0,10,8" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type app:SignatureItem}">
+                                    <Border Padding="10,8" Margin="0,0,0,8" CornerRadius="6" BorderThickness="1"
+                                            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Left" FontSize="18" Margin="0,0,10,0" VerticalAlignment="Top" Text="{Binding Glyph}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                        <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCautionBrush}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="ok">
+                                                                <Setter Property="Foreground" Value="{DynamicResource SystemFillColorSuccessBrush}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="bad">
+                                                                <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCriticalBrush}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="none">
+                                                                <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding Status}" TextWrapping="Wrap" FontSize="12" Margin="0,2,0,6" />
+                                                <TextBox Text="{Binding Details, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" FontSize="12" BorderThickness="0"
+                                                         Background="Transparent" Padding="0" MinHeight="0" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                         AutomationProperties.Name="Signature details" />
+                                                <Button Style="{StaticResource TextButton}" Content="Go to signature" HorizontalAlignment="Left" Margin="-8,2,0,0"
+                                                        Tag="{Binding}" Click="OnGoToSignature" Visibility="{Binding GoVisibility}" />
+                                            </StackPanel>
+                                        </DockPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
                 </Grid>
             </DockPanel>
         </Border>
@@ -129,8 +328,25 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
+                <StackPanel Grid.Row="0">
+                <!-- InfoBar: the file changed (or disappeared) on disk -->
+                <Border x:Name="DiskBar" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorCautionBackgroundBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        AutomationProperties.LiveSetting="Assertive">
+                    <DockPanel>
+                        <Button x:Name="DiskBarClose" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="26" MinWidth="26"
+                                Content="&#xE711;" ToolTip="Dismiss" AutomationProperties.Name="Dismiss" />
+                        <Button x:Name="DiskBarSecondary" DockPanel.Dock="Right" Margin="8,0,4,0" />
+                        <Button x:Name="DiskBarPrimary" DockPanel.Dock="Right" Margin="12,0,0,0" Style="{DynamicResource AccentButtonStyle}" />
+                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="16" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                        <TextBlock x:Name="DiskBarText" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </DockPanel>
+                </Border>
+
                 <!-- InfoBar: this document has fillable fields -->
-                <Border x:Name="FormBar" Grid.Row="0" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                <Border x:Name="FormBar" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
                         Background="{DynamicResource SystemFillColorAttentionBackgroundBrush}"
                         BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                     <DockPanel>
@@ -143,10 +359,58 @@
                     </DockPanel>
                 </Border>
 
+                <!-- InfoBar: the form is XFA-only (PdfDesk can't fill it) -->
+                <Border x:Name="XfaBar" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorCautionBackgroundBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <DockPanel>
+                        <Button x:Name="XfaBarClose" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="26" MinWidth="26"
+                                Content="&#xE711;" ToolTip="Dismiss" AutomationProperties.Name="Dismiss" />
+                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="16" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                        <TextBlock VerticalAlignment="Center" TextWrapping="Wrap"
+                                   Text="This form uses XFA, which PdfDesk can't fill. What you see may be only a placeholder page; open it in Adobe Acrobat Reader to fill it in." />
+                    </DockPanel>
+                </Border>
+
+                <!-- InfoBar: digital signatures -->
+                <Border x:Name="SigBar" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorAttentionBackgroundBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <DockPanel>
+                        <Button x:Name="SigBarClose" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="26" MinWidth="26"
+                                Content="&#xE711;" ToolTip="Dismiss" AutomationProperties.Name="Dismiss" />
+                        <Button x:Name="SigBarDetails" DockPanel.Dock="Right" Content="Signature details" Margin="12,0,4,0" />
+                        <TextBlock x:Name="SigBarIcon" DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xEB95;" FontSize="16" Margin="0,0,12,0" />
+                        <TextBlock x:Name="SigBarText" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </DockPanel>
+                </Border>
+
+                <!-- InfoBar: redaction marks waiting to be applied -->
+                <Border x:Name="RedactBar" Visibility="Collapsed" Padding="14,8" Margin="12,10,12,0" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorCriticalBackgroundBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <DockPanel>
+                        <Button x:Name="RedactDone" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="26" MinWidth="26"
+                                Content="&#xE711;" ToolTip="Leave the redaction tool (marks stay until you clear them)" AutomationProperties.Name="Close redaction bar" />
+                        <Button x:Name="RedactApply" DockPanel.Dock="Right" Content="Apply redactions…" Margin="8,0,4,0" Style="{DynamicResource AccentButtonStyle}" />
+                        <Button x:Name="RedactClear" DockPanel.Dock="Right" Content="Clear marks" Margin="12,0,0,0" />
+                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="16" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource SystemFillColorCriticalBrush}" />
+                        <TextBlock x:Name="RedactBarText" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </DockPanel>
+                </Border>
+                </StackPanel>
+
                 <v:PageViewer x:Name="Viewer" Grid.Row="1" Background="{DynamicResource SolidBackgroundFillColorSecondaryBrush}"
                               AutomationProperties.Name="Document pages">
                     <v:PageViewer.ContextMenu>
                         <ContextMenu>
+                            <MenuItem x:Name="CtxHighlight" Command="app:Cmd.Highlight" />
+                            <MenuItem x:Name="CtxUnderline" Command="app:Cmd.Underline" />
+                            <MenuItem x:Name="CtxStrikeOut" Command="app:Cmd.StrikeOut" />
+                            <MenuItem x:Name="CtxRedactText" Header="Mark Text for _Redaction" />
+                            <Separator x:Name="CtxMarkupSeparator" />
                             <MenuItem Command="app:Cmd.Copy" />
                             <MenuItem Command="app:Cmd.SelectAll" />
                             <Separator />
@@ -181,8 +445,12 @@
                         <TextBox x:Name="FindBox" Width="230" VerticalContentAlignment="Center" AutomationProperties.Name="Find in document"
                                  ToolTip="Enter: next match · Shift+Enter: previous · Esc: close" />
                         <TextBlock x:Name="FindStatus" Margin="10,0,6,0" VerticalAlignment="Center" MinWidth="64" FontSize="12" Style="{StaticResource Caption}" />
-                        <ToggleButton x:Name="FindMatchCase" Style="{StaticResource CommandButton}" Content="Aa" FontWeight="SemiBold" ToolTip="Match case" Padding="8,4" />
-                        <ToggleButton x:Name="FindWholeWords" Style="{StaticResource CommandButton}" Content="ab|" FontWeight="SemiBold" ToolTip="Whole words" Padding="8,4" />
+                        <ToggleButton x:Name="FindMatchCase" Style="{StaticResource CommandButton}" Content="Aa" FontWeight="SemiBold" ToolTip="Match case" Padding="8,4"
+                                      AutomationProperties.Name="Match case" />
+                        <ToggleButton x:Name="FindWholeWords" Style="{StaticResource CommandButton}" Content="ab|" FontWeight="SemiBold" ToolTip="Whole words" Padding="8,4"
+                                      AutomationProperties.Name="Whole words" />
+                        <ToggleButton x:Name="FindIgnoreAccents" Style="{StaticResource CommandButton}" Content="é=e" FontWeight="SemiBold" Padding="8,4"
+                                      ToolTip="Ignore accents" AutomationProperties.Name="Ignore accents" />
                         <Button x:Name="FindPrevButton" Style="{StaticResource IconButton}" Content="&#xE70E;" FontSize="12" ToolTip="Previous match (Shift+F3)" />
                         <Button x:Name="FindNextButton" Style="{StaticResource IconButton}" Content="&#xE70D;" FontSize="12" ToolTip="Next match (F3)" />
                         <Button x:Name="FindCloseButton" Style="{StaticResource IconButton}" Content="&#xE711;" FontSize="11" ToolTip="Close (Esc)" />
@@ -198,8 +466,8 @@
                     </Border.Effect>
                     <StackPanel Orientation="Horizontal">
                         <Button Style="{StaticResource IconButton}" Command="app:Cmd.PrevPage" Content="&#xE76B;" FontSize="12" ToolTip="Previous page (Left / PgUp)" />
-                        <TextBox x:Name="PageBox" Width="48" VerticalAlignment="Center" HorizontalContentAlignment="Center" Margin="2,0"
-                                 AutomationProperties.Name="Page number" ToolTip="Type a page number and press Enter (Ctrl+G)" />
+                        <TextBox x:Name="PageBox" MinWidth="48" MaxWidth="120" VerticalAlignment="Center" HorizontalContentAlignment="Center" Margin="2,0"
+                                 AutomationProperties.Name="Page number" ToolTip="Type a page number (or the page's label, such as iv) and press Enter (Ctrl+G)" />
                         <TextBlock x:Name="PageCountText" VerticalAlignment="Center" Margin="6,0,4,0" MinWidth="32" Style="{StaticResource Caption}" />
                         <Button Style="{StaticResource IconButton}" Command="app:Cmd.NextPage" Content="&#xE76C;" FontSize="12" ToolTip="Next page (Right / PgDn)" />
                         <Border Style="{StaticResource BarSeparator}" />

@@ -19,7 +19,19 @@ public sealed class ThumbItem(int index, double width, double height, Action<Thu
     private bool _requested;
 
     public int Index { get; } = index;
-    public string Label => (Index + 1).ToString();
+    public string Label { get; private set; } = (index + 1).ToString();
+    public string AccessibleName { get; private set; } = $"Page {index + 1}";
+    public override string ToString() => AccessibleName;
+
+    /// <summary>Shows the page's label (e.g. "iv") instead of its number.</summary>
+    public void SetLabel(string label, int pageCount)
+    {
+        if (label == Label) return;
+        Label = label;
+        AccessibleName = label == (Index + 1).ToString() ? $"Page {Index + 1}" : $"Page {label} ({Index + 1} of {pageCount})";
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(AccessibleName)));
+    }
     public double Width { get; } = width;
     public double Height { get; } = height;
 
@@ -48,6 +60,9 @@ public sealed class ThumbItem(int index, double width, double height, Action<Thu
         Image = null;
     }
 
+    /// <summary>The render failed: ask again the next time a list item binds to it (no immediate retry loop).</summary>
+    public void MarkFailed() => _requested = false;
+
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
@@ -57,7 +72,7 @@ public sealed record PageDragData(DocumentTab Source, int[] Pages);
 /// <summary>A transient message for the toast area, optionally with an action such as Undo.</summary>
 public sealed record Toast(string Message, string? ActionLabel = null, Action? Action = null, bool IsError = false);
 
-public enum NavPaneKind { None, Pages, Bookmarks, Search }
+public enum NavPaneKind { None, Pages, Bookmarks, Search, Comments, Attachments, Layers, Signatures }
 
 public partial class DocumentTab : UserControl, IDisposable
 {
@@ -76,7 +91,7 @@ public partial class DocumentTab : UserControl, IDisposable
 
     // Search state
     private CancellationTokenSource? _searchCts;
-    private (string Query, bool Case, bool Words)? _searched;
+    private (string Query, bool Case, bool Words, bool Accents)? _searched;
     private int _activeHit = -1;
     private bool _jumpWhenFound;
     private bool _searchBackwards;
@@ -92,7 +107,27 @@ public partial class DocumentTab : UserControl, IDisposable
     private bool _formSaving;
     private int _annotationLoad;
     private bool _formBarDismissed;
+    private bool _contentOnlyCommit;
+    private bool _steppingHistory;
     private NavPaneKind _paneBeforeOrganize;
+
+    // Pending writes (form values, Fill & Sign stamps, page edits): Save and Close wait for them.
+    private int _pendingWrites;
+    private TaskCompletionSource? _writesDone;
+    private TaskCompletionSource? _idle;
+
+    // Edit identity, mirroring the session's undo/redo stacks, so a toast's Undo only undoes its own edit.
+    private long _editSeq;
+    private readonly List<long> _undoIds = [];
+    private readonly Stack<long> _redoIds = new();
+
+    // Watching the file on disk for changes by other programs.
+    private FileSystemWatcher? _watcher;
+    private string? _watchedPath;
+    private readonly System.Windows.Threading.DispatcherTimer _diskDelay = new() { Interval = TimeSpan.FromMilliseconds(700) };
+    private int _reloadAttempts;
+    private bool _diskAcknowledged;
+    private Action? _diskPrimary, _diskSecondary;
 
     // Thumbnail drag state
     private Point _dragStart;
@@ -171,9 +206,9 @@ public partial class DocumentTab : UserControl, IDisposable
         ZoomBox.LostKeyboardFocus += (_, _) => UpdatePill();
         PageBox.KeyDown += (_, e) =>
         {
-            if (e.Key == Key.Enter && int.TryParse(PageBox.Text.Trim(), out var n))
+            if (e.Key == Key.Enter && FindPage(PageBox.Text) is { } target)
             {
-                Viewer.GoToPage(n - 1);
+                Viewer.GoToPage(target);
                 Viewer.Focus();
                 e.Handled = true;
             }
@@ -228,11 +263,36 @@ public partial class DocumentTab : UserControl, IDisposable
             _outlineJustNavigated = Mouse.LeftButton == MouseButtonState.Pressed;
             NavigateTo(n);
         };
-        Outline.PreviewMouseLeftButtonUp += (_, _) =>
+        Outline.PreviewMouseLeftButtonUp += (_, e) =>
         {
-            if (!_outlineJustNavigated && Outline.SelectedItem is OutlineNode n) NavigateTo(n);
+            var again = !_outlineJustNavigated;
             _outlineJustNavigated = false;
+            // Only a click on the selected bookmark's own header re-navigates (not the expander, the scroll bar or blank space).
+            if (again && Outline.SelectedItem is OutlineNode n && HeaderItemUnder(e.OriginalSource) is { IsSelected: true } item && ReferenceEquals(item.DataContext, n))
+                NavigateTo(n);
         };
+        // Screen readers name each bookmark by its title (not the record's ToString()); nested items inherit the style.
+        var treeItemStyle = new Style(typeof(TreeViewItem), Outline.TryFindResource(typeof(TreeViewItem)) as Style);
+        treeItemStyle.Setters.Add(new Setter(System.Windows.Automation.AutomationProperties.NameProperty, new System.Windows.Data.Binding(nameof(OutlineNode.Title))));
+        Outline.ItemContainerStyle = treeItemStyle;
+
+        DiskBarClose.Click += (_, _) =>
+        {
+            _diskAcknowledged = true;
+            DiskBar.Visibility = Visibility.Collapsed;
+        };
+        DiskBarPrimary.Click += (_, _) => _diskPrimary?.Invoke();
+        DiskBarSecondary.Click += (_, _) => _diskSecondary?.Invoke();
+        _diskDelay.Tick += (_, _) =>
+        {
+            _diskDelay.Stop();
+            CheckDisk();
+        };
+        Session.StateChanged += (_, _) =>
+        {
+            if (!string.Equals(_watchedPath, Session.FilePath, StringComparison.OrdinalIgnoreCase)) StartWatching();
+        };
+        StartWatching();
 
         FindBox.KeyDown += OnFindKey;
         FindNextButton.Click += (_, _) => FindNext(false);
@@ -255,10 +315,11 @@ public partial class DocumentTab : UserControl, IDisposable
             AppSettings.Current.NavPaneWidth = NavColumn.ActualWidth;
             AppSettings.Current.Save();
         };
+        InitReview();
         UpdatePill();
     }
 
-    public string Header => (Session.IsDirty ? "● " : "") + Session.DisplayName;
+    public string Header => (Session.IsDirty ? "● " : "") + DisplayTitle;
 
     private void RaiseState()
     {
@@ -282,6 +343,7 @@ public partial class DocumentTab : UserControl, IDisposable
     // ───────────────────────────── Panes ─────────────────────────────
 
     public bool NavPaneVisible => _pane != NavPaneKind.None;
+    public NavPaneKind CurrentPane => _pane;
 
     /// <summary>F4: show the pages pane, or hide the open one.</summary>
     public void SetNavPaneVisible(bool visible) => ShowPane(visible ? NavPaneKind.Pages : NavPaneKind.None, remember: true);
@@ -297,10 +359,18 @@ public partial class DocumentTab : UserControl, IDisposable
         Thumbs.Visibility = kind == NavPaneKind.Pages ? Visibility.Visible : Visibility.Collapsed;
         BookmarksPanel.Visibility = kind == NavPaneKind.Bookmarks ? Visibility.Visible : Visibility.Collapsed;
         SearchPanel.Visibility = kind == NavPaneKind.Search ? Visibility.Visible : Visibility.Collapsed;
+        CommentsPanel.Visibility = kind == NavPaneKind.Comments ? Visibility.Visible : Visibility.Collapsed;
+        AttachmentsPanel.Visibility = kind == NavPaneKind.Attachments ? Visibility.Visible : Visibility.Collapsed;
+        LayersPanel.Visibility = kind == NavPaneKind.Layers ? Visibility.Visible : Visibility.Collapsed;
+        SignaturesPanel.Visibility = kind == NavPaneKind.Signatures ? Visibility.Visible : Visibility.Collapsed;
         PagesRail.IsChecked = kind == NavPaneKind.Pages;
         BookmarksRail.IsChecked = kind == NavPaneKind.Bookmarks;
         SearchRail.IsChecked = kind == NavPaneKind.Search;
-        PaneTitle.Text = kind switch { NavPaneKind.Pages => "Pages", NavPaneKind.Bookmarks => "Bookmarks", NavPaneKind.Search => "Search", _ => "" };
+        CommentsRail.IsChecked = kind == NavPaneKind.Comments;
+        AttachmentsRail.IsChecked = kind == NavPaneKind.Attachments;
+        LayersRail.IsChecked = kind == NavPaneKind.Layers;
+        SignaturesRail.IsChecked = kind == NavPaneKind.Signatures;
+        PaneTitle.Text = kind == NavPaneKind.None ? "" : kind.ToString();
         UpdatePaneDetail();
         if (kind == NavPaneKind.Pages) SyncThumbSelection();
         if (remember)
@@ -317,16 +387,37 @@ public partial class DocumentTab : UserControl, IDisposable
         {
             NavPaneKind.Pages when Thumbs.SelectedItems.Count > 1 => $"{Thumbs.SelectedItems.Count} selected",
             NavPaneKind.Pages => $"{Viewer.PageCount}",
+            NavPaneKind.Comments => _commentItems.Count > 0 ? $"{_commentItems.Count}" : "",
+            NavPaneKind.Attachments => _attachments.Count > 0 ? $"{_attachments.Count}" : "",
+            NavPaneKind.Layers => $"{_layers.Count}",
+            NavPaneKind.Signatures => $"{_signatures.Count(s => s.Status != SignatureStatus.Unsigned)} signed",
             _ => "",
         };
+    }
+
+    /// <summary>Opens one of the review panes (Comments, Attachments, Layers, Signatures).</summary>
+    public void ShowReviewPane(ReviewPane pane)
+    {
+        SetOrganizing(false);
+        ShowPane(pane switch
+        {
+            ReviewPane.Attachments => NavPaneKind.Attachments,
+            ReviewPane.Layers => NavPaneKind.Layers,
+            ReviewPane.Signatures => NavPaneKind.Signatures,
+            _ => NavPaneKind.Comments,
+        });
     }
 
     // ───────────────────────────── Page / zoom pill ─────────────────────────────
 
     private void UpdatePill()
     {
-        if (!PageBox.IsKeyboardFocusWithin) PageBox.Text = Viewer.PageCount > 0 ? (Viewer.CurrentPage + 1).ToString() : "";
-        PageCountText.Text = $"of {Viewer.PageCount}";
+        var n = Viewer.PageCount;
+        var current = Viewer.CurrentPage;
+        var label = PageLabel(current);
+        if (!PageBox.IsKeyboardFocusWithin) PageBox.Text = n > 0 ? label : "";
+        // With page labels: "iii (3 of 120)"; without: "3 of 120".
+        PageCountText.Text = n > 0 && label != (current + 1).ToString() ? $"({current + 1} of {n})" : $"of {n}";
         if (!ZoomBox.IsKeyboardFocusWithin)
         {
             _updatingPill = true;
@@ -376,15 +467,23 @@ public partial class DocumentTab : UserControl, IDisposable
         var pw = Session.Password;
         IReadOnlyList<FormWidget> widgets = [];
         IReadOnlyList<TextStamp> stamps = [];
+        IReadOnlyList<int>? rotations = null;
         try
         {
-            (widgets, stamps) = await Task.Run(() => (FormEditor.Read(data, pw), TextStamps.Read(data, pw)));
+            (widgets, stamps, rotations) = await Task.Run(() =>
+            {
+                var w = FormEditor.Read(data, pw);
+                var s = TextStamps.Read(data, pw);
+                // Field editors on turned pages follow the page's /Rotate (only needed when there are fields).
+                return (w, s, w.Count > 0 ? ReadRotations(data, pw) : null);
+            });
         }
         catch (Exception ex)
         {
             Log.Write($"Reading form fields failed: {ex.Message}");
         }
-        if (ticket != _annotationLoad) return;
+        if (ticket != _annotationLoad || _disposed) return;
+        Viewer.SetPageRotations(rotations);
         Viewer.SetFormWidgets(widgets);
         Viewer.SetStamps(stamps);
 
@@ -395,24 +494,45 @@ public partial class DocumentTab : UserControl, IDisposable
         RaiseState();
     }
 
+    /// <summary>Each page's /Rotate, or null if the document can't be read that way.</summary>
+    private static int[]? ReadRotations(byte[] data, string? password)
+    {
+        try
+        {
+            using var stream = new MemoryStream(data, writable: false);
+            using var doc = string.IsNullOrEmpty(password)
+                ? PdfSharp.Pdf.IO.PdfReader.Open(stream, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+                : PdfSharp.Pdf.IO.PdfReader.Open(stream, password, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
+            var rotations = new int[doc.PageCount];
+            for (var i = 0; i < rotations.Length; i++) rotations[i] = doc.Pages[i].Rotate;
+            return rotations;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Write($"Reading page rotations failed: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>Writes queued field values one batch at a time, so quick clicks and typing never lose a change.</summary>
     private async Task FlushFormQueue()
     {
         if (_formSaving) return;
         _formSaving = true;
+        BeginWrite();
         try
         {
-            while (_formQueue.Count > 0)
+            while (_formQueue.Count > 0 && !_disposed)
             {
                 if (IsBusy)
                 {
-                    await Task.Delay(80);
+                    await WhenIdle();
                     continue;
                 }
                 var batch = new Dictionary<string, string>(_formQueue);
                 _formQueue.Clear();
                 var label = batch.Count == 1 ? "Fill form field" : $"Fill {batch.Count} form fields";
-                if (!await RunEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true))
+                if (!await RunEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true, contentOnly: true))
                 {
                     _formQueue.Clear();
                     Viewer.ClearPendingValues();
@@ -423,19 +543,76 @@ public partial class DocumentTab : UserControl, IDisposable
         finally
         {
             _formSaving = false;
+            EndWrite();
         }
     }
 
     private async Task SaveStamp(StampEdit e)
     {
-        while (IsBusy) await Task.Delay(80);
-        if (e.ReplaceId is { } id && e.Text.Length == 0 && e.Kind == StampKind.Text)
-            await RunEdit("Remove text", (d, pw) => TextStamps.Remove(d, pw, id));
-        else if (e.ReplaceId is { } markId && e.Kind != StampKind.Text)
-            await RunEdit(e.Kind == StampKind.Check ? "Remove check mark" : "Remove cross", (d, pw) => TextStamps.Remove(d, pw, markId));
-        else
-            await RunEdit(e.Kind switch { StampKind.Check => "Add check mark", StampKind.Cross => "Add cross", _ => e.ReplaceId is null ? "Add text" : "Edit text" },
-                (d, pw) => TextStamps.Put(d, pw, e.PageIndex, e.Rect, e.Kind, e.Text, e.FontSize, e.ReplaceId), quiet: e.Kind == StampKind.Text);
+        BeginWrite();
+        try
+        {
+            // No await between the idle check and RunEdit, so nothing else can start an edit in between.
+            while (IsBusy)
+            {
+                await WhenIdle();
+                if (_disposed) return;
+            }
+            if (e.ReplaceId is { } id && e.Text.Length == 0 && e.Kind == StampKind.Text)
+                await RunEdit("Remove text", (d, pw) => TextStamps.Remove(d, pw, id), contentOnly: true);
+            else if (e.ReplaceId is { } markId && e.Kind != StampKind.Text)
+                await RunEdit(e.Kind == StampKind.Check ? "Remove check mark" : "Remove cross", (d, pw) => TextStamps.Remove(d, pw, markId), contentOnly: true);
+            else
+                await RunEdit(e.Kind switch { StampKind.Check => "Add check mark", StampKind.Cross => "Add cross", _ => e.ReplaceId is null ? "Add text" : "Edit text" },
+                    (d, pw) => TextStamps.Put(d, pw, e.PageIndex, e.Rect, e.Kind, e.Text, e.FontSize, e.ReplaceId), quiet: e.Kind == StampKind.Text, contentOnly: true);
+        }
+        finally
+        {
+            EndWrite();
+        }
+    }
+
+    // ───────────────────────────── Pending writes ─────────────────────────────
+
+    public bool IsDisposed => _disposed;
+
+    /// <summary>An open form/Fill &amp; Sign editor, queued values, or an edit still being written.</summary>
+    public bool HasPendingEdits => Viewer.IsEditing || _formQueue.Count > 0 || _pendingWrites > 0;
+
+    private void BeginWrite() => _pendingWrites++;
+
+    private void EndWrite()
+    {
+        if (--_pendingWrites > 0) return;
+        _pendingWrites = 0;
+        var done = _writesDone;
+        _writesDone = null;
+        done?.TrySetResult();
+    }
+
+    private Task WhenWritesDone()
+    {
+        if (_pendingWrites == 0 || _disposed) return Task.CompletedTask;
+        _writesDone ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        return _writesDone.Task;
+    }
+
+    private Task WhenIdle()
+    {
+        if (!IsBusy || _disposed) return Task.CompletedTask;
+        _idle ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        return _idle.Task;
+    }
+
+    /// <summary>
+    /// Saves what the open field or Fill &amp; Sign editor holds, then waits until every queued value, stamp and page edit
+    /// has been written into the document (and any other busy work has finished). Call before saving or closing.
+    /// </summary>
+    public async Task FlushPendingEditsAsync()
+    {
+        Viewer.CommitEditor();
+        while (!_disposed && (_pendingWrites > 0 || IsBusy))
+            await (_pendingWrites > 0 ? WhenWritesDone() : WhenIdle());
     }
 
     // ───────────────────────────── Organize mode ─────────────────────────────
@@ -483,6 +660,7 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         if (!AppSettings.Current.RestorePosition || Session.FilePath is null) return;
         if (!AppSettings.Current.Files.TryGetValue(Session.FilePath, out var state)) return;
+        _hadViewState = true; // the reader's own position wins over the document's opening settings
         if (Enum.TryParse<ZoomMode>(state.ZoomMode, out var mode))
         {
             if (mode == ZoomMode.Custom) Viewer.SetZoom(state.Zoom);
@@ -509,35 +687,51 @@ public partial class DocumentTab : UserControl, IDisposable
     // ───────────────────────────── Editing ─────────────────────────────
 
     /// <summary>Runs a page edit off the UI thread and commits it as one undo step.</summary>
-    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false)
+    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false)
     {
         if (!Session.IsPdf)
         {
             Prompt.Info(Window.GetWindow(this), "Page editing works on PDFs", "This file can be viewed and printed, but only PDF pages can be rearranged.");
             return false;
         }
-        if (IsBusy) return false;
+        if (IsBusy || _disposed) return false;
         if (Session.Engine.IsEncrypted && !_protectionWarned)
         {
             if (!Prompt.Confirm(Window.GetWindow(this), "This PDF is password-protected",
                     "After a page edit it is saved without its password protection.", "Edit anyway", warning: true)) return false;
             _protectionWarned = true;
         }
+        if (!ConfirmSignedEdit()) return false;
+        if (IsBusy || _disposed) return false; // something started while the prompt was open
 
         SetBusy($"{label}…");
+        BeginWrite();
         try
         {
             var data = Session.Data;
             var password = Session.Password;
             var result = await Task.Run(() => edit(data, password));
-            Session.Commit(result, label);
+            if (_disposed) return false;
+            _contentOnlyCommit = contentOnly;
+            try
+            {
+                Session.Commit(result, label);
+            }
+            finally
+            {
+                _contentOnlyCommit = false;
+            }
+            var id = ++_editSeq;
+            _undoIds.Add(id);
+            _redoIds.Clear();
+            if (_undoIds.Count > Session.UndoDepth) _undoIds.RemoveRange(0, _undoIds.Count - Session.UndoDepth);
             if (goToPage is { } p) Viewer.GoToPage(Math.Clamp(p, 0, Viewer.PageCount - 1), record: false);
             if (!quiet)
             {
-                var depth = Session.UndoDepth;
                 Notify(label, "Undo", () =>
                 {
-                    if (_disposed || Session.UndoDepth != depth || IsBusy) return;
+                    // Only while this very edit is still the newest undo step (not an older or newer one at the same depth).
+                    if (_disposed || IsBusy || _undoIds.Count == 0 || _undoIds[^1] != id || !Session.CanUndo) return;
                     Undo();
                 });
             }
@@ -551,12 +745,36 @@ public partial class DocumentTab : UserControl, IDisposable
         }
         finally
         {
-            SetBusy(null);
+            EndWrite();
+            if (!_disposed) SetBusy(null);
         }
     }
 
-    public void Undo() => Step(Session.Undo, Session.UndoLabel, "Undo");
-    public void Redo() => Step(Session.Redo, Session.RedoLabel, "Redo");
+    public void Undo()
+    {
+        if (!Session.CanUndo) return;
+        Step(() =>
+        {
+            _steppingHistory = true;
+            try { Session.Undo(); } finally { _steppingHistory = false; }
+            if (_undoIds.Count > 0)
+            {
+                _redoIds.Push(_undoIds[^1]);
+                _undoIds.RemoveAt(_undoIds.Count - 1);
+            }
+        }, Session.UndoLabel, "Undo");
+    }
+
+    public void Redo()
+    {
+        if (!Session.CanRedo) return;
+        Step(() =>
+        {
+            _steppingHistory = true;
+            try { Session.Redo(); } finally { _steppingHistory = false; }
+            _undoIds.Add(_redoIds.TryPop(out var id) ? id : ++_editSeq);
+        }, Session.RedoLabel, "Redo");
+    }
 
     private void Step(Action action, string? label, string verb)
     {
@@ -580,6 +798,12 @@ public partial class DocumentTab : UserControl, IDisposable
         if (IsBusy) _busyDelay.Start();
         else BusyOverlay.Visibility = Visibility.Collapsed;
         Cursor = IsBusy ? Cursors.AppStarting : null;
+        if (!IsBusy)
+        {
+            var idle = _idle;
+            _idle = null;
+            idle?.TrySetResult();
+        }
         RaiseState();
         CommandManager.InvalidateRequerySuggested();
     }
@@ -594,13 +818,18 @@ public partial class DocumentTab : UserControl, IDisposable
         Viewer.ShowHit(null);
         FindStatus.Text = SearchStatus.Text = "";
 
-        int[] organizerSelection = IsOrganizing && Organizer.PageCount == Session.Engine.PageCount ? Organizer.SelectedPages : [];
+        // After undo/redo the same positions may hold different pages (e.g. undoing a Move): don't carry the selection over.
+        int[] organizerSelection = IsOrganizing && !_steppingHistory && Organizer.PageCount == Session.Engine.PageCount ? Organizer.SelectedPages : [];
         _scheduler.Clear();
-        Viewer.SetEngine(Session.Engine, _scheduler, keepPosition: true);
+        // A form value or Fill & Sign edit leaves the pages as they were: keep the open field editor (typing continues).
+        Viewer.SetEngine(Session.Engine, _scheduler, keepPosition: true, contentOnly: _contentOnlyCommit);
+        DropViewEngine(); // made from the old bytes; chosen layers are re-applied once they are re-read
         RebuildThumbs();
         LoadOutline();
         if (IsOrganizing) Organizer.Load(Session.Engine, organizerSelection, organizerSelection.FirstOrDefault(Viewer.CurrentPage));
         _ = LoadAnnotationsAsync();
+        _ = LoadReviewAsync();
+        UpdateRedactBar();
         RaiseState();
     }
 
@@ -612,12 +841,15 @@ public partial class DocumentTab : UserControl, IDisposable
         _syncingSelection = true;
         _thumbs.Clear();
         _thumbsWithImages.Clear();
-        var engine = Session.Engine;
+        var engine = ViewEngine;
+        if (_labels is not null && _labels.Length != engine.PageCount) _labels = null; // pages changed; re-read soon
         for (var i = 0; i < engine.PageCount; i++)
         {
             var g = engine.GetPage(i);
             var dipPerPt = Math.Min(ThumbBox / g.Width, ThumbBox / g.Height);
-            _thumbs.Add(new ThumbItem(i, Math.Round(g.Width * dipPerPt), Math.Round(g.Height * dipPerPt), RequestThumb));
+            var item = new ThumbItem(i, Math.Round(g.Width * dipPerPt), Math.Round(g.Height * dipPerPt), RequestThumb);
+            item.SetLabel(PageLabel(i), engine.PageCount);
+            _thumbs.Add(item);
         }
         _syncingSelection = false;
         SyncThumbSelection();
@@ -625,23 +857,36 @@ public partial class DocumentTab : UserControl, IDisposable
 
     private void RequestThumb(ThumbItem item)
     {
-        var engine = Session.Engine;
+        var engine = ViewEngine;
         var gen = _thumbGeneration;
         var g = engine.GetPage(item.Index);
         var scale = item.Width / g.Width * VisualTreeHelper.GetDpi(this).DpiScaleX;
         var invert = Viewer.InvertColors;
-        _scheduler.Enqueue($"t{item.Index}", 1000 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale), invert), result =>
-        {
-            if (gen != _thumbGeneration || result is not BitmapSource bmp) return;
-            item.Image = bmp;
-            // Keep the most recently rendered thumbnails; older ones re-render if scrolled back into view.
-            _thumbsWithImages.AddLast(item);
-            while (_thumbsWithImages.Count > MaxThumbImages)
+        _scheduler.Enqueue($"t{item.Index}", 1000 + item.Index * 1e-6,
+            ct => PageViewer.ToBitmap(engine.Render(item.Index, scale, cancel: ct), invert),
+            result =>
             {
-                _thumbsWithImages.First!.Value.Release();
-                _thumbsWithImages.RemoveFirst();
-            }
-        });
+                if (gen != _thumbGeneration) return;
+                if (result is not BitmapSource bmp)
+                {
+                    item.MarkFailed();
+                    return;
+                }
+                item.Image = bmp;
+                // Keep the most recently rendered thumbnails; older ones re-render if scrolled back into view.
+                _thumbsWithImages.AddLast(item);
+                while (_thumbsWithImages.Count > MaxThumbImages)
+                {
+                    _thumbsWithImages.First!.Value.Release();
+                    _thumbsWithImages.RemoveFirst();
+                }
+            },
+            // A failed (or interrupted) render asks again when the item scrolls back into view, instead of never.
+            failed: ex =>
+            {
+                if (ex is not (ObjectDisposedException or OperationCanceledException)) Log.Write($"Thumbnail of page {item.Index + 1} failed: {ex.Message}");
+                item.MarkFailed();
+            });
     }
 
     private void SyncThumbSelection()
@@ -840,7 +1085,25 @@ public partial class DocumentTab : UserControl, IDisposable
 
     private void NavigateTo(OutlineNode node)
     {
-        if (node.PageIndex >= 0 && node.PageIndex < Viewer.PageCount) Viewer.GoToPage(node.PageIndex);
+        if (node.PageIndex >= 0 && node.PageIndex < Viewer.PageCount) Viewer.GoToPage(node.PageIndex, node.TargetY);
+    }
+
+    /// <summary>The tree item whose header (not expander, not children, not a scroll bar) is under the mouse, if any.</summary>
+    private static TreeViewItem? HeaderItemUnder(object source)
+    {
+        for (var d = source as DependencyObject; d is not null; d = d is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
+        {
+            switch (d)
+            {
+                case System.Windows.Controls.Primitives.ToggleButton or System.Windows.Controls.Primitives.ScrollBar or ItemsPresenter:
+                    return null;
+                case TreeViewItem item:
+                    return item;
+                case TreeView:
+                    return null;
+            }
+        }
+        return null;
     }
 
     public void ShowBookmarks()
@@ -901,15 +1164,15 @@ public partial class DocumentTab : UserControl, IDisposable
             return;
         }
 
-        var key = (query, FindMatchCase.IsChecked == true, FindWholeWords.IsChecked == true);
+        var key = (query, FindMatchCase.IsChecked == true, FindWholeWords.IsChecked == true, FindIgnoreAccents.IsChecked == true);
         if (FindBar.Visibility != Visibility.Visible && SearchBox.Text.Trim() == query)
-            key = (query, SearchMatchCase.IsChecked == true, SearchWholeWords.IsChecked == true);
+            key = (query, SearchMatchCase.IsChecked == true, SearchWholeWords.IsChecked == true, SearchIgnoreAccents.IsChecked == true);
 
         if (_searched != key)
         {
             _searchBackwards = backwards;
             _jumpWhenFound = true;
-            _ = RunSearch(key.query, key.Item2, key.Item3);
+            _ = RunSearch(key.query, key.Item2, key.Item3, key.Item4);
             return;
         }
         if (_results.Count == 0) return;
@@ -964,16 +1227,17 @@ public partial class DocumentTab : UserControl, IDisposable
         FindBox.Text = q;
         FindMatchCase.IsChecked = SearchMatchCase.IsChecked;
         FindWholeWords.IsChecked = SearchWholeWords.IsChecked;
+        FindIgnoreAccents.IsChecked = SearchIgnoreAccents.IsChecked;
         _jumpWhenFound = true;
         _searchBackwards = false;
-        return RunSearch(q, SearchMatchCase.IsChecked == true, SearchWholeWords.IsChecked == true);
+        return RunSearch(q, SearchMatchCase.IsChecked == true, SearchWholeWords.IsChecked == true, SearchIgnoreAccents.IsChecked == true);
     }
 
-    private async Task RunSearch(string query, bool matchCase, bool wholeWords)
+    private async Task RunSearch(string query, bool matchCase, bool wholeWords, bool ignoreAccents)
     {
         CancelSearch();
         var cts = _searchCts = new CancellationTokenSource();
-        _searched = (query, matchCase, wholeWords);
+        _searched = (query, matchCase, wholeWords, ignoreAccents);
         _results.Clear();
         _activeHit = -1;
         Viewer.SetSearchHits([]);
@@ -981,6 +1245,8 @@ public partial class DocumentTab : UserControl, IDisposable
         SearchBox.Text = query;
         SearchMatchCase.IsChecked = matchCase;
         SearchWholeWords.IsChecked = wholeWords;
+        SearchIgnoreAccents.IsChecked = ignoreAccents;
+        var failedPages = new List<int>();
 
         var engine = Session.Engine;
         var count = engine.PageCount;
@@ -1010,9 +1276,18 @@ public partial class DocumentTab : UserControl, IDisposable
                 for (var p = 0; p < count; p++)
                 {
                     cts.Token.ThrowIfCancellationRequested();
-                    var text = engine.GetText(p, cache: false);
-                    foreach (var (s, e) in text.Find(query, matchCase, wholeWords))
-                        batch.Add(new SearchHit(p, s, e, text.GetRects(s, e), text.Excerpt(s, e)));
+                    try
+                    {
+                        var text = engine.GetText(p, cache: false);
+                        foreach (var (s, e) in text.Find(query, matchCase, wholeWords, ignoreAccents))
+                            batch.Add(new SearchHit(p, s, e, text.GetRects(s, e), text.Excerpt(s, e)));
+                    }
+                    catch (Exception ex) when (ex is not (OperationCanceledException or ObjectDisposedException))
+                    {
+                        // A damaged page: skip it and keep searching the rest.
+                        Log.Write($"Search on page {p + 1} failed: {ex.Message}");
+                        lock (failedPages) failedPages.Add(p + 1);
+                    }
                     if (batch.Count > 0 || Environment.TickCount64 - last > 150 || p == count - 1)
                     {
                         report.Report((p, batch));
@@ -1026,6 +1301,13 @@ public partial class DocumentTab : UserControl, IDisposable
             await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Background);
             if (cts.IsCancellationRequested) return;
             SearchStatus.Text = _results.Count == 0 ? $"No matches for \"{query}\"." : $"{_results.Count} match(es) on {_results.Select(r => r.Page).Distinct().Count()} page(s).";
+            int[] failed;
+            lock (failedPages) failed = [.. failedPages];
+            if (failed.Length > 0)
+                SearchStatus.Text += failed.Length == 1
+                    ? $" Page {failed[0]} couldn't be searched (it may be damaged)."
+                    : $" {failed.Length} pages couldn't be searched (they may be damaged): {string.Join(", ", failed.Take(10))}{(failed.Length > 10 ? "…" : "")}.";
+            RedactHitsButton.Visibility = _results.Count > 0 && Session.IsPdf ? Visibility.Visible : Visibility.Collapsed;
             if (_results.Count == 0) FindStatus.Text = "No matches";
             else if (_jumpWhenFound)
             {
@@ -1040,6 +1322,13 @@ public partial class DocumentTab : UserControl, IDisposable
         catch (ObjectDisposedException)
         {
             // Document edited mid-search; OnContentChanged already reset the results.
+        }
+        catch (Exception ex) // never leave "Searching…" up with an unobserved failure
+        {
+            Log.Write($"Search failed: {ex}");
+            if (cts.IsCancellationRequested) return;
+            SearchStatus.Text = FindStatus.Text = "Search failed";
+            Notify($"Search didn't work: {ex.Message}", error: true);
         }
     }
 
@@ -1067,14 +1356,231 @@ public partial class DocumentTab : UserControl, IDisposable
         else Viewer.Focus();
     }
 
+    /// <summary>True when keyboard focus is in the side pane or its icon rail (for F6 cycling).</summary>
+    public bool IsPaneFocused => NavPane.IsKeyboardFocusWithin || Rail.IsKeyboardFocusWithin;
+
+    /// <summary>F6: focus the open side pane (its selected item), or the icon rail when no pane is open.</summary>
+    public void FocusPane()
+    {
+        switch (_pane)
+        {
+            case NavPaneKind.Pages:
+                if (Thumbs.ItemContainerGenerator.ContainerFromIndex(Math.Max(0, Thumbs.SelectedIndex)) is UIElement thumb) thumb.Focus();
+                else Thumbs.Focus();
+                break;
+            case NavPaneKind.Bookmarks:
+                if (Outline.Items.Count > 0 && Outline.ItemContainerGenerator.ContainerFromIndex(0) is UIElement first && Outline.SelectedItem is null) first.Focus();
+                else Outline.Focus();
+                break;
+            case NavPaneKind.Search:
+                SearchBox.Focus();
+                break;
+            case NavPaneKind.Comments:
+                FocusList(CommentList, CommentFilter);
+                break;
+            case NavPaneKind.Attachments:
+                FocusList(AttachmentList, AttachAddButton);
+                break;
+            case NavPaneKind.Layers:
+                if (LayerTree.Items.Count > 0 && LayerTree.ItemContainerGenerator.ContainerFromIndex(0) is UIElement layer) layer.Focus();
+                else LayerTree.Focus();
+                break;
+            case NavPaneKind.Signatures:
+                if (FirstFocusable(SignatureList) is { } sig) sig.Focus();
+                else PagesRail.Focus();
+                break;
+            default:
+                PagesRail.Focus();
+                break;
+        }
+    }
+
+    private static UIElement? FirstFocusable(DependencyObject root)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is UIElement { Focusable: true, IsVisible: true } u and (TextBox or Button)) return u;
+            if (FirstFocusable(child) is { } found) return found;
+        }
+        return null;
+    }
+
+    private static void FocusList(ListBox list, UIElement fallback)
+    {
+        var index = Math.Max(0, list.SelectedIndex);
+        if (list.Items.Count > 0 && list.ItemContainerGenerator.ContainerFromIndex(index) is UIElement item) item.Focus();
+        else fallback.Focus();
+    }
+
+    // ───────────────────────────── File on disk ─────────────────────────────
+
+    /// <summary>Watches the file's folder (atomic saves replace the file) so changes by other programs show up.</summary>
+    private void StartWatching()
+    {
+        _watcher?.Dispose();
+        _watcher = null;
+        _watchedPath = Session.FilePath;
+        if (_disposed || _watchedPath is not { } path || Path.GetDirectoryName(path) is not { } dir) return;
+        try
+        {
+            var w = new FileSystemWatcher(dir)
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+            };
+            void OnEvent(object? sender, FileSystemEventArgs e)
+            {
+                var hit = string.Equals(e.FullPath, path, StringComparison.OrdinalIgnoreCase)
+                          || e is RenamedEventArgs r && string.Equals(r.OldFullPath, path, StringComparison.OrdinalIgnoreCase);
+                if (hit) Dispatcher.BeginInvoke(() =>
+                {
+                    _diskAcknowledged = false; // a new change: ask again even if the last one was dismissed
+                    ScheduleDiskCheck();
+                });
+            }
+            w.Changed += OnEvent;
+            w.Created += OnEvent;
+            w.Deleted += OnEvent;
+            w.Renamed += OnEvent;
+            w.Error += (_, _) => Dispatcher.BeginInvoke(ScheduleDiskCheck);
+            w.EnableRaisingEvents = true;
+            _watcher = w;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Log.Write($"Can't watch {Path.GetFileName(path)}: {ex.Message}");
+        }
+    }
+
+    /// <summary>After our own save: the copy on disk is ours now, so any "changed on disk" bar is stale.</summary>
+    public void NoteSaved()
+    {
+        _diskAcknowledged = false;
+        _reloadAttempts = 0;
+        DiskBar.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>Checks the file shortly (several change notifications from one save collapse into one check).</summary>
+    public void ScheduleDiskCheck()
+    {
+        if (_disposed) return;
+        _diskDelay.Stop();
+        _diskDelay.Start();
+    }
+
+    private void CheckDisk()
+    {
+        if (_disposed || Session.FilePath is null) return;
+        if (IsBusy || _pendingWrites > 0)
+        {
+            ScheduleDiskCheck(); // look again once the edit in progress is done
+            return;
+        }
+        bool missing, changed;
+        try
+        {
+            missing = Session.IsMissingOnDisk();
+            changed = !missing && Session.HasChangedOnDisk();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Write($"Checking {Session.DisplayName} on disk failed: {ex.Message}");
+            return;
+        }
+
+        var name = Session.DisplayName;
+        if (missing)
+        {
+            if (_diskAcknowledged) return;
+            ShowDiskBar($"{name} was moved, renamed or deleted. Your copy is still open here; save it to keep it.",
+                "Save As…", () => Cmd.SaveAs.Execute(null, this), null, null);
+        }
+        else if (!changed)
+        {
+            _reloadAttempts = 0;
+            _diskAcknowledged = false;
+            DiskBar.Visibility = Visibility.Collapsed;
+        }
+        else if (!Session.IsDirty && !HasPendingEdits)
+        {
+            _ = ReloadFromDiskAsync($"{name} was changed by another program and has been reloaded");
+        }
+        else if (!_diskAcknowledged)
+        {
+            ShowDiskBar($"{name} was changed by another program. Reload it to see those changes (yours will be discarded), or keep your version (saving it will overwrite theirs).",
+                "Reload", () => _ = ReloadFromDiskAsync($"Reloaded {name}"), "Keep mine", () =>
+                {
+                    _diskAcknowledged = true;
+                    DiskBar.Visibility = Visibility.Collapsed;
+                });
+        }
+    }
+
+    /// <summary>Reopens the file from disk in place (same page and zoom). Discards unsaved changes and undo history.</summary>
+    public async Task ReloadFromDiskAsync(string? toast = null)
+    {
+        // Let an open editor's value and any edit in flight land first, so nothing is written over the reloaded copy.
+        await FlushPendingEditsAsync();
+        if (_disposed || IsBusy || _pendingWrites > 0) return;
+        try
+        {
+            _formQueue.Clear();
+            Viewer.ClearPendingValues();
+            Session.ReloadFromDisk();
+            _undoIds.Clear();
+            _redoIds.Clear();
+            _reloadAttempts = 0;
+            DiskBar.Visibility = Visibility.Collapsed;
+            if (toast is not null) Notify(toast);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Often the other program is still writing the file: try again a few times, then say so.
+            Log.Write($"Reload of {Session.DisplayName} failed: {ex.Message}");
+            if (++_reloadAttempts <= 3)
+            {
+                ScheduleDiskCheck();
+                return;
+            }
+            _reloadAttempts = 0;
+            ShowDiskBar($"{Session.DisplayName} was changed by another program, but it couldn't be reloaded: {ex.Message}",
+                "Try again", () => _ = ReloadFromDiskAsync(toast), null, null);
+        }
+    }
+
+    private void ShowDiskBar(string text, string primary, Action primaryAction, string? secondary, Action? secondaryAction)
+    {
+        DiskBarText.Text = text;
+        DiskBarPrimary.Content = primary;
+        _diskPrimary = primaryAction;
+        DiskBarSecondary.Content = secondary;
+        DiskBarSecondary.Visibility = secondary is null ? Visibility.Collapsed : Visibility.Visible;
+        _diskSecondary = secondaryAction;
+        DiskBar.Visibility = Visibility.Visible;
+        System.Windows.Automation.AutomationProperties.SetName(DiskBar, text);
+        if (System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(DiskBar) is { } peer)
+            peer.RaiseAutomationEvent(System.Windows.Automation.Peers.AutomationEvents.LiveRegionChanged);
+    }
+
     public void Dispose()
     {
+        if (_disposed) return;
         _disposed = true;
         _saveViewDelay.Stop();
         _busyDelay.Stop();
+        _diskDelay.Stop();
+        _watcher?.Dispose();
+        _watcher = null;
+        // Release anything still waiting on this tab (their loops see _disposed and stop).
+        _idle?.TrySetResult();
+        _writesDone?.TrySetResult();
+        _formQueue.Clear();
         SaveViewState();
         CancelSearch();
         _scheduler.Dispose();
+        _viewEngine?.Dispose();
+        _viewEngine = null;
         Session.Dispose();
     }
 }

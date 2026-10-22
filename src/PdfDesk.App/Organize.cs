@@ -21,9 +21,24 @@ public static class Organize
 
     private static string Pages(int n) => n == 1 ? "1 page" : $"{n} pages";
 
+    /// <summary>
+    /// The page "current page" means for a command: the focused card while organizing (the reader's page is hidden then),
+    /// else the reader's page.
+    /// </summary>
+    public static int CurrentPage(DocumentTab tab)
+    {
+        var count = tab.PageView.PageCount;
+        var page = tab.IsOrganizing && tab.Organizer.FocusedPage is >= 0 and var focused ? focused : tab.PageView.CurrentPage;
+        return count == 0 ? 0 : Math.Clamp(page, 0, count - 1);
+    }
+
+    /// <summary>For CanExecute of the selection commands (rotate, delete, duplicate): false in Organize with no card selected.</summary>
+    public static bool HasSelection(DocumentTab tab) => tab.SelectedPages.Length > 0;
+
     public static Task RotateSelected(DocumentTab tab, int degrees)
     {
         var pages = tab.SelectedPages;
+        if (pages.Length == 0) return Task.CompletedTask;
         return Reselect(tab, pages, tab.RunEdit($"Rotate {Pages(pages.Length)}", (d, pw) => PageEditor.Rotate(d, pw, pages, degrees)));
     }
 
@@ -72,6 +87,7 @@ public static class Organize
 
     private static Task Delete(DocumentTab tab, int[] pages)
     {
+        if (pages.Length == 0) return Task.CompletedTask;
         if (pages.Length >= tab.PageView.PageCount)
         {
             Prompt.Info(Window.GetWindow(tab), "A PDF needs at least one page", "Leave at least one page. To get rid of the whole file, delete it in File Explorer.");
@@ -91,7 +107,7 @@ public static class Organize
         var dlg = new FormDialog(owner, "Insert Pages", "Insert");
         dlg.AddNote($"From: {Path.GetFileName(path)} ({Pages(srcCount)})");
         var srcRange = dlg.AddText("Pages to insert", $"1-{srcCount}");
-        var pos = dlg.AddPosition(tab.PageView.PageCount, tab.PageView.CurrentPage);
+        var pos = dlg.AddPosition(tab.PageView.PageCount, CurrentPage(tab));
         int[] srcPages = [];
         var before = 0;
         dlg.Validate(() =>
@@ -105,12 +121,13 @@ public static class Organize
 
     public static async Task InsertBlank(Window owner, DocumentTab tab)
     {
-        var current = tab.Session.Engine.GetPage(tab.PageView.CurrentPage);
+        var currentPage = CurrentPage(tab);
+        var current = tab.Session.Engine.GetPage(currentPage);
         var dlg = new FormDialog(owner, "Insert Blank Pages", "Insert");
         var count = dlg.AddText("Number of pages", "1");
         var size = dlg.AddChoice("Page size", [$"Same as current page ({Inches(current.Width)} × {Inches(current.Height)} in)", .. PaperSizes.Select(p => p.Name)]);
         var orient = dlg.AddChoice("Orientation", ["Portrait", "Landscape"], current.Width > current.Height ? 1 : 0);
-        var pos = dlg.AddPosition(tab.PageView.PageCount, tab.PageView.CurrentPage);
+        var pos = dlg.AddPosition(tab.PageView.PageCount, currentPage);
         var n = 1;
         var before = 0;
         dlg.Validate(() =>
@@ -139,6 +156,7 @@ public static class Organize
             return delete.IsChecked == true && pages.Length >= tab.PageView.PageCount ? "You can't delete every page of a document." : null;
         });
         if (!dlg.ShowModal()) return;
+        if (!ConfirmUnprotected(owner, tab, "The extracted pages are saved without its password protection.", "Extract anyway")) return;
 
         var name = Path.GetFileNameWithoutExtension(tab.Session.DisplayName);
         var data = tab.Session.Data;
@@ -157,11 +175,19 @@ public static class Organize
                 }
                 case 1:
                 {
-                    var path = PdfFiles.PickSavePath(owner, $"{name} (pages {label}).pdf", Path.GetDirectoryName(tab.Session.FilePath));
-                    if (path is null) return;
+                    string? path;
+                    while (true)
+                    {
+                        path = PdfFiles.PickSavePath(owner, $"{name} (pages {label}).pdf", Path.GetDirectoryName(tab.Session.FilePath));
+                        if (path is null) return;
+                        // Writing over a document open in a tab would swap the file under it (and the tab wouldn't know).
+                        if (!PdfFiles.IsOpenInTab(path)) break;
+                        Prompt.Info(owner, $"{Path.GetFileName(path)} is open in PdfDesk",
+                            "Choose a different name. To replace that document, extract to a new document instead, then use Save As.");
+                    }
                     tab.SetBusy("Extracting pages…");
                     var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
-                    await File.WriteAllBytesAsync(path, bytes);
+                    await Task.Run(() => AtomicFile.WriteAllBytes(path, bytes));
                     host.ShowStatus($"Saved {Path.GetFileName(path)}");
                     break;
                 }
@@ -169,12 +195,10 @@ public static class Organize
                 {
                     var folder = PdfFiles.PickFolder(owner, "Save extracted pages to", Path.GetDirectoryName(tab.Session.FilePath));
                     if (folder is null) return;
+                    var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var files = pages.Select(p => (PdfFiles.UniquePath(folder, $"{name} (page {p + 1}).pdf", reserved), (Func<byte[]>)(() => PageEditor.Extract(data, pw, [p])))).ToList();
                     tab.SetBusy("Extracting pages…");
-                    await Task.Run(() =>
-                    {
-                        foreach (var p in pages)
-                            File.WriteAllBytes(PdfFiles.UniquePath(folder, $"{name} (page {p + 1}).pdf"), PageEditor.Extract(data, pw, [p]));
-                    });
+                    await Task.Run(() => PdfFiles.WriteBatch(files));
                     host.ShowStatus($"Saved {Pages(pages.Length)} to {folder}");
                     Shell.Open(folder);
                     break;
@@ -184,7 +208,7 @@ public static class Organize
         catch (Exception ex)
         {
             Log.Write($"Extract failed: {ex}");
-            Prompt.Error(owner, "Extract didn't work", ex.Message);
+            Prompt.Error(owner, "Extract didn't work", BatchFailure(ex));
             return;
         }
         finally
@@ -213,6 +237,7 @@ public static class Organize
         var pattern = dlg.AddText("File name ({name} = document name, {n} = part number)", "{name} (part {n})");
 
         List<(int[] Pages, string Label)> parts = [];
+        List<string> targets = [];
         dlg.Validate(() =>
         {
             parts = [];
@@ -242,38 +267,73 @@ public static class Organize
             }
             if (parts.Count == 0) return "Nothing to split.";
             if (!Directory.Exists(folderBox.Text)) return "Choose an existing folder.";
-            return pattern.Text.Contains("{n}") || mode.SelectedIndex == 2 ? null : "The file name must include {n} so each part gets its own file.";
+            if (!pattern.Text.Contains("{n}") && mode.SelectedIndex != 2) return "The file name must include {n} so each part gets its own file.";
+
+            // Pick every file name before writing anything (long bookmark titles are shortened, duplicates numbered).
+            targets = [];
+            var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                for (var i = 0; i < parts.Count; i++)
+                {
+                    var file = pattern.Text.Replace("{name}", name).Replace("{n}", (i + 1).ToString());
+                    var label = parts[i].Label.Trim();
+                    if (label.Length > 0 && !pattern.Text.Contains("{n}")) file = $"{name} - {label}";
+                    else if (label.Length > 0) file += $" - {label}";
+                    targets.Add(PdfFiles.UniquePath(folderBox.Text, file + ".pdf", reserved));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or ArgumentException or NotSupportedException)
+            {
+                return ex.Message;
+            }
+            return null;
         });
         if (!dlg.ShowModal()) return;
+        if (!ConfirmUnprotected(owner, tab, "The split files are saved without its password protection.", "Split anyway")) return;
 
         var data = tab.Session.Data;
         var pw = tab.Session.Password;
         var folder = folderBox.Text;
-        var pat = pattern.Text;
+        var files = parts.Select((p, i) => (targets[i], (Func<byte[]>)(() => PageEditor.Extract(data, pw, p.Pages)))).ToList();
         tab.SetBusy($"Splitting into {parts.Count} files…");
         try
         {
-            await Task.Run(() =>
-            {
-                for (var i = 0; i < parts.Count; i++)
-                {
-                    var file = pat.Replace("{name}", name).Replace("{n}", (i + 1).ToString());
-                    if (!string.IsNullOrWhiteSpace(parts[i].Label) && !pat.Contains("{n}")) file = $"{name} - {parts[i].Label}";
-                    else if (!string.IsNullOrWhiteSpace(parts[i].Label)) file += $" - {parts[i].Label}";
-                    File.WriteAllBytes(PdfFiles.UniquePath(folder, file + ".pdf"), PageEditor.Extract(data, pw, parts[i].Pages));
-                }
-            });
+            await Task.Run(() => PdfFiles.WriteBatch(files));
             host.ShowStatus($"Split into {parts.Count} files in {folder}");
             Shell.Open(folder);
         }
         catch (Exception ex)
         {
-            Prompt.Error(owner, "Split didn't work", ex.Message);
+            Log.Write($"Split failed: {ex}");
+            Prompt.Error(owner, "Split didn't work", BatchFailure(ex));
         }
         finally
         {
             tab.SetBusy(null);
         }
+    }
+
+    /// <summary>The error message, plus which files a partly finished batch did write.</summary>
+    private static string BatchFailure(Exception ex)
+    {
+        if (ex is not BatchWriteException batch) return ex.Message;
+        if (batch.Written.Count == 0) return $"{batch.Message} No files were written.";
+        var names = batch.Written.Take(5).Select(Path.GetFileName);
+        var more = batch.Written.Count > 5 ? $" and {batch.Written.Count - 5} more" : "";
+        return $"{batch.Message} These files were written before it stopped: {string.Join(", ", names)}{more}.";
+    }
+
+    // Tabs already warned that extracting/splitting drops the password (once per tab, like page edits).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DocumentTab, object> ProtectionWarned = new();
+
+    /// <summary>Warns once per tab that output from a password-protected PDF is written without the password.</summary>
+    private static bool ConfirmUnprotected(Window owner, DocumentTab tab, string body, string confirm)
+    {
+        if (!tab.Session.Engine.IsEncrypted || ProtectionWarned.TryGetValue(tab, out _)) return true;
+        if (!Prompt.Confirm(owner, "This PDF is password-protected", body, confirm, warning: true)) return false;
+        ProtectionWarned.AddOrUpdate(tab, true);
+        return true;
     }
 
     public static async Task Move(Window owner, DocumentTab tab)
@@ -299,12 +359,19 @@ public static class Organize
     public static Task Duplicate(DocumentTab tab)
     {
         var pages = tab.SelectedPages;
+        if (pages.Length == 0) return Task.CompletedTask;
         // The copy of the last selected page lands after every earlier copy.
         return tab.RunEdit($"Duplicate {Pages(pages.Length)}", (d, pw) => PageEditor.Duplicate(d, pw, pages), pages[^1] + pages.Length);
     }
 
-    public static Task Reverse(DocumentTab tab) =>
-        tab.RunEdit("Reverse page order", (d, pw) => PageEditor.Reverse(d, pw, tab.PageView.PageCount));
+    public static Task Reverse(DocumentTab tab)
+    {
+        var count = tab.PageView.PageCount;
+        // The same pages stay selected (at their new, mirrored positions), in the organizer and the thumbnails.
+        var selected = tab.SelectedPages;
+        return Reselect(tab, [.. selected.Select(p => count - 1 - p).Order()],
+            tab.RunEdit("Reverse page order", (d, pw) => PageEditor.Reverse(d, pw, count)));
+    }
 
     public static async Task Crop(Window owner, DocumentTab tab)
     {

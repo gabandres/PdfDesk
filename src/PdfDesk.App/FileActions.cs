@@ -17,6 +17,7 @@ public static class FileActions
     {
         var count = tab.PageView.PageCount;
         var selection = tab.SelectedPages;
+        var current = Organize.CurrentPage(tab);
         var dlg = new PrintDialog
         {
             UserPageRangeEnabled = true,
@@ -32,23 +33,38 @@ public static class FileActions
         {
             PageRangeSelection.UserPages => [.. Enumerable.Range(Math.Max(1, dlg.PageRange.PageFrom) - 1,
                 Math.Max(0, Math.Min(count, dlg.PageRange.PageTo) - Math.Max(1, dlg.PageRange.PageFrom) + 1))],
-            PageRangeSelection.CurrentPage => [tab.PageView.CurrentPage],
+            PageRangeSelection.CurrentPage => [current],
             PageRangeSelection.SelectedPages => selection,
             _ => [.. Enumerable.Range(0, count)],
         };
         if (pages.Length == 0) return;
 
         var (origin, area) = ImageableArea(dlg);
-        var paginator = new PdfPaginator(tab.Session.Engine, pages, new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight), origin, area);
-        tab.SetBusy($"Printing {pages.Length} page(s)…");
+        using var progress = new ProgressPrompt(owner, "Printing", $"Preparing {Pages(pages.Length)}…");
+        var paginator = new PdfPaginator(tab.ViewEngine, pages, new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight), origin, area, progress.Token);
+        tab.SetBusy($"Printing {Pages(pages.Length)}…");
         try
         {
             // Pages render on a background thread (PdfPaginator.GetPageAsync), so the window stays responsive.
             var writer = PrintQueue.CreateXpsDocumentWriter(dlg.PrintQueue);
+            progress.Cancelled += () =>
+            {
+                try { writer.CancelAsync(); } catch (InvalidOperationException) { }
+            };
+            writer.WritingProgressChanged += (_, e) =>
+            {
+                if (e.WritingLevel == System.Windows.Documents.Serialization.WritingProgressChangeLevel.FixedPageWritingProgress)
+                    progress.Report($"Sending page {Math.Min(e.Number, pages.Length)} of {pages.Length} to the printer…", (double)e.Number / pages.Length);
+            };
             await WriteAsync(writer, paginator, dlg.PrintTicket);
-            Log.Write($"Printed {pages.Length} page(s) of {tab.Session.DisplayName} to {dlg.PrintQueue.FullName}");
+            Log.Write($"Printed {Pages(pages.Length)}");
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException || progress.Token.IsCancellationRequested)
+        {
+            Log.Write("Printing cancelled");
+            (Window.GetWindow(tab) as MainWindow)?.ShowStatus("Printing cancelled");
+        }
+        catch (Exception ex)
         {
             Log.Write($"Print failed: {ex}");
             Prompt.Error(owner, "Printing didn't work", ex.Message);
@@ -59,6 +75,8 @@ public static class FileActions
         }
     }
 
+    private static string Pages(int n) => n == 1 ? "1 page" : $"{n} pages";
+
     private static Task WriteAsync(System.Windows.Xps.XpsDocumentWriter writer, DocumentPaginator paginator, System.Printing.PrintTicket? ticket)
     {
         var done = new TaskCompletionSource();
@@ -68,6 +86,7 @@ public static class FileActions
             else if (e.Cancelled) done.TrySetCanceled();
             else done.TrySetResult();
         };
+        writer.WritingCancelled += (_, _) => done.TrySetCanceled();
         if (ticket is null) writer.WriteAsync(paginator);
         else writer.WriteAsync(paginator, ticket);
         return done.Task;
@@ -102,7 +121,7 @@ public static class FileActions
     }
 
     /// <summary>Renders each page at print resolution on demand, shrinking oversized pages and auto-rotating to fit the paper.</summary>
-    private sealed class PdfPaginator(PdfEngine engine, int[] pages, Size paper, Point origin, Size area) : DocumentPaginator
+    private sealed class PdfPaginator(PdfEngine engine, int[] pages, Size paper, Point origin, Size area, CancellationToken cancel = default) : DocumentPaginator
     {
         private const double Dpi = 300;
 
@@ -118,14 +137,16 @@ public static class FileActions
         /// <summary>Renders on a worker thread and completes on the UI thread (used by XpsDocumentWriter.WriteAsync).</summary>
         public override void GetPageAsync(int pageNumber, object userState)
         {
-            Task.Run(() => Place(pageNumber)).ContinueWith(t => OnGetPageCompleted(t.IsFaulted
-                    ? new GetPageCompletedEventArgs(null, pageNumber, t.Exception!.InnerException, false, userState)
+            Task.Run(() => Place(pageNumber), cancel).ContinueWith(t => OnGetPageCompleted(
+                    t.IsCanceled || cancel.IsCancellationRequested ? new GetPageCompletedEventArgs(null, pageNumber, null, true, userState)
+                    : t.IsFaulted ? new GetPageCompletedEventArgs(null, pageNumber, t.Exception!.InnerException, false, userState)
                     : new GetPageCompletedEventArgs(Build(t.Result), pageNumber, null, false, userState)),
-                TaskScheduler.FromCurrentSynchronizationContext());
+                CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         private Placed Place(int pageNumber)
         {
+            cancel.ThrowIfCancellationRequested();
             var index = pages[pageNumber];
             var g = engine.GetPage(index);
             var wDip = g.Width * 96 / 72;
@@ -139,7 +160,7 @@ public static class FileActions
 
             var pxScale = Dpi / 72 * scale;
             while (g.Width * g.Height * pxScale * pxScale > 60_000_000) pxScale *= 0.85;
-            var bmp = PageViewer.ToBitmap(engine.Render(index, pxScale));
+            var bmp = PageViewer.ToBitmap(engine.Render(index, pxScale, null, cancel));
 
             var dw = fw * scale;
             var dh = fh * scale;
@@ -191,24 +212,69 @@ public static class FileActions
         var res = new[] { 72, 96, 150, 200, 300, 600 }[dpi.SelectedIndex];
         var dir = folder.Text;
         var name = Path.GetFileNameWithoutExtension(tab.Session.DisplayName);
-        var engine = tab.Session.Engine;
+        var engine = tab.ViewEngine; // what is shown (chosen layers included)
+
+        // Clamp the resolution of very large pages so one image can't exhaust memory.
+        var dpiFor = pages.Distinct().ToDictionary(p => p, p => ClampDpi(engine.GetPage(p), res));
+        var clamped = dpiFor.Values.Where(d => d < res).ToList();
+        if (clamped.Count > 0)
+        {
+            var lowest = clamped.Min();
+            var many = clamped.Count > 1;
+            if (!Prompt.Confirm(owner, "Some pages are very large",
+                    $"{(many ? $"{clamped.Count} pages are" : "1 page is")} too large to export at {res} dpi, so {(many ? "they are" : "it is")} exported at a lower resolution (down to {lowest:0} dpi) to stay under {MaxExportPixels / 1e6:0} megapixels per image.",
+                    "Export")) return;
+            Log.Write($"Export: {clamped.Count} page(s) clamped below {res} dpi (lowest {lowest:0})");
+        }
+
+        var ext = jpeg ? "jpg" : "png";
+        var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targets = new List<(int Page, string Path)>();
+        try
+        {
+            foreach (var p in pages) targets.Add((p, PdfFiles.UniquePath(dir, $"{name} - page {p + 1}.{ext}", reserved)));
+        }
+        catch (IOException ex)
+        {
+            Prompt.Error(owner, "Can't export to that folder", ex.Message);
+            return;
+        }
+
         var done = 0;
-        tab.SetBusy($"Exporting {pages.Length} page(s)…");
+        using var progress = new ProgressPrompt(owner, "Exporting images", $"Exporting {Pages(pages.Length)}…");
+        var cancel = progress.Token;
+        tab.SetBusy($"Exporting {Pages(pages.Length)}…");
         try
         {
             await Task.Run(() =>
             {
-                foreach (var p in pages)
+                foreach (var (p, path) in targets)
                 {
-                    engine.SaveImage(p, res, PdfFiles.UniquePath(dir, $"{name} - page {p + 1}.{(jpeg ? "jpg" : "png")}"), jpeg);
+                    cancel.ThrowIfCancellationRequested();
+                    progress.Report($"Exporting page {p + 1} ({done + 1} of {targets.Count})…", (double)done / targets.Count);
+                    try
+                    {
+                        engine.SaveImage(p, dpiFor[p], path, jpeg, cancel);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        try { File.Delete(path); } catch (Exception) { } // don't leave half an image behind
+                        throw;
+                    }
                     Interlocked.Increment(ref done);
                 }
-            });
+            }, cancel);
             host.ShowStatus($"Exported {done} image(s) to {dir}");
             Shell.Open(dir);
         }
+        catch (OperationCanceledException)
+        {
+            Log.Write($"Export cancelled after {done} of {targets.Count} image(s)");
+            host.ShowStatus($"Export cancelled. {done} image(s) were saved to {dir}");
+        }
         catch (Exception ex)
         {
+            Log.Write($"Export failed after {done} image(s): {ex}");
             Prompt.Error(owner, $"Export stopped after {done} page(s)", ex.Message);
         }
         finally
@@ -217,10 +283,21 @@ public static class FileActions
         }
     }
 
+    /// <summary>Largest image Export writes, in pixels: A0 at 600 dpi would be ~560 MP (about 1.6 GB while rendering).</summary>
+    private const double MaxExportPixels = 64_000_000;
+
+    /// <summary>The requested dpi, lowered if the page would exceed <see cref="MaxExportPixels"/> at that resolution.</summary>
+    private static double ClampDpi(PageGeometry g, double dpi)
+    {
+        var squareInches = Math.Max(1e-6, g.Width / 72 * (g.Height / 72));
+        return Math.Min(dpi, Math.Floor(Math.Sqrt(MaxExportPixels / squareInches)));
+    }
+
     public static async Task ShowProperties(Window owner, DocumentTab tab)
     {
         var s = tab.Session;
-        var g = s.Engine.GetPage(tab.PageView.CurrentPage);
+        var page = Organize.CurrentPage(tab);
+        var g = s.Engine.GetPage(page);
         PdfMetadata? meta = null;
         if (s.IsPdf)
         {
@@ -255,7 +332,7 @@ public static class FileActions
         Row("Location", s.FilePath is null ? "Not saved yet" : Path.GetDirectoryName(s.FilePath));
         Row("File size", FormatSize(s.Data.Length));
         Row("Pages", s.Engine.PageCount.ToString());
-        Row("Page size", $"{Organize.Inches(g.Width)} × {Organize.Inches(g.Height)} in  ({g.Width * 25.4 / 72:0} × {g.Height * 25.4 / 72:0} mm)  — page {tab.PageView.CurrentPage + 1}");
+        Row("Page size", $"{Organize.Inches(g.Width)} × {Organize.Inches(g.Height)} in  ({g.Width * 25.4 / 72:0} × {g.Height * 25.4 / 72:0} mm)  — page {page + 1}");
         Row("PDF version", meta?.Version);
         Row("Encrypted", s.Engine.IsEncrypted ? "Yes" : null);
         Row("Created by", meta?.Creator);
@@ -279,7 +356,7 @@ public static class FileActions
         await tab.RunEdit("Edit document properties", (d, pw) => PageEditor.WriteMetadata(d, pw, t, a, sub, k));
     }
 
-    private static string FormatSize(long bytes) => bytes switch
+    internal static string FormatSize(long bytes) => bytes switch
     {
         < 1024 => $"{bytes} bytes",
         < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
