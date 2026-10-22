@@ -144,7 +144,7 @@ public static class PageEditor
         {
             if (!keep.Any(i => i >= 0 && i < doc.PageCount)) throw new InvalidOperationException("No pages selected.");
             PdfStructure.RemovePages(doc, Enumerable.Range(0, doc.PageCount).Where(i => !keep.Contains(i)));
-        });
+        }, rewrite: true);
     }
 
     /// <summary>Splits into consecutive chunks of <paramref name="pagesPerFile"/> pages.</summary>
@@ -264,34 +264,28 @@ public static class PageEditor
         });
     }
 
-    private static byte[] Edit(byte[] data, string? password, Action<PdfDocument> edit)
+    /// <param name="rewrite">Always write a new file, never an incremental update of a signed one (a new document,
+    /// e.g. extracted pages, mustn't carry the whole original along).</param>
+    private static byte[] Edit(byte[] data, string? password, Action<PdfDocument> edit, bool rewrite = false)
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
         var xmp = Xmp.Read(doc);
         edit(doc);
         doc.Info.ModificationDate = DateTime.Now;
-        return Save(doc, xmp);
+        return Save(doc, xmp, rewrite);
     }
 
     private static PdfDocument OpenImport(byte[] data, string? password) => Open(data, password, PdfDocumentOpenMode.Import);
 
-    private static PdfDocument Open(byte[] data, string? password, PdfDocumentOpenMode mode)
-    {
-        try
-        {
-            var stream = new MemoryStream(data, writable: false);
-            return string.IsNullOrEmpty(password) ? PdfReader.Open(stream, mode) : PdfReader.Open(stream, password, mode);
-        }
-        catch (PdfReaderException ex)
-        {
-            throw PdfObj.ReaderError(ex, mode, "This PDF can't be edited");
-        }
-    }
+    private static PdfDocument Open(byte[] data, string? password, PdfDocumentOpenMode mode) =>
+        PdfObj.Open(data, password, mode, "This PDF can't be edited");
 
     /// <param name="xmp">The XMP packet the document had before the edit, if any. PDFsharp always replaces it with one of
     /// its own (unescaped, ModifyDate = CreationDate), so the original is written back updated from the Info values.</param>
-    private static byte[] Save(PdfDocument doc, XDocument? xmp = null)
+    /// <param name="rewrite">Skip the incremental update a signed document otherwise gets (see <see cref="Incremental"/>).</param>
+    private static byte[] Save(PdfDocument doc, XDocument? xmp = null, bool rewrite = false)
     {
+        if (!rewrite && Incremental.TrySave(doc, xmp) is { } appended) return appended;
         doc.Options.CompressContentStreams = true;
         doc.Options.NoCompression = false;
         using var ms = new MemoryStream();

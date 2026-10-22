@@ -36,19 +36,29 @@ public sealed record FormWidget(
     string? DisplayValue = null,
     bool Calculated = false);
 
+/// <summary>A value a field's keystroke or validate script refused, and the message it gave (or a generic one).</summary>
+public sealed record FieldRejection(string FieldName, string Message);
+
+/// <summary>
+/// What <see cref="FormEditor.Fill"/> did: the new document, the values the form's scripts refused (those fields kept
+/// their old value), app.alert messages raised by the scripts, and script log lines (console.println, errors).
+/// </summary>
+public sealed record FormFillResult(byte[] Data, IReadOnlyList<FieldRejection> Rejected, IReadOnlyList<string> Alerts, IReadOnlyList<string> Log);
+
 /// <summary>
 /// Reads and fills AcroForm fields (text, check boxes, radio buttons, combo/list boxes). Values are written in place,
 /// and every text/choice widget that changes gets a freshly generated appearance stream (fonts from the form's /DR,
 /// or an embedded Unicode font for other scripts), so viewers that ignore NeedAppearances (Preview, iOS, print
-/// pipelines) still show the values; NeedAppearances is set too. Simple Acrobat calculations and formats are
-/// honored (see <see cref="FormScripts"/>). Hybrid AcroForm+XFA forms lose their XFA when filled; XFA-only forms
+/// pipelines) still show the values; NeedAppearances is set too. The form's JavaScript (keystroke, validate, calculate
+/// and format actions, plus document-level scripts) runs in a sandbox (see <see cref="JsFormHost"/>), with the parsed
+/// <see cref="FormScripts"/> fast paths as fallback. Hybrid AcroForm+XFA forms lose their XFA when filled; XFA-only forms
 /// (no AcroForm widgets) are not fillable: check <see cref="HasXfa"/>.
 /// </summary>
-public static class FormEditor
+public static partial class FormEditor
 {
-    private const int FfReadOnly = 1, FfMultiline = 1 << 12, FfPassword = 1 << 13, FfNoToggleToOff = 1 << 14, FfRadio = 1 << 15,
+    private const int FfReadOnly = 1, FfRequired = 2, FfMultiline = 1 << 12, FfPassword = 1 << 13, FfNoToggleToOff = 1 << 14, FfRadio = 1 << 15,
         FfPushButton = 1 << 16, FfCombo = 1 << 17, FfEdit = 1 << 18, FfMultiSelect = 1 << 21, FfComb = 1 << 24, FfRadiosInUnison = 1 << 25;
-    private const int AnnotHidden = 2, AnnotNoView = 32, AnnotReadOnly = 64;
+    private const int AnnotHidden = 2, AnnotPrint = 4, AnnotNoView = 32, AnnotReadOnly = 64;
 
     internal sealed record Field(PdfDictionary Dict, string Name, string Type, int Flags, List<PdfDictionary> Widgets);
 
@@ -80,21 +90,46 @@ public static class FormEditor
     /// chosen state; choice fields take an export value (or its display text); multi-select list boxes take the selected
     /// export values joined by '\n'. Afterwards the form's calculations run (in /CO order) and their results are written.
     /// </summary>
-    public static byte[] SetValues(byte[] data, string? password, IReadOnlyDictionary<string, string> values)
+    public static byte[] SetValues(byte[] data, string? password, IReadOnlyDictionary<string, string> values) =>
+        Fill(data, password, values).Data;
+
+    /// <summary>
+    /// <see cref="SetValues"/> that runs the form's JavaScript and reports what it said: each text/choice value first
+    /// goes through the field's keystroke (commit) and validate scripts, which may reject it (the field keeps its old
+    /// value; see <see cref="FormFillResult.Rejected"/>) or adjust it; then the calculate scripts run in /CO order and
+    /// format scripts produce the appearances. app.alert texts come back in <see cref="FormFillResult.Alerts"/>. When
+    /// every value was rejected and nothing else changed, <see cref="FormFillResult.Data"/> is <paramref name="data"/>
+    /// itself.
+    /// </summary>
+    public static FormFillResult Fill(byte[] data, string? password, IReadOnlyDictionary<string, string> values)
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
         var acro = PdfObj.Dict(doc.Internals.Catalog.Elements["/AcroForm"]);
         var fields = new List<Field>();
         Collect(doc, acro, fields);
         if (fields.Count == 0) throw new InvalidOperationException("This PDF has no fillable form.");
-
-        // A hybrid form's XFA would keep showing the old values in Acrobat; the AcroForm is now the truth.
-        acro?.Elements.Remove("/XFA");
+        var js = new JsFormHost(doc, fields);
+        var rejected = new List<FieldRejection>();
+        var alerts = new List<string>();
 
         var dirty = new List<Field>();
+        var changed = false;
         foreach (var f in fields)
         {
             if (!values.TryGetValue(f.Name, out var value) || (f.Flags & FfReadOnly) != 0) continue;
+            if (f.Type is "/Tx" or "/Ch" && value != ValueOf(f.Dict, f.Type))
+            {
+                if (Commit(js, f, value, alerts) is { } verdict)
+                {
+                    if (verdict.Rejection is { } why)
+                    {
+                        rejected.Add(new FieldRejection(f.Name, why));
+                        continue;
+                    }
+                    value = verdict.Value;
+                }
+            }
+            changed = true;
             switch (f.Type)
             {
                 case "/Tx":
@@ -111,18 +146,47 @@ public static class FormEditor
                     break;
             }
         }
+        if (!changed && rejected.Count > 0 && js.Touched.Count == 0)
+            return new FormFillResult(data, rejected, alerts, js.Log);
 
-        foreach (var f in Calculate(doc, acro, fields))
+        // A hybrid form's XFA would keep showing the old values in Acrobat; the AcroForm is now the truth.
+        acro?.Elements.Remove("/XFA");
+
+        foreach (var f in Calculate(doc, acro, fields, js, alerts))
+            if (!dirty.Contains(f)) dirty.Add(f);
+        foreach (var f in js.Touched)
             if (!dirty.Contains(f)) dirty.Add(f);
 
-        foreach (var f in dirty) WriteAppearances(doc, acro, f);
+        foreach (var f in dirty) WriteAppearances(doc, acro, f, js);
 
         if (dirty.Count > 0 && acro is not null)
         {
             acro.Elements["/NeedAppearances"] = new PdfBoolean(true);
             EnsureDefaultFonts(doc, acro);
         }
-        return PdfObj.Save(doc);
+        return new FormFillResult(PdfObj.Save(doc), rejected, alerts, js.Log);
+    }
+
+    /// <summary>
+    /// The keystroke (commit) and validate scripts of a text/choice field for a new value: null when the field has none
+    /// (or they couldn't run), else the value to store (keystroke scripts may rewrite it) or why it was refused.
+    /// </summary>
+    private static (string Value, string? Rejection)? Commit(JsFormHost js, Field f, string value, List<string> alerts)
+    {
+        var ran = false;
+        foreach (var (key, name) in new[] { ("/K", "Keystroke"), ("/V", "Validate") })
+        {
+            if (ActionScript(f, key) is not { } script || js.Run(name, f, script, value, willCommit: true) is not { } r) continue;
+            ran = true;
+            if (!r.Rc)
+            {
+                var why = r.Alerts.Count > 0 ? string.Join("\n", r.Alerts) : $"The value entered for {f.Name} isn't valid.";
+                return (value, why);
+            }
+            alerts.AddRange(r.Alerts);
+            if (key == "/K" && r.Value is { } adjusted) value = adjusted;
+        }
+        return ran ? (value, null) : null;
     }
 
     private static void SetChoice(PdfDocument doc, Field f, string value)
@@ -166,10 +230,14 @@ public static class FormEditor
     }
 
     /// <summary>Runs the form's calculate scripts (in /CO order) and returns the fields whose value changed.</summary>
-    private static List<Field> Calculate(PdfDocument doc, PdfDictionary? acro, List<Field> fields)
+    /// <summary>
+    /// Runs the form's calculate scripts (in /CO order) and returns the fields whose value changed. Each runs in the
+    /// JavaScript sandbox; when it can't, the parsed fast path (<see cref="FormScripts.ParseCalculation"/>) stands in.
+    /// </summary>
+    private static List<Field> Calculate(PdfDocument doc, PdfDictionary? acro, List<Field> fields, JsFormHost js, List<string> alerts)
     {
         var changed = new List<Field>();
-        var calcs = new List<(Field Field, FieldCalculation Calc)>();
+        var calcs = new List<(Field Field, string Script)>();
         var byDict = new Dictionary<PdfDictionary, Field>(ReferenceEqualityComparer.Instance);
         foreach (var f in fields) byDict.TryAdd(f.Dict, f);
         var order = new List<Field>();
@@ -178,20 +246,35 @@ public static class FormEditor
                 if (PdfObj.Dict(item) is { } d && byDict.TryGetValue(d, out var f) && !order.Contains(f)) order.Add(f);
         if (order.Count == 0) order = fields;
         foreach (var f in order)
-            if (FormScripts.ParseCalculation(ActionScript(f, "/C")) is { } calc) calcs.Add((f, calc));
+            if (ActionScript(f, "/C") is { } script && !string.IsNullOrWhiteSpace(script)) calcs.Add((f, script));
         if (calcs.Count == 0) return changed;
 
         IReadOnlyList<string> ValuesOf(string name) =>
             [.. fields.Where(f => f.Name == name || f.Name.StartsWith(name + ".", StringComparison.Ordinal)).Select(f => ValueOf(f.Dict, f.Type))];
 
-        foreach (var (f, calc) in calcs)
+        foreach (var (f, script) in calcs)
         {
             if (f.Type is not ("/Tx" or "/Ch")) continue;
-            if (calc.Evaluate(ValuesOf) is not { } result || double.IsNaN(result) || double.IsInfinity(result)) continue;
-            var text = FormScripts.NumberToValue(result);
+            var current = ValueOf(f.Dict, f.Type);
+            string text;
+            if (js.Run("Calculate", f, script, current) is { } r)
+            {
+                alerts.AddRange(r.Alerts);
+                if (!r.Rc || r.Value is null) continue;
+                text = r.Value;
+            }
+            else
+            {
+                if (FormScripts.ParseCalculation(script)?.Evaluate(ValuesOf) is not { } result || double.IsNaN(result) || double.IsInfinity(result)) continue;
+                text = FormScripts.NumberToValue(result);
+            }
             if (ValueOf(f.Dict, f.Type) == text) continue;
-            f.Dict.Elements["/V"] = PdfObj.MakeString(text);
-            f.Dict.Elements.Remove("/RV");
+            if (f.Type == "/Ch") SetChoice(doc, f, text);
+            else
+            {
+                f.Dict.Elements["/V"] = PdfObj.MakeString(text);
+                f.Dict.Elements.Remove("/RV");
+            }
             changed.Add(f);
         }
         return changed;
@@ -219,20 +302,26 @@ public static class FormEditor
         _ => type == "/Btn" ? "Off" : "",
     };
 
-    private static (string Text, bool Red) Display(Field f, string raw)
+    /// <summary>
+    /// The text a field's format script (/AA /F) shows for a raw value, and the text color it asked for (red negatives):
+    /// through the JavaScript sandbox when there is one, else (or when the script fails) the parsed fast path.
+    /// </summary>
+    private static (string Text, double[]? Color) Display(Field f, string raw, JsFormHost? js)
     {
-        if (FormScripts.ParseFormat(ActionScript(f, "/F")) is { } fmt) return FormScripts.Format(fmt, raw);
-        return (raw, false);
+        if (ActionScript(f, "/F") is not { } script) return (raw, null);
+        if (js?.Run("Format", f, script, raw) is { Value: { } shown } r) return (shown, r.TextColor);
+        if (FormScripts.ParseFormat(script) is { } fmt && FormScripts.Format(fmt, raw) is var (text, red)) return (text, red ? [1, 0, 0] : null);
+        return (raw, null);
     }
 
     /// <summary>Generates the normal appearance of every widget of a text or choice field from its current value.</summary>
-    private static void WriteAppearances(PdfDocument doc, PdfDictionary? acro, Field f)
+    private static void WriteAppearances(PdfDocument doc, PdfDictionary? acro, Field f, JsFormHost? js = null)
     {
         if (f.Type is not ("/Tx" or "/Ch")) return;
         var raw = ValueOf(f.Dict, f.Type);
         var (exports, labels) = ReadOptions(Inherited(f.Dict, "/Opt"));
         var listBox = f.Type == "/Ch" && (f.Flags & FfCombo) == 0;
-        var (text, red) = f.Type == "/Tx" ? Display(f, raw) : (raw, false);
+        var (text, color) = f.Type == "/Tx" ? Display(f, raw, js) : (raw, null);
         if (f.Type == "/Ch" && !listBox && exports.IndexOf(raw) is var ci and >= 0) text = labels[ci];
 
         var selected = new HashSet<int>();
@@ -265,7 +354,7 @@ public static class FormEditor
                 Items = labels,
                 Selected = selected,
                 TopIndex = topIndex,
-                ColorOverride = red ? new PdfColorValue([1, 0, 0]) : null,
+                ColorOverride = color is { Length: > 0 } c ? new PdfColorValue(c) : null,
             };
             if (FieldAppearance.Build(doc, w, look) is not { } ap) continue;
             var apDict = new PdfDictionary(doc);
@@ -315,6 +404,7 @@ public static class FormEditor
         }
         var structOrder = tabs.Any(t => t == "S") ? StructureOrder(doc) : null;
         var calculated = CalculatedFields(fields);
+        JsFormHost? js = null; // created on the first format script
 
         var result = new List<(FormWidget W, PdfDictionary Annot)>();
         foreach (var f in fields)
@@ -347,8 +437,8 @@ public static class FormEditor
             };
             var maxLen = PdfObj.Int(Inherited(f.Dict, "/MaxLen")) ?? 0;
             string? display = null;
-            if (kind == FormFieldKind.Text && FormScripts.ParseFormat(ActionScript(f, "/F")) is { } fmt)
-                display = FormScripts.Format(fmt, value).Text;
+            if (kind == FormFieldKind.Text && ActionScript(f, "/F") is not null)
+                display = Display(f, value, js ??= new JsFormHost(doc, fields, readOnly: true)).Text;
 
             foreach (var w in f.Widgets)
             {
@@ -392,7 +482,7 @@ public static class FormEditor
     {
         var set = new HashSet<Field>();
         foreach (var f in fields)
-            if (FormScripts.ParseCalculation(ActionScript(f, "/C")) is not null) set.Add(f);
+            if (!string.IsNullOrWhiteSpace(ActionScript(f, "/C"))) set.Add(f);
         return set;
     }
 

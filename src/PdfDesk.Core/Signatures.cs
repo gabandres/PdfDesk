@@ -61,16 +61,17 @@ public static class Signatures
 
     /// <summary>
     /// The signatures that checked out in <paramref name="original"/> (the <see cref="Verify"/> result kept from when the
-    /// file was opened) but have a different status in <paramref name="current"/> (the edited bytes). PdfDesk saves edits
-    /// by rewriting the file, which breaks every signature: the UI can say "changed by your edits" for these instead of
-    /// presenting them as forged. Matched by field name.
+    /// file was opened) but no longer do in <paramref name="current"/> (the edited bytes). Edits to a signed file are
+    /// appended as incremental updates, which keeps its signatures intact (<see cref="SignatureStatus.ModifiedAfterSigning"/>);
+    /// a redaction or an encrypted file is rewritten, which breaks them: the UI can say "changed by your edits" for these
+    /// instead of presenting them as forged. Matched by field name.
     /// </summary>
     public static IReadOnlyList<SignatureInfo> BrokenByEdits(IReadOnlyList<SignatureInfo> original, byte[] current, string? password = null)
     {
         var intact = original.Where(s => s.Status is SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning).ToList();
         if (intact.Count == 0) return [];
         var now = Verify(current, password);
-        return [.. intact.Where(s => now.FirstOrDefault(n => n.FieldName == s.FieldName)?.Status != s.Status)];
+        return [.. intact.Where(s => now.FirstOrDefault(n => n.FieldName == s.FieldName)?.Status is not (SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning))];
     }
 
     public static IReadOnlyList<SignatureInfo> Verify(byte[] data, string? password = null, bool checkRevocationOnline = false)

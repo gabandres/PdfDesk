@@ -535,7 +535,9 @@ public partial class DocumentTab : UserControl, IDisposable
                 var batch = new Dictionary<string, string>(_formQueue);
                 _formQueue.Clear();
                 var label = batch.Count == 1 ? "Fill form field" : $"Fill {batch.Count} form fields";
-                var outcome = await TryEdit(label, (d, pw) => FormEditor.SetValues(d, pw, batch), quiet: true, contentOnly: true);
+                FormFillResult? fill = null;
+                var outcome = await TryEdit(label, (d, pw) => (fill = FormEditor.Fill(d, pw, batch)).Data, quiet: true, contentOnly: true);
+                if (fill is not null && outcome is EditOutcome.Done or EditOutcome.NoChange) ReportFormScripts(batch, fill);
                 if (outcome == EditOutcome.Busy)
                 {
                     // Another edit (or its warning prompt) got the tab first: put the values back (newer ones typed
@@ -558,6 +560,22 @@ public partial class DocumentTab : UserControl, IDisposable
             _formSaving = false;
             EndWrite();
         }
+    }
+
+    /// <summary>
+    /// What the form's scripts said about a written batch: refused values go back to the document's value with the
+    /// script's message; app.alert texts show as toasts; console output and script errors go to the log.
+    /// </summary>
+    private void ReportFormScripts(Dictionary<string, string> batch, FormFillResult fill)
+    {
+        foreach (var line in fill.Log) Log.Write(line);
+        foreach (var r in fill.Rejected) Log.Write($"Form script refused the value of {r.FieldName}: {r.Message}");
+        if (fill.Rejected.Count > 0)
+        {
+            Viewer.RevertPendingValues(fill.Rejected.Where(r => batch.ContainsKey(r.FieldName)).ToDictionary(r => r.FieldName, r => batch[r.FieldName]));
+            foreach (var r in fill.Rejected) Notify(r.Message, error: true);
+        }
+        foreach (var alert in fill.Alerts.Distinct().Take(3)) Notify(alert);
     }
 
     private async Task SaveStamp(StampEdit e)

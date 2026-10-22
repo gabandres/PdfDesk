@@ -21,7 +21,7 @@ public readonly record struct AnnotColor(double R, double G, double B)
 }
 
 /// <summary>A markup annotation (comment) on a page. Rects are in page space.</summary>
-/// <param name="Id">Stable id: the annotation's /NM, else "obj:&lt;object number&gt;" (valid for the bytes it was read from).</param>
+/// <param name="Id">Stable id: the annotation's /NM, else "p&lt;page&gt;:&lt;index&gt;" (valid for the bytes it was read from).</param>
 /// <param name="Subtype">The PDF subtype without the slash ("Highlight", "Text", ...).</param>
 /// <param name="QuadRects">Text markup: the marked line boxes (from /QuadPoints); empty for other kinds.</param>
 /// <param name="IsPdfDeskStamp">A Fill &amp; Sign stamp (managed by <see cref="TextStamps"/>).</param>
@@ -259,10 +259,23 @@ public static class Annotations
         return null;
     }
 
+    /// <summary>
+    /// The annotation's /NM, else its position ("p&lt;page&gt;:&lt;index in /Annots&gt;"; <paramref name="index"/> -1 looks
+    /// it up, page <paramref name="page"/> first). Never the object number: PDFsharp renumbers objects when it opens a
+    /// file for editing but not when it opens one for reading, and an incrementally updated file has gaps.
+    /// </summary>
     internal static string IdOf(PdfDictionary a, int page, int index)
     {
         if (PdfObj.Str(a.Elements["/NM"]) is { Length: > 0 } nm) return nm;
-        if (a.Reference is { } r) return $"obj:{r.ObjectNumber}";
+        if (index < 0 && a.Owner is { } doc)
+        {
+            foreach (var p in (IEnumerable<int>)[page, .. Enumerable.Range(0, doc.PageCount)])
+            {
+                if (p < 0 || p >= doc.PageCount || PdfObj.Array(doc.Pages[p].Elements["/Annots"]) is not { } annots) continue;
+                for (var i = 0; i < annots.Elements.Count; i++)
+                    if (ReferenceEquals(PdfObj.Dict(annots.Elements[i]), a)) return $"p{p}:{i}";
+            }
+        }
         return $"p{page}:{index}";
     }
 

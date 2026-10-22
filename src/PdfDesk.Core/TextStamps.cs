@@ -215,16 +215,6 @@ public static class TextStamps
     private static PdfString MakeString(string value) =>
         value.All(c => c < 128) ? new PdfString(value) : new PdfString(value, PdfStringEncoding.Unicode);
 
-    private static PdfDocument Open(byte[] data, string? password, PdfDocumentOpenMode mode)
-    {
-        try
-        {
-            var stream = new MemoryStream(data, writable: false);
-            return string.IsNullOrEmpty(password) ? PdfReader.Open(stream, mode) : PdfReader.Open(stream, password, mode);
-        }
-        catch (PdfReaderException ex)
-        {
-            throw PdfObj.ReaderError(ex, mode, "This PDF can't be edited");
-        }
-    }
+    private static PdfDocument Open(byte[] data, string? password, PdfDocumentOpenMode mode) =>
+        PdfObj.Open(data, password, mode, "This PDF can't be edited");
 }

@@ -50,7 +50,7 @@ public static class Redaction
             }
             ReplacePage(doc, doc.Pages[index], img.Width, img.Height, rgb);
         }
-        return PdfObj.Save(doc);
+        return PdfObj.Save(doc, rewrite: true);
     }
 
     /// <summary>
@@ -72,7 +72,7 @@ public static class Redaction
                 if (areas.Any(a => !a.IsEmpty && !a.Intersect(rect).IsEmpty)) hit.Add(w);
             }
         }
-        return hit.Count > 0 && FormEditor.ClearFields(doc, hit) ? PdfObj.Save(doc) : data;
+        return hit.Count > 0 && FormEditor.ClearFields(doc, hit) ? PdfObj.Save(doc, rewrite: true) : data;
     }
 
     private static void ReplacePage(PdfDocument doc, PdfPage page, int width, int height, byte[] rgb)

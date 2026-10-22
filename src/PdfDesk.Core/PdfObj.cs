@@ -78,7 +78,10 @@ internal static class PdfObj
         try
         {
             var stream = new MemoryStream(data, writable: false);
-            return string.IsNullOrEmpty(password) ? PdfReader.Open(stream, mode) : PdfReader.Open(stream, password, mode);
+            var doc = string.IsNullOrEmpty(password) ? PdfReader.Open(stream, mode) : PdfReader.Open(stream, password, mode);
+            // A signed document opened for editing: remember its original objects so the save can be incremental.
+            if (mode == PdfDocumentOpenMode.Modify) Incremental.Track(doc, data, password);
+            return doc;
         }
         catch (PdfReaderException ex)
         {
@@ -103,10 +106,14 @@ internal static class PdfObj
     /// Saves an edited document. PDFsharp replaces the XMP metadata packet on every save, so the document's own packet
     /// (read just before saving) is written back, updated from the Info dictionary (see <see cref="Xmp"/>).
     /// Every Core path that saves with PDFsharp goes through here (PageEditor has its own Save doing the same).
+    /// A signed document opened through <see cref="Open"/> is saved as an incremental update instead, which keeps its
+    /// signatures valid (see <see cref="Incremental"/>), unless <paramref name="rewrite"/> asks for a full rewrite
+    /// (redaction, which must not leave the removed content in the file).
     /// </summary>
-    public static byte[] Save(PdfDocument doc)
+    public static byte[] Save(PdfDocument doc, bool rewrite = false)
     {
         var xmp = Xmp.Read(doc);
+        if (!rewrite && Incremental.TrySave(doc, xmp) is { } appended) return appended;
         using var ms = new MemoryStream();
         doc.Save(ms, false);
         return Xmp.Patch(ms.ToArray(), doc.Info, xmp);

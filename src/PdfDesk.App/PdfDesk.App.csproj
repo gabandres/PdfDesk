@@ -9,6 +9,8 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- ThemeMode (Fluent) is marked experimental in WPF -->
     <NoWarn>$(NoWarn);WPF0001</NoWarn>
+    <!-- The UI is English only: skip the framework's translated resource assemblies (~8 MB) -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\PdfDesk.Core\PdfDesk.Core.csproj" />
@@ -18,6 +20,8 @@
   <Target Name="DropPdbsFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+      <!-- Native PDB writer the runtime pack carries for debugging tools; the app never writes PDBs -->
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.arm64.dll'" />
     </ItemGroup>
   </Target>
   <ItemGroup>

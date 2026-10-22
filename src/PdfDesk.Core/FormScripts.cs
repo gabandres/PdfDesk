@@ -51,6 +51,8 @@ public sealed class FieldCalculation
 /// scripts (<c>event.value = this.getField("a").value * getField("b").value + 1;</c>, with <c>var</c> locals,
 /// <c>AFMakeNumber</c>, <c>Number</c>, <c>Math.round/floor/ceil/abs/min/max</c>); formats AFNumber_Format,
 /// AFPercent_Format, AFDate_FormatEx, AFDate_Format, AFSpecial_Format. Anything else is ignored (returns null).
+/// Form scripts normally run in the JavaScript sandbox (<see cref="FormEditor"/>'s JsFormHost); these are the fallback
+/// when a script can't run there, and the formatting helpers the sandbox's AF* built-ins use.
 /// </summary>
 public static class FormScripts
 {

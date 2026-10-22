@@ -81,6 +81,17 @@ public sealed partial class PageViewer
         _surface.InvalidateVisual();
     }
 
+    /// <summary>
+    /// The form's scripts refused these fields' values: show the document's values again (unless the field is open
+    /// in the editor or was changed since, which would be a newer value).
+    /// </summary>
+    public void RevertPendingValues(IReadOnlyDictionary<string, string> rejected)
+    {
+        foreach (var (name, value) in rejected)
+            if (_pendingValues.TryGetValue(name, out var pending) && pending == value) _pendingValues.Remove(name);
+        _surface.InvalidateVisual();
+    }
+
     public void SetStamps(IReadOnlyList<TextStamp> stamps)
     {
         _stampsByPage = stamps.GroupBy(s => s.PageIndex).ToDictionary(g => g.Key, g => g.ToList());

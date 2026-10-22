@@ -101,9 +101,21 @@ public static class Layers
 
     private static byte[] Apply(byte[] data, string? password, IReadOnlyDictionary<int, bool> visibility, bool forViewing)
     {
+        // Layer ids are object numbers as read (List opens for reading); PDFsharp renumbers objects when it opens for
+        // editing, so translate them by position in /OCGs.
+        List<int> fileIds;
+        using (var view = PdfObj.Open(data, password, PdfDocumentOpenMode.Import, "This PDF can't be edited")) fileIds = OcgNumbers(view);
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         var props = PdfObj.Dict(doc.Internals.Catalog.Elements["/OCProperties"]);
         if (PdfObj.Array(props?.Elements["/OCGs"]) is not { } ocgs) return data;
+        var editIds = OcgNumbers(doc);
+        if (editIds.Count == fileIds.Count)
+        {
+            var translated = new Dictionary<int, bool>();
+            for (var i = 0; i < fileIds.Count; i++)
+                if (visibility.TryGetValue(fileIds[i], out var v)) translated[editIds[i]] = v;
+            visibility = translated;
+        }
         var current = ListIn(doc).ToDictionary(l => l.Id, l => l.DefaultVisible);
         var d = PdfObj.Dict(props!.Elements["/D"]);
         if (d is null)
@@ -126,6 +138,11 @@ public static class Layers
         if (forViewing) d.Elements.Remove("/AS");
         return PdfObj.Save(doc);
     }
+
+    private static List<int> OcgNumbers(PdfDocument doc) =>
+        PdfObj.Array(PdfObj.Dict(doc.Internals.Catalog.Elements["/OCProperties"])?.Elements["/OCGs"]) is { } a
+            ? [.. a.Elements.Select(e => e is PdfReference r ? r.ObjectNumber : -1)]
+            : [];
 
     private static HashSet<int> Ids(PdfItem? item) =>
         PdfObj.Array(item) is { } a ? [.. a.Elements.OfType<PdfReference>().Select(r => r.ObjectNumber)] : [];

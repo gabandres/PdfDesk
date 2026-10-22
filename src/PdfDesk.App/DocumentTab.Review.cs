@@ -903,10 +903,14 @@ public partial class DocumentTab
     /// That's the expected effect of editing a signed file, not tampering, so it is reported as such.
     /// </summary>
     internal bool BrokenByEdits(SignatureInfo s) =>
-        s.Status is SignatureStatus.Invalid or SignatureStatus.ModifiedAfterSigning
+        s.Status == SignatureStatus.Invalid
         && _signaturesOnOpen.TryGetValue(s.FieldName, out var before)
-        && before.Status is SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning
-        && before.Status != s.Status;
+        && before.Status is SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning;
+
+    /// <summary>Valid when opened and still intact: this tab's edits were appended after the signed bytes.</summary>
+    private bool AppendedByEdits(SignatureInfo s) =>
+        s.Status == SignatureStatus.ModifiedAfterSigning
+        && _signaturesOnOpen.TryGetValue(s.FieldName, out var before) && before.Status == SignatureStatus.Valid;
 
     internal static string SignatureSeverity(SignatureInfo s, bool brokenByEdits = false) => brokenByEdits ? "warn" : s.Status switch
     {
@@ -932,6 +936,7 @@ public partial class DocumentTab
 
     private string ShortStatus(SignatureInfo s) => BrokenByEdits(s) ? "valid when opened, invalidated by your edits" : s.Status switch
     {
+        SignatureStatus.ModifiedAfterSigning when AppendedByEdits(s) => "intact; your changes were added after signing",
         SignatureStatus.Invalid => "invalid",
         SignatureStatus.Unsupported => "can't be checked",
         SignatureStatus.ModifiedAfterSigning => "modified after signing",
@@ -997,9 +1002,13 @@ public partial class DocumentTab
         if (sender is FrameworkElement { Tag: SignatureItem s } && s.Info.PageIndex >= 0) Viewer.Flash(s.Info.PageIndex, s.Info.Rect);
     }
 
-    private bool NeedsSignedWarning => _signedOnOpen && !_signatureWarned;
+    /// <summary>
+    /// Edits of a signed document are appended after the signed bytes (incremental update), which keeps the signatures
+    /// valid. Only an encrypted signed document is rewritten (redaction too, which warns on its own).
+    /// </summary>
+    private bool NeedsSignedWarning => _signedOnOpen && !_signatureWarned && Session.Engine.IsEncrypted;
 
-    /// <summary>Before the first edit of a signed document: say that editing breaks the signatures.</summary>
+    /// <summary>Before the first edit of an encrypted signed document: say that editing breaks the signatures.</summary>
     private bool ConfirmSignedEdit()
     {
         if (!NeedsSignedWarning) return true;
@@ -1059,7 +1068,7 @@ public partial class DocumentTab
         var pages = marks.Select(m => m.PageIndex).Distinct().Order().ToList();
         var list = string.Join(", ", pages.Take(12).Select(PageLabel)) + (pages.Count > 12 ? "…" : "");
         if (confirm && !Prompt.Confirm(Window.GetWindow(this), $"Apply {marks.Count} redaction{(marks.Count == 1 ? "" : "s")}?",
-                $"The marked areas are blacked out and their content removed. {(pages.Count == 1 ? "Page" : "Pages")} {list} become images: their text can no longer be selected, searched or copied, and their links, comments and form fields are flattened into the image.\n\nYou can undo this until you save. Once saved, the removed content can't be recovered.",
+                $"The marked areas are blacked out and their content removed. {(pages.Count == 1 ? "Page" : "Pages")} {list} become images: their text can no longer be selected, searched or copied, and their links, comments and form fields are flattened into the image.{(_signedOnOpen ? "\n\nThis document is digitally signed: redaction rewrites the file, so its signatures will no longer verify." : "")}\n\nYou can undo this until you save. Once saved, the removed content can't be recovered.",
                 "Apply redactions", warning: true)) return false;
         var areas = marks.GroupBy(m => m.PageIndex).ToDictionary(g => g.Key, g => (IReadOnlyList<RectD>)[.. g.Select(m => m.Rect)]);
         var ocr = PageOcr.Engine;

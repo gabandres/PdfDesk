@@ -5,12 +5,15 @@ using PdfSharp.Pdf;
 
 namespace PdfDesk.Core;
 
-/// <summary>A glyph placed on a line: origin (offsets applied) in ems from the line's start, and the text it stands for.</summary>
-internal readonly record struct PlacedGlyph(TrueTypeFont Font, int Glyph, double X, double Y, string Text);
+/// <summary>A glyph placed on a line: origin (offsets applied) in ems from the line's start, the text it stands for, and
+/// whether it belongs to a right-to-left run (odd bidi level).</summary>
+internal readonly record struct PlacedGlyph(TrueTypeFont Font, int Glyph, double X, double Y, string Text, bool Rtl = false);
 
 /// <summary>A shaped line: glyphs in the order they are written to the content stream (logical order), and the advance width in ems.</summary>
-internal sealed class ShapedLine(string text, List<PlacedGlyph> glyphs, double width, bool rtl)
+internal sealed class ShapedLine(string text, List<PlacedGlyph> glyphs, double width, bool rtl, bool mixed = false)
 {
+    /// <summary>Glyphs in logical order with both left-to-right and right-to-left runs (see <see cref="CidFontWriter.Emit"/>).</summary>
+    public bool Mixed { get; } = mixed;
     public string Text { get; } = text;
     public List<PlacedGlyph> Glyphs { get; } = glyphs;
     public double Width { get; } = width;
@@ -77,8 +80,8 @@ internal static class TextShaper
         }
 
         // Shape the runs left to right (visual order), but write the glyphs in logical order (right-to-left runs last
-        // glyph first, runs as typed), so extraction reads the text as typed with exact glyph boxes. (MuPDF starts a new
-        // line where a mixed-direction line jumps forward over a right-to-left section; the characters stay in order.)
+        // glyph first, runs as typed), so extraction reads the text as typed with exact glyph boxes. Where a mixed line
+        // jumps between runs, CidFontWriter.Emit marks the direction so MuPDF keeps it one line.
         var byRun = new List<PlacedGlyph>[runs.Count];
         double pen = 0;
         foreach (var runIndex in order)
@@ -123,7 +126,7 @@ internal static class TextShaper
                 var parts = texts[p.Cluster];
                 var n = count[p.Cluster];
                 var t = k < n - 1 ? (k < parts.Count ? parts[k] : "") : string.Concat(parts.Skip(k));
-                glyphs.Add(new PlacedGlyph(r.Font, p.Glyph, p.X, p.Y, t));
+                glyphs.Add(new PlacedGlyph(r.Font, p.Glyph, p.X, p.Y, t, rtl));
             }
         }
         if (visualOrder)
@@ -131,7 +134,7 @@ internal static class TextShaper
             foreach (var k in order.Where(k => runs[k].Level % 2 == 1)) byRun[k].Reverse();
             return new ShapedLine(text, [.. order.SelectMany(k => byRun[k])], pen, para == 1);
         }
-        return new ShapedLine(text, [.. byRun.SelectMany(g => g)], pen, para == 1);
+        return new ShapedLine(text, [.. byRun.SelectMany(g => g)], pen, para == 1, runs.Any(r => r.Level % 2 == 0) && runs.Any(r => r.Level % 2 == 1));
     }
 
     /// <summary>Code points of <paramref name="s"/> (surrogate pairs kept together).</summary>
@@ -194,8 +197,31 @@ internal sealed class CidFontWriter(string namePrefix = "/PdU")
 
     private static int Width(TrueTypeFont font, int glyph) => (int)Math.Round(font.GlyphAdvance(glyph) * 1000.0 / font.UnitsPerEm);
 
+    private const string Lrm = "‎", Rlm = "‏";
+
+    /// <summary>Width of a code in the font's /W: direction marks take no room.</summary>
+    private static int Width(Used u, int cid) => u.ByCid[cid].Text is Lrm or Rlm ? 0 : Width(u.Font, u.ByCid[cid].Glyph);
+
+    private static int Cid(Used u, int glyph, string text)
+    {
+        if (u.Cids.TryGetValue((glyph, text), out var cid)) return cid;
+        cid = u.ByCid.Count;
+        if (cid > 0xFFFF) throw new InvalidOperationException("Too much distinct text for one appearance.");
+        u.ByCid.Add((glyph, text));
+        u.Cids[(glyph, text)] = cid;
+        return cid;
+    }
+
     /// <summary>
     /// Appends Tf / Ts / TJ operators drawing <paramref name="line"/> from the current text-matrix origin (inside BT/ET).
+    /// <para>
+    /// A mixed-direction line written in logical order jumps where its runs meet (e.g. from the left end of a
+    /// right-to-left word to the space after its right end). MuPDF accepts a jump only where the text switches direction,
+    /// and it takes the direction of a space or punctuation from the character before it, so the space after a
+    /// right-to-left word would count as right-to-left and start a new line. Each run therefore begins with an invisible,
+    /// zero-width direction mark (LRM / RLM, a code drawn with the space glyph) inside an empty /ActualText: it sets the
+    /// direction the run's leading spaces inherit, and extraction leaves it out.
+    /// </para>
     /// </summary>
     public void Emit(StringBuilder sb, ShapedLine line, double size)
     {
@@ -216,6 +242,7 @@ internal sealed class CidFontWriter(string namePrefix = "/PdU")
             if (open) sb.Append("] TJ ");
             open = false;
         }
+        bool? direction = null;
         foreach (var g in line.Glyphs)
         {
             var u = For(g.Font);
@@ -225,6 +252,13 @@ internal sealed class CidFontWriter(string namePrefix = "/PdU")
                 sb.Append(CultureInfo.InvariantCulture, $"{u.Name} {PdfObj.F(size)} Tf ");
                 cur = u;
             }
+            if (line.Mixed && direction != g.Rtl)
+            {
+                Close();
+                var mark = Cid(u, g.Font.GlyphOf(' '), g.Rtl ? Rlm : Lrm);
+                sb.Append(CultureInfo.InvariantCulture, $"/Span <</ActualText ()>> BDC <{mark:X4}> Tj EMC ");
+                direction = g.Rtl;
+            }
             var y = g.Y * size;
             if (Math.Abs(y - rise) > 0.001)
             {
@@ -232,13 +266,7 @@ internal sealed class CidFontWriter(string namePrefix = "/PdU")
                 sb.Append(CultureInfo.InvariantCulture, $"{PdfObj.F(y)} Ts ");
                 rise = y;
             }
-            if (!u.Cids.TryGetValue((g.Glyph, g.Text), out var cid))
-            {
-                cid = u.ByCid.Count;
-                if (cid > 0xFFFF) throw new InvalidOperationException("Too much distinct text for one appearance.");
-                u.ByCid.Add((g.Glyph, g.Text));
-                u.Cids[(g.Glyph, g.Text)] = cid;
-            }
+            var cid = Cid(u, g.Glyph, g.Text);
             if (!open) sb.Append('[');
             open = true;
             var target = g.X * 1000;
@@ -304,7 +332,7 @@ internal sealed class CidFontWriter(string namePrefix = "/PdU")
         doc.Internals.AddObject(descriptor);
 
         var widths = new PdfArray(doc);
-        for (var cid = 1; cid < u.ByCid.Count; cid++) widths.Elements.Add(new PdfInteger(Width(font, u.ByCid[cid].Glyph)));
+        for (var cid = 1; cid < u.ByCid.Count; cid++) widths.Elements.Add(new PdfInteger(Width(u, cid)));
         var cidFont = new PdfDictionary(doc);
         cidFont.Elements["/Type"] = new PdfName("/Font");
         cidFont.Elements["/Subtype"] = new PdfName("/CIDFontType2");

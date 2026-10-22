@@ -71,9 +71,10 @@ PDFsharp is pinned to 6.2.x (MIT); 6.5+ changed to AGPL with a runtime license c
 
 ## Known limits
 
-- Page edits go through PDFsharp, which rewrites the whole file, so its size can change. Digital signatures are
-  invalidated by any edit (comments and form values included), as in every editor; PdfDesk warns first. Signing
-  isn't supported, only verification (revocation is not checked).
+- Page edits go through PDFsharp, which rewrites the whole file, so its size can change. Signed PDFs are the
+  exception: edits are appended as an incremental update, so signatures stay intact and show as "changed after
+  signing". Redaction, page extraction and encrypted signed files still rewrite the file and break signatures
+  (PdfDesk warns first). Signing isn't supported, only verification (revocation is checked only on request).
 - Editing pages of a password-protected PDF needs its owner (permissions) password; opening it with the user
   password allows viewing, printing and copying only. Edits are saved without the password protection
   (PdfDesk warns before the first edit).
@@ -81,8 +82,9 @@ PDFsharp is pinned to 6.2.x (MIT); 6.5+ changed to AGPL with a runtime license c
   stays searchable, but OCR text can contain recognition mistakes and the original fonts and structure are gone.
 - OCR uses Windows' built-in recognizer: it needs an OCR language installed in Windows (your display language, else
   English), reads printed text only (not handwriting), and doesn't straighten skewed or sideways scans.
-- Form scripts: only the Acrobat AF calculation/format/keystroke functions run; no other JavaScript. XFA-only forms
-  can't be filled.
+- Form scripts run in a sandbox (Jint: no network, files or other apps; time and memory limits) with Acrobat's form
+  object model only: calculate, format, keystroke and validate events, document-level helpers, app.alert as a toast.
+  Scripts that open URLs, submit, print or mail are ignored. XFA-only forms can't be filled.
 - Right-to-left text with explicit bidi controls (embeddings, overrides, isolates) isn't laid out in new annotations,
   stamps and fields.
 - No shape/ink drawing tools or editing of existing page text.
