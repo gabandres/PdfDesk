@@ -149,7 +149,9 @@ public class PageEditorTests
             Assert.True(session.IsDirty);
             session.Undo();
             Assert.Equal(5, session.Engine.PageCount);
+            Assert.False(session.IsDirty); // back at the saved state
             session.Redo();
+            Assert.True(session.IsDirty);
             Assert.Equal(4, session.Engine.PageCount);
             session.SaveAs(path);
             Assert.False(session.IsDirty);

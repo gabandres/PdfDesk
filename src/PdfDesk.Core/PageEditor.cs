@@ -205,7 +205,7 @@ public static class PageEditor
             try
             {
                 var d = get();
-                return d == DateTime.MinValue ? null : d;
+                return d == DateTime.MinValue ? null : d.Kind == DateTimeKind.Utc ? d.ToLocalTime() : d;
             }
             catch (Exception ex) when (ex is FormatException or InvalidCastException or ArgumentException)
             {

@@ -1,0 +1,181 @@
+<Window x:Class="PdfDesk.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:app="clr-namespace:PdfDesk.App"
+        Title="PdfDesk" Icon="PdfDesk.ico" AllowDrop="True"
+        Width="1280" Height="860" MinWidth="640" MinHeight="420">
+    <DockPanel>
+        <!-- Menu -->
+        <Menu x:Name="MainMenu" DockPanel.Dock="Top">
+            <MenuItem Header="_File">
+                <MenuItem Command="app:Cmd.Open" />
+                <MenuItem x:Name="RecentMenu" Header="Open _Recent" />
+                <MenuItem Command="app:Cmd.Combine" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Save" />
+                <MenuItem Command="app:Cmd.SaveAs" />
+                <MenuItem Command="app:Cmd.ShowInFolder" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Print" />
+                <MenuItem Command="app:Cmd.ExportImages" />
+                <MenuItem Command="app:Cmd.Properties" />
+                <Separator />
+                <MenuItem Command="app:Cmd.CloseDoc" />
+                <MenuItem Command="app:Cmd.CloseAll" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Exit" InputGestureText="Alt+F4" />
+            </MenuItem>
+            <MenuItem Header="_Edit">
+                <MenuItem x:Name="UndoMenu" Command="app:Cmd.Undo" />
+                <MenuItem x:Name="RedoMenu" Command="app:Cmd.Redo" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Copy" />
+                <MenuItem Command="app:Cmd.SelectAll" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Find" />
+                <MenuItem Command="app:Cmd.FindNext" />
+                <MenuItem Command="app:Cmd.FindPrevious" />
+                <MenuItem Command="app:Cmd.SearchPane" />
+                <Separator />
+                <MenuItem x:Name="HandMenu" Command="app:Cmd.ToolHand" InputGestureText="H" IsCheckable="False" />
+                <MenuItem x:Name="SelectMenu" Command="app:Cmd.ToolSelect" InputGestureText="T" />
+                <MenuItem x:Name="SnapshotMenu" Command="app:Cmd.ToolSnapshot" InputGestureText="G" />
+            </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem Command="app:Cmd.ZoomIn" />
+                <MenuItem Command="app:Cmd.ZoomOut" />
+                <MenuItem x:Name="ActualMenu" Command="app:Cmd.ActualSize" />
+                <MenuItem x:Name="FitWidthMenu" Command="app:Cmd.FitWidth" />
+                <MenuItem x:Name="FitPageMenu" Command="app:Cmd.FitPage" />
+                <Separator />
+                <MenuItem x:Name="SingleMenu" Command="app:Cmd.LayoutSingle" />
+                <MenuItem x:Name="ContinuousMenu" Command="app:Cmd.LayoutContinuous" />
+                <MenuItem x:Name="FacingMenu" Command="app:Cmd.LayoutFacing" />
+                <MenuItem x:Name="CoverMenu" Command="app:Cmd.LayoutCover" />
+                <Separator />
+                <MenuItem Command="app:Cmd.FirstPage" />
+                <MenuItem Command="app:Cmd.PrevPage" />
+                <MenuItem Command="app:Cmd.NextPage" />
+                <MenuItem Command="app:Cmd.LastPage" />
+                <MenuItem Command="app:Cmd.GoToPage" />
+                <MenuItem Command="app:Cmd.Back" />
+                <MenuItem Command="app:Cmd.Forward" />
+                <Separator />
+                <MenuItem x:Name="NavPaneMenu" Command="app:Cmd.NavPane" />
+                <MenuItem Header="Bookmarks" Click="OnShowBookmarks" />
+                <MenuItem Command="app:Cmd.FullScreen" />
+            </MenuItem>
+            <MenuItem Header="_Organize">
+                <MenuItem Command="app:Cmd.RotateRight" />
+                <MenuItem Command="app:Cmd.RotateLeft" />
+                <MenuItem Command="app:Cmd.RotatePages" />
+                <Separator />
+                <MenuItem Command="app:Cmd.InsertPages" />
+                <MenuItem Command="app:Cmd.InsertBlank" />
+                <Separator />
+                <MenuItem Command="app:Cmd.DeletePages" />
+                <MenuItem Command="app:Cmd.ExtractPages" />
+                <MenuItem Command="app:Cmd.SplitDocument" />
+                <Separator />
+                <MenuItem Command="app:Cmd.MovePages" />
+                <MenuItem Command="app:Cmd.DuplicatePages" />
+                <MenuItem Command="app:Cmd.ReversePages" />
+                <Separator />
+                <MenuItem Command="app:Cmd.CropPages" />
+                <Separator />
+                <MenuItem Command="app:Cmd.Combine" />
+            </MenuItem>
+            <MenuItem Header="_Help">
+                <MenuItem Header="_Keyboard Shortcuts" Click="OnShortcuts" />
+                <MenuItem Header="Open _Log Folder" Click="OnOpenLog" />
+                <Separator />
+                <MenuItem Header="_About PdfDesk" Click="OnAbout" />
+            </MenuItem>
+        </Menu>
+
+        <!-- Command bar -->
+        <Border x:Name="CommandBar" DockPanel.Dock="Top" Padding="6,4"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+            <WrapPanel VerticalAlignment="Center">
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Open" ToolTip="Open (Ctrl+O)" Content="&#xE8E5;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Save" ToolTip="Save (Ctrl+S)" Content="&#xE74E;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Print" ToolTip="Print (Ctrl+P)" Content="&#xE749;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Undo" x:Name="UndoButton" ToolTip="Undo (Ctrl+Z)" Content="&#xE7A7;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Redo" x:Name="RedoButton" ToolTip="Redo (Ctrl+Y)" Content="&#xE7A6;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <ToggleButton x:Name="HandButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolHand" ToolTip="Hand tool (H)" Content="&#xE7C9;" />
+                <ToggleButton x:Name="SelectButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSelect" ToolTip="Select text tool (T)" Content="&#xE8E9;" />
+                <ToggleButton x:Name="SnapshotButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSnapshot" ToolTip="Snapshot tool: drag to copy an area as an image (G)" Content="&#xE722;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomOut" ToolTip="Zoom out (Ctrl+-)" Content="&#xE71F;" />
+                <ComboBox x:Name="ZoomBox" IsEditable="True" Width="112" VerticalAlignment="Center" Margin="2,0" ToolTip="Zoom" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomIn" ToolTip="Zoom in (Ctrl+=)" Content="&#xE8A3;" />
+                <ToggleButton x:Name="FitWidthButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitWidth" ToolTip="Fit width (Ctrl+2)" Content="&#xE9A6;" />
+                <ToggleButton x:Name="FitPageButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitPage" ToolTip="Fit page (Ctrl+0)" Content="&#xE7C3;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.FirstPage" ToolTip="First page (Ctrl+Home)" Content="&#xE892;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.PrevPage" ToolTip="Previous page" Content="&#xE76B;" />
+                <TextBox x:Name="PageBox" Width="56" VerticalAlignment="Center" HorizontalContentAlignment="Center" Margin="2,0" ToolTip="Go to page (Ctrl+G)" />
+                <TextBlock x:Name="PageCountText" VerticalAlignment="Center" Margin="4,0,6,0" MinWidth="40" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.NextPage" ToolTip="Next page" Content="&#xE76C;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.LastPage" ToolTip="Last page (Ctrl+End)" Content="&#xE893;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateLeft" ToolTip="Rotate selected pages counterclockwise (Ctrl+Shift+-)" Content="&#xE7AD;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateRight" ToolTip="Rotate selected pages clockwise (Ctrl+Shift++)" Content="&#xE7AD;" RenderTransformOrigin="0.5,0.5">
+                    <Button.RenderTransform>
+                        <ScaleTransform ScaleX="-1" />
+                    </Button.RenderTransform>
+                </Button>
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.DeleteSelected" ToolTip="Delete selected pages (Del in thumbnails)" Content="&#xE74D;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.InsertPages" ToolTip="Insert pages from file (Ctrl+Shift+I)" Content="&#xE8F4;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.ExtractPages" ToolTip="Extract pages (Ctrl+Shift+E)" Content="&#xE8B7;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.CropPages" ToolTip="Crop pages" Content="&#xE7A8;" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Combine" ToolTip="Combine files into one PDF" Content="&#xE8F1;" />
+                <Border Style="{StaticResource BarSeparator}" />
+                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Find" ToolTip="Find (Ctrl+F)" Content="&#xE721;" />
+                <ToggleButton x:Name="NavPaneButton" Style="{StaticResource IconButton}" Command="app:Cmd.NavPane" ToolTip="Navigation pane (F4)" Content="&#xE8A0;" />
+            </WrapPanel>
+        </Border>
+
+        <!-- Status bar -->
+        <Border x:Name="StatusBarBorder" DockPanel.Dock="Bottom" Padding="10,3"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+            <DockPanel>
+                <TextBlock x:Name="PageSizeText" DockPanel.Dock="Right" Style="{StaticResource Caption}" FontSize="12" />
+                <TextBlock x:Name="StatusText" Style="{StaticResource Caption}" FontSize="12" TextTrimming="CharacterEllipsis" />
+            </DockPanel>
+        </Border>
+
+        <Grid>
+            <TabControl x:Name="Docs" Padding="0" Visibility="Collapsed" />
+
+            <!-- Start page -->
+            <ScrollViewer x:Name="StartPage" VerticalScrollBarVisibility="Auto">
+                <StackPanel MaxWidth="560" Margin="32,48" HorizontalAlignment="Center">
+                    <TextBlock Text="PdfDesk" FontSize="32" FontWeight="SemiBold" />
+                    <TextBlock Text="View, search, print and organize PDF files." Margin="0,4,0,24" Style="{StaticResource Caption}" FontSize="14" />
+                    <StackPanel Orientation="Horizontal">
+                        <Button Command="app:Cmd.Open" Padding="16,8" Content="Open a file…" Style="{DynamicResource AccentButtonStyle}" />
+                        <Button Command="app:Cmd.Combine" Padding="16,8" Margin="8,0,0,0" Content="Combine files…" />
+                    </StackPanel>
+                    <TextBlock Text="Or drop PDF files anywhere in this window." Margin="0,10,0,0" Style="{StaticResource Caption}" />
+                    <TextBlock x:Name="RecentHeader" Text="Recent" FontSize="16" FontWeight="SemiBold" Margin="0,32,0,8" />
+                    <ItemsControl x:Name="RecentList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Button Click="OnRecentClick" Tag="{Binding}" HorizontalContentAlignment="Left" HorizontalAlignment="Stretch"
+                                        Padding="10,6" Margin="0,0,0,4" Background="Transparent" BorderThickness="0" ToolTip="{Binding}">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Converter={x:Static app:FileNameConverter.Name}}" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding Converter={x:Static app:FileNameConverter.Folder}}" Style="{StaticResource Caption}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </DockPanel>
+</Window>

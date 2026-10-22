@@ -11,8 +11,11 @@ public sealed class DocumentSession : IDisposable
     private const int MaxUndoSteps = 50;
     private const long MaxUndoBytes = 768L * 1024 * 1024;
 
-    private readonly LinkedList<(byte[] Data, string Label)> _undo = new();
-    private readonly Stack<(byte[] Data, string Label)> _redo = new();
+    private readonly LinkedList<(byte[] Data, string Label, int Version)> _undo = new();
+    private readonly Stack<(byte[] Data, string Label, int Version)> _redo = new();
+    private int _version;
+    private int _savedVersion;
+    private int _nextVersion = 1;
 
     public string? FilePath { get; private set; }
     public string DisplayName { get; private set; }
@@ -20,7 +23,8 @@ public sealed class DocumentSession : IDisposable
     public string? Password { get; }
     public InputFileTypes FileType { get; }
     public PdfEngine Engine { get; private set; }
-    public bool IsDirty { get; private set; }
+    /// <summary>True when the content differs from what is on disk (undoing back to the saved state clears it).</summary>
+    public bool IsDirty => _version != _savedVersion;
     public bool IsPdf => FileType == InputFileTypes.PDF;
 
     public bool CanUndo => _undo.Count > 0;
@@ -57,27 +61,29 @@ public sealed class DocumentSession : IDisposable
     public static DocumentSession FromBytes(byte[] data, string displayName, string? password = null)
     {
         var engine = PdfEngine.Open(data, InputFileTypes.PDF, password);
-        return new DocumentSession(null, displayName, data, password, InputFileTypes.PDF, engine) { IsDirty = true };
+        var session = new DocumentSession(null, displayName, data, password, InputFileTypes.PDF, engine);
+        session._savedVersion = -1; // never saved
+        return session;
     }
 
     /// <summary>Replaces the content with edited bytes, recording an undo step.</summary>
     public void Commit(byte[] newData, string label)
     {
         var engine = PdfEngine.Open(newData, FileType, Password);
-        _undo.AddLast((Data, label));
+        _undo.AddLast((Data, label, _version));
         TrimUndo();
         _redo.Clear();
-        Swap(newData, engine);
+        Swap(newData, engine, _nextVersion++);
     }
 
     public void Undo()
     {
         if (_undo.Last is not { } node) return;
-        var (data, label) = node.Value;
+        var (data, label, version) = node.Value;
         var engine = PdfEngine.Open(data, FileType, Password);
         _undo.RemoveLast();
-        _redo.Push((Data, label));
-        Swap(data, engine);
+        _redo.Push((Data, label, _version));
+        Swap(data, engine, version);
     }
 
     public void Redo()
@@ -85,8 +91,8 @@ public sealed class DocumentSession : IDisposable
         if (!_redo.TryPeek(out var step)) return;
         var engine = PdfEngine.Open(step.Data, FileType, Password);
         _redo.Pop();
-        _undo.AddLast((Data, step.Label));
-        Swap(step.Data, engine);
+        _undo.AddLast((Data, step.Label, _version));
+        Swap(step.Data, engine, step.Version);
     }
 
     /// <summary>Writes the current bytes to <paramref name="path"/> atomically (temp file, then replace).</summary>
@@ -106,16 +112,16 @@ public sealed class DocumentSession : IDisposable
 
         FilePath = path;
         DisplayName = Path.GetFileName(path);
-        IsDirty = false;
+        _savedVersion = _version;
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void Swap(byte[] data, PdfEngine engine)
+    private void Swap(byte[] data, PdfEngine engine, int version)
     {
         var old = Engine;
         Data = data;
         Engine = engine;
-        IsDirty = true;
+        _version = version;
         ContentChanged?.Invoke(this, EventArgs.Empty);
         StateChanged?.Invoke(this, EventArgs.Empty);
         old.Dispose();

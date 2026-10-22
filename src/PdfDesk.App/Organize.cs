@@ -1,0 +1,392 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using PdfDesk.Core;
+using PageRange = PdfDesk.Core.PageRange;
+
+namespace PdfDesk.App;
+
+/// <summary>The Organize menu: each command gathers options in a dialog, then runs one undoable page edit.</summary>
+public static class Organize
+{
+    private static readonly (string Name, double W, double H)[] PaperSizes =
+    [
+        ("Letter (8.5 × 11 in)", 612, 792),
+        ("Legal (8.5 × 14 in)", 612, 1008),
+        ("Tabloid (11 × 17 in)", 792, 1224),
+        ("A3 (297 × 420 mm)", 842, 1191),
+        ("A4 (210 × 297 mm)", 595, 842),
+        ("A5 (148 × 210 mm)", 420, 595),
+    ];
+
+    private static string Pages(int n) => n == 1 ? "1 page" : $"{n} pages";
+
+    public static Task RotateSelected(DocumentTab tab, int degrees)
+    {
+        var pages = tab.SelectedPages;
+        return Reselect(tab, pages, tab.RunEdit($"Rotate {Pages(pages.Length)}", (d, pw) => PageEditor.Rotate(d, pw, pages, degrees)));
+    }
+
+    public static async Task RotateDialog(Window owner, DocumentTab tab)
+    {
+        var dlg = new FormDialog(owner, "Rotate Pages", "Rotate");
+        var dir = dlg.AddChoice("Direction", ["90° clockwise", "90° counterclockwise", "180°"]);
+        var range = dlg.AddRange(tab);
+        var orient = dlg.AddChoice("Only these pages", ["Portrait and landscape", "Portrait pages only", "Landscape pages only"]);
+        int[] pages = [];
+        dlg.Validate(() =>
+        {
+            if (!range.TryGet(out pages, out var err)) return err;
+            var engine = tab.Session.Engine;
+            pages = orient.SelectedIndex switch
+            {
+                1 => [.. pages.Where(p => engine.GetPage(p).Height >= engine.GetPage(p).Width)],
+                2 => [.. pages.Where(p => engine.GetPage(p).Width > engine.GetPage(p).Height)],
+                _ => pages,
+            };
+            return pages.Length == 0 ? "No pages in the range have that orientation." : null;
+        });
+        if (!dlg.ShowModal()) return;
+        var degrees = dir.SelectedIndex switch { 0 => 90, 1 => -90, _ => 180 };
+        await Reselect(tab, pages, tab.RunEdit($"Rotate {Pages(pages.Length)}", (d, pw) => PageEditor.Rotate(d, pw, pages, degrees)));
+    }
+
+    public static Task DeleteSelected(DocumentTab tab)
+    {
+        var pages = tab.SelectedPages;
+        return Delete(tab, pages);
+    }
+
+    public static async Task DeleteDialog(Window owner, DocumentTab tab)
+    {
+        var dlg = new FormDialog(owner, "Delete Pages", "Delete");
+        var range = dlg.AddRange(tab);
+        int[] pages = [];
+        dlg.Validate(() =>
+        {
+            if (!range.TryGet(out pages, out var err)) return err;
+            return pages.Length >= tab.PageView.PageCount ? "You can't delete every page of a document." : null;
+        });
+        if (dlg.ShowModal()) await Delete(tab, pages);
+    }
+
+    private static Task Delete(DocumentTab tab, int[] pages)
+    {
+        if (pages.Length >= tab.PageView.PageCount)
+        {
+            MessageBox.Show(Window.GetWindow(tab)!, "You can't delete every page of a document.", "Delete Pages", MessageBoxButton.OK, MessageBoxImage.Information);
+            return Task.CompletedTask;
+        }
+        return tab.RunEdit($"Delete {Pages(pages.Length)}", (d, pw) => PageEditor.Delete(d, pw, pages), pages.Min());
+    }
+
+    public static async Task InsertFromFile(Window owner, DocumentTab tab)
+    {
+        var path = PdfFiles.PickPdf(owner, "Insert pages from…");
+        if (path is null || PdfFiles.LoadForImport(owner, path) is not { } source) return;
+
+        int srcCount;
+        using (var e = PdfEngine.Open(source.Data, MuPDFCore.InputFileTypes.PDF, source.Password)) srcCount = e.PageCount;
+
+        var dlg = new FormDialog(owner, "Insert Pages", "Insert");
+        dlg.AddNote($"From: {Path.GetFileName(path)} ({Pages(srcCount)})");
+        var srcRange = dlg.AddText("Pages to insert", $"1-{srcCount}");
+        var pos = dlg.AddPosition(tab.PageView.PageCount, tab.PageView.CurrentPage);
+        int[] srcPages = [];
+        var before = 0;
+        dlg.Validate(() =>
+        {
+            if (!PageRange.TryParse(srcRange.Text, srcCount, out srcPages, out var err)) return err;
+            return pos.TryGet(out before, out err) ? null : err;
+        });
+        if (!dlg.ShowModal()) return;
+        await tab.RunEdit($"Insert {Pages(srcPages.Length)} from {source.Name}", (d, pw) => PageEditor.Insert(d, pw, source, srcPages, before), before);
+    }
+
+    public static async Task InsertBlank(Window owner, DocumentTab tab)
+    {
+        var current = tab.Session.Engine.GetPage(tab.PageView.CurrentPage);
+        var dlg = new FormDialog(owner, "Insert Blank Pages", "Insert");
+        var count = dlg.AddText("Number of pages", "1");
+        var size = dlg.AddChoice("Page size", [$"Same as current page ({Inches(current.Width)} × {Inches(current.Height)} in)", .. PaperSizes.Select(p => p.Name)]);
+        var orient = dlg.AddChoice("Orientation", ["Portrait", "Landscape"], current.Width > current.Height ? 1 : 0);
+        var pos = dlg.AddPosition(tab.PageView.PageCount, tab.PageView.CurrentPage);
+        var n = 1;
+        var before = 0;
+        dlg.Validate(() =>
+        {
+            if (!int.TryParse(count.Text.Trim(), out n) || n < 1 || n > 1000) return "Enter a number of pages from 1 to 1000.";
+            return pos.TryGet(out before, out var err) ? null : err;
+        });
+        if (!dlg.ShowModal()) return;
+
+        var (w, h) = size.SelectedIndex == 0 ? (current.Width, current.Height) : (PaperSizes[size.SelectedIndex - 1].W, PaperSizes[size.SelectedIndex - 1].H);
+        var landscape = orient.SelectedIndex == 1;
+        if (landscape != w > h) (w, h) = (h, w);
+        await tab.RunEdit($"Insert {Pages(n)}", (d, pw) => PageEditor.InsertBlank(d, pw, before, n, w, h), before);
+    }
+
+    public static async Task Extract(Window owner, DocumentTab tab, MainWindow host)
+    {
+        var dlg = new FormDialog(owner, "Extract Pages", "Extract");
+        var range = dlg.AddRange(tab);
+        var mode = dlg.AddChoice("Extract to", ["A new document (opens in a tab)", "One PDF file…", "A separate PDF file per page…"]);
+        var delete = dlg.AddCheck("Delete the pages from this document after extracting");
+        int[] pages = [];
+        dlg.Validate(() =>
+        {
+            if (!range.TryGet(out pages, out var err)) return err;
+            return delete.IsChecked == true && pages.Length >= tab.PageView.PageCount ? "You can't delete every page of a document." : null;
+        });
+        if (!dlg.ShowModal()) return;
+
+        var name = Path.GetFileNameWithoutExtension(tab.Session.DisplayName);
+        var data = tab.Session.Data;
+        var pw = tab.Session.Password;
+        var label = PageRange.Format(pages);
+        try
+        {
+            switch (mode.SelectedIndex)
+            {
+                case 0:
+                {
+                    tab.SetBusy("Extracting pages…");
+                    var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
+                    tab.SetBusy(null);
+                    host.OpenSession(DocumentSession.FromBytes(bytes, $"{name} (pages {label}).pdf"));
+                    break;
+                }
+                case 1:
+                {
+                    var path = PdfFiles.PickSavePath(owner, $"{name} (pages {label}).pdf", Path.GetDirectoryName(tab.Session.FilePath));
+                    if (path is null) return;
+                    tab.SetBusy("Extracting pages…");
+                    var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
+                    await File.WriteAllBytesAsync(path, bytes);
+                    tab.SetBusy(null);
+                    host.ShowStatus($"Saved {Path.GetFileName(path)}");
+                    break;
+                }
+                default:
+                {
+                    var folder = PdfFiles.PickFolder(owner, "Save extracted pages to", Path.GetDirectoryName(tab.Session.FilePath));
+                    if (folder is null) return;
+                    tab.SetBusy("Extracting pages…");
+                    await Task.Run(() =>
+                    {
+                        foreach (var p in pages)
+                            File.WriteAllBytes(PdfFiles.UniquePath(folder, $"{name} (page {p + 1}).pdf"), PageEditor.Extract(data, pw, [p]));
+                    });
+                    tab.SetBusy(null);
+                    host.ShowStatus($"Saved {Pages(pages.Length)} to {folder}");
+                    Shell.Open(folder);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or PdfSharp.PdfSharpException)
+        {
+            tab.SetBusy(null);
+            MessageBox.Show(owner, $"Extract failed.\n\n{ex.Message}", "Extract Pages", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (delete.IsChecked == true)
+            await tab.RunEdit($"Delete {Pages(pages.Length)}", (d, p2) => PageEditor.Delete(d, p2, pages), pages.Min());
+    }
+
+    public static async Task Split(Window owner, DocumentTab tab, MainWindow host)
+    {
+        var count = tab.PageView.PageCount;
+        var outline = tab.Session.Engine.GetOutline();
+        var dlg = new FormDialog(owner, "Split Document", "Split", 480);
+        var mode = dlg.AddChoice("Split by", ["Number of pages", "Page ranges", "Top-level bookmarks"]);
+        var every = dlg.AddText("Pages per file", "1");
+        var ranges = dlg.AddText("Page ranges (one file per range, separated by ;)", count > 1 ? $"1-{Math.Max(1, count / 2)}; {Math.Max(1, count / 2) + 1}-{count}" : "1");
+        dlg.AddNote(outline.Count == 0 ? "This document has no bookmarks, so splitting by bookmarks isn't available." : $"{outline.Count} top-level bookmarks.");
+        var name = Path.GetFileNameWithoutExtension(tab.Session.DisplayName);
+        var folderBox = dlg.AddText("Save to folder", Path.GetDirectoryName(tab.Session.FilePath) ?? AppSettings.Current.LastFolder);
+        var browse = new Button { Content = "Browse…", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0) };
+        browse.Click += (_, _) => { if (PdfFiles.PickFolder(dlg, "Save split files to", folderBox.Text) is { } f) folderBox.Text = f; };
+        dlg.Add(null, browse);
+        var pattern = dlg.AddText("File name ({name} = document name, {n} = part number)", "{name} (part {n})");
+
+        List<(int[] Pages, string Label)> parts = [];
+        dlg.Validate(() =>
+        {
+            parts = [];
+            switch (mode.SelectedIndex)
+            {
+                case 0:
+                    if (!int.TryParse(every.Text.Trim(), out var n) || n < 1 || n > count) return $"Enter a page count from 1 to {count}.";
+                    parts = [.. PageEditor.ChunksOf(count, n).Select(c => (c, ""))];
+                    break;
+                case 1:
+                    foreach (var part in ranges.Text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        if (!PageRange.TryParse(part, count, out var pages, out var err)) return err;
+                        parts.Add((pages, ""));
+                    }
+                    break;
+                default:
+                    var starts = outline.Select(o => o.PageIndex).Where(p => p >= 0 && p < count).Append(0).Distinct().Order().ToList();
+                    if (outline.Count == 0) return "This document has no bookmarks.";
+                    for (var i = 0; i < starts.Count; i++)
+                    {
+                        var end = i + 1 < starts.Count ? starts[i + 1] : count;
+                        var title = outline.FirstOrDefault(o => o.PageIndex == starts[i])?.Title ?? "";
+                        parts.Add(([.. Enumerable.Range(starts[i], end - starts[i])], title));
+                    }
+                    break;
+            }
+            if (parts.Count == 0) return "Nothing to split.";
+            if (!Directory.Exists(folderBox.Text)) return "Choose an existing folder.";
+            return pattern.Text.Contains("{n}") || mode.SelectedIndex == 2 ? null : "The file name must include {n} so each part gets its own file.";
+        });
+        if (!dlg.ShowModal()) return;
+
+        var data = tab.Session.Data;
+        var pw = tab.Session.Password;
+        var folder = folderBox.Text;
+        var pat = pattern.Text;
+        tab.SetBusy($"Splitting into {parts.Count} files…");
+        try
+        {
+            await Task.Run(() =>
+            {
+                for (var i = 0; i < parts.Count; i++)
+                {
+                    var file = pat.Replace("{name}", name).Replace("{n}", (i + 1).ToString());
+                    if (!string.IsNullOrWhiteSpace(parts[i].Label) && !pat.Contains("{n}")) file = $"{name} - {parts[i].Label}";
+                    else if (!string.IsNullOrWhiteSpace(parts[i].Label)) file += $" - {parts[i].Label}";
+                    File.WriteAllBytes(PdfFiles.UniquePath(folder, file + ".pdf"), PageEditor.Extract(data, pw, parts[i].Pages));
+                }
+            });
+            host.ShowStatus($"Split into {parts.Count} files in {folder}");
+            Shell.Open(folder);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or PdfSharp.PdfSharpException)
+        {
+            MessageBox.Show(owner, $"Split failed.\n\n{ex.Message}", "Split Document", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            tab.SetBusy(null);
+        }
+    }
+
+    public static async Task Move(Window owner, DocumentTab tab)
+    {
+        var dlg = new FormDialog(owner, "Move Pages", "Move");
+        var range = dlg.AddRange(tab);
+        var pos = dlg.AddPosition(tab.PageView.PageCount, tab.PageView.PageCount - 1, "Move to");
+        int[] pages = [];
+        var before = 0;
+        dlg.Validate(() =>
+        {
+            if (!range.TryGet(out pages, out var err)) return err;
+            return pos.TryGet(out before, out err) ? null : err;
+        });
+        if (!dlg.ShowModal()) return;
+        var order = PageEditor.MoveOrder(tab.PageView.PageCount, pages, before);
+        if (order.SequenceEqual(Enumerable.Range(0, order.Length))) return;
+        var first = Array.IndexOf(order, pages[0]);
+        await Reselect(tab, [.. Enumerable.Range(first, pages.Length)],
+            tab.RunEdit($"Move {Pages(pages.Length)}", (d, pw) => PageEditor.Reorder(d, pw, order), first));
+    }
+
+    public static Task Duplicate(DocumentTab tab)
+    {
+        var pages = tab.SelectedPages;
+        return tab.RunEdit($"Duplicate {Pages(pages.Length)}", (d, pw) => PageEditor.Duplicate(d, pw, pages), pages[^1] + 1);
+    }
+
+    public static Task Reverse(DocumentTab tab) =>
+        tab.RunEdit("Reverse page order", (d, pw) => PageEditor.Reverse(d, pw, tab.PageView.PageCount));
+
+    public static async Task Crop(Window owner, DocumentTab tab)
+    {
+        var dlg = new FormDialog(owner, "Crop Pages", "Apply", 460);
+        dlg.AddNote("Trims the visible area of each page. Nothing is deleted; Remove crop restores the full page.");
+        var units = dlg.AddChoice("Units", ["Inches", "Millimeters", "Points"]);
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        TextBox Cell(string label, int row, int col)
+        {
+            while (grid.RowDefinitions.Count <= row) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var tb = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(col == 0 ? 0 : 16, 4, 8, 4) };
+            var box = new TextBox { Text = "0", Margin = new Thickness(0, 4, 0, 4) };
+            Grid.SetRow(tb, row);
+            Grid.SetColumn(tb, col);
+            Grid.SetRow(box, row);
+            Grid.SetColumn(box, col + 1);
+            grid.Children.Add(tb);
+            grid.Children.Add(box);
+            return box;
+        }
+        var top = Cell("Top", 0, 0);
+        var bottom = Cell("Bottom", 0, 2);
+        var left = Cell("Left", 1, 0);
+        var right = Cell("Right", 1, 2);
+        dlg.Add("Margins to remove", grid);
+        var remove = dlg.AddCheck("Remove crop instead (show the full page again)");
+        var range = dlg.AddRange(tab);
+
+        int[] pages = [];
+        Margins m = default;
+        dlg.Validate(() =>
+        {
+            if (!range.TryGet(out pages, out var err)) return err;
+            if (remove.IsChecked == true) return null;
+            var factor = units.SelectedIndex switch { 0 => 72.0, 1 => 72 / 25.4, _ => 1.0 };
+            double[] v = new double[4];
+            var boxes = new[] { left, top, right, bottom };
+            for (var i = 0; i < 4; i++)
+                if (!FormDialog.TryNumber(boxes[i].Text, 0, 100_000, out v[i])) return "Margins must be numbers of 0 or more.";
+            m = new Margins(v[0] * factor, v[1] * factor, v[2] * factor, v[3] * factor);
+            return m == default ? "Enter at least one margin." : null;
+        });
+        if (!dlg.ShowModal()) return;
+
+        if (remove.IsChecked == true)
+            await Reselect(tab, pages, tab.RunEdit($"Remove crop from {Pages(pages.Length)}", (d, pw) => PageEditor.Uncrop(d, pw, pages)));
+        else
+            await Reselect(tab, pages, tab.RunEdit($"Crop {Pages(pages.Length)}", (d, pw) => PageEditor.Crop(d, pw, pages, m)));
+    }
+
+    public static async Task Combine(Window owner, MainWindow host, IEnumerable<string>? initial = null)
+    {
+        var dlg = new CombineDialog(owner, initial ?? []);
+        if (dlg.ShowDialog() != true) return;
+
+        var sources = new List<PdfSource>();
+        foreach (var f in dlg.Files)
+        {
+            if (PdfFiles.LoadForImport(owner, f) is not { } s) return;
+            sources.Add(s);
+        }
+        var bookmarks = dlg.BookmarkPerFile;
+        host.ShowStatus($"Combining {sources.Count} files…");
+        try
+        {
+            var bytes = await Task.Run(() => PageEditor.Merge(sources, bookmarks));
+            host.OpenSession(DocumentSession.FromBytes(bytes, "Combined.pdf"));
+            host.ShowStatus($"Combined {sources.Count} files. Save to keep the result.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or PdfSharp.PdfSharpException or MuPDFCore.MuPDFException)
+        {
+            MessageBox.Show(owner, $"Combine failed.\n\n{ex.Message}", "Combine Files", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>After an edit that keeps page positions, re-select the edited pages in the thumbnails.</summary>
+    private static async Task Reselect(DocumentTab tab, int[] pages, Task<bool> edit)
+    {
+        if (await edit) tab.SelectPages(pages);
+    }
+
+    internal static string Inches(double pt) => (pt / 72).ToString("0.##");
+}
