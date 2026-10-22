@@ -41,6 +41,13 @@ public sealed class ThumbItem(int index, double width, double height, Action<Thu
         }
     }
 
+    /// <summary>Drops the bitmap; it renders again if a visible list item asks for it.</summary>
+    public void Release()
+    {
+        _requested = false;
+        Image = null;
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
@@ -58,6 +65,9 @@ public partial class DocumentTab : UserControl, IDisposable
     private int _thumbGeneration;
     private bool _syncingSelection;
     private bool _protectionWarned;
+    private bool _outlineJustNavigated;
+    private readonly LinkedList<ThumbItem> _thumbsWithImages = new();
+    private const int MaxThumbImages = 300;
 
     // Search state
     private CancellationTokenSource? _searchCts;
@@ -121,8 +131,18 @@ public partial class DocumentTab : UserControl, IDisposable
             }
         };
 
-        Outline.SelectedItemChanged += (_, e) => { if (e.NewValue is OutlineNode n) NavigateTo(n); };
-        Outline.PreviewMouseLeftButtonUp += (_, _) => { if (Outline.SelectedItem is OutlineNode n) NavigateTo(n); };
+        // A click that changes the selection navigates once; clicking the already-selected bookmark navigates again.
+        Outline.SelectedItemChanged += (_, e) =>
+        {
+            if (e.NewValue is not OutlineNode n) return;
+            _outlineJustNavigated = Mouse.LeftButton == MouseButtonState.Pressed;
+            NavigateTo(n);
+        };
+        Outline.PreviewMouseLeftButtonUp += (_, _) =>
+        {
+            if (!_outlineJustNavigated && Outline.SelectedItem is OutlineNode n) NavigateTo(n);
+            _outlineJustNavigated = false;
+        };
 
         FindBox.KeyDown += OnFindKey;
         FindNextButton.Click += (_, _) => FindNext(false);
@@ -201,9 +221,7 @@ public partial class DocumentTab : UserControl, IDisposable
             Status?.Invoke(this, $"{label}: done");
             return true;
         }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or IOException
-                                       or PdfSharp.Pdf.IO.PdfReaderException or PdfSharp.PdfSharpException
-                                       or PasswordRequiredException or MuPDFCore.MuPDFException)
+        catch (Exception ex) // top-level UI action: report any failure, never lose it
         {
             Log.Write($"{label} failed: {ex}");
             MessageBox.Show(Window.GetWindow(this)!, $"{label} failed.\n\n{ex.Message}", "PdfDesk", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -264,6 +282,7 @@ public partial class DocumentTab : UserControl, IDisposable
         _thumbGeneration++;
         _syncingSelection = true;
         _thumbs.Clear();
+        _thumbsWithImages.Clear();
         var engine = Session.Engine;
         for (var i = 0; i < engine.PageCount; i++)
         {
@@ -283,7 +302,15 @@ public partial class DocumentTab : UserControl, IDisposable
         var scale = item.Width / g.Width * VisualTreeHelper.GetDpi(this).DpiScaleX;
         _scheduler.Enqueue($"t{item.Index}", 1000 + item.Index * 1e-6, () => PageViewer.ToBitmap(engine.Render(item.Index, scale)), result =>
         {
-            if (gen == _thumbGeneration && result is BitmapSource bmp) item.Image = bmp;
+            if (gen != _thumbGeneration || result is not BitmapSource bmp) return;
+            item.Image = bmp;
+            // Keep the most recently rendered thumbnails; older ones re-render if scrolled back into view.
+            _thumbsWithImages.AddLast(item);
+            while (_thumbsWithImages.Count > MaxThumbImages)
+            {
+                _thumbsWithImages.First!.Value.Release();
+                _thumbsWithImages.RemoveFirst();
+            }
         });
     }
 
@@ -488,7 +515,7 @@ public partial class DocumentTab : UserControl, IDisposable
     public void ShowFindBar()
     {
         FindBar.Visibility = Visibility.Visible;
-        if (Viewer.HasSelection)
+        if (Viewer.HasSelection && Viewer.SelectionIsOnOnePage)
         {
             var sel = Viewer.GetSelectedText().Trim();
             if (sel.Length is > 0 and < 80 && !sel.Contains('\n')) FindBox.Text = sel;

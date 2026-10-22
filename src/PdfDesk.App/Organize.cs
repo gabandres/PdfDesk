@@ -152,8 +152,7 @@ public static class Organize
                 {
                     tab.SetBusy("Extracting pages…");
                     var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
-                    tab.SetBusy(null);
-                    host.OpenSession(DocumentSession.FromBytes(bytes, $"{name} (pages {label}).pdf"));
+                    host.OpenSession(DocumentSession.FromBytes(bytes, $"{name} (pages {label}).pdf", pw));
                     break;
                 }
                 case 1:
@@ -163,7 +162,6 @@ public static class Organize
                     tab.SetBusy("Extracting pages…");
                     var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
                     await File.WriteAllBytesAsync(path, bytes);
-                    tab.SetBusy(null);
                     host.ShowStatus($"Saved {Path.GetFileName(path)}");
                     break;
                 }
@@ -177,18 +175,21 @@ public static class Organize
                         foreach (var p in pages)
                             File.WriteAllBytes(PdfFiles.UniquePath(folder, $"{name} (page {p + 1}).pdf"), PageEditor.Extract(data, pw, [p]));
                     });
-                    tab.SetBusy(null);
                     host.ShowStatus($"Saved {Pages(pages.Length)} to {folder}");
                     Shell.Open(folder);
                     break;
                 }
             }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or PdfSharp.PdfSharpException)
+        catch (Exception ex)
         {
-            tab.SetBusy(null);
+            Log.Write($"Extract failed: {ex}");
             MessageBox.Show(owner, $"Extract failed.\n\n{ex.Message}", "Extract Pages", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
+        }
+        finally
+        {
+            tab.SetBusy(null);
         }
 
         if (delete.IsChecked == true)
@@ -265,7 +266,7 @@ public static class Organize
             host.ShowStatus($"Split into {parts.Count} files in {folder}");
             Shell.Open(folder);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or PdfSharp.PdfSharpException)
+        catch (Exception ex)
         {
             MessageBox.Show(owner, $"Split failed.\n\n{ex.Message}", "Split Document", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
@@ -298,7 +299,8 @@ public static class Organize
     public static Task Duplicate(DocumentTab tab)
     {
         var pages = tab.SelectedPages;
-        return tab.RunEdit($"Duplicate {Pages(pages.Length)}", (d, pw) => PageEditor.Duplicate(d, pw, pages), pages[^1] + 1);
+        // The copy of the last selected page lands after every earlier copy.
+        return tab.RunEdit($"Duplicate {Pages(pages.Length)}", (d, pw) => PageEditor.Duplicate(d, pw, pages), pages[^1] + pages.Length);
     }
 
     public static Task Reverse(DocumentTab tab) =>
@@ -376,7 +378,7 @@ public static class Organize
             host.OpenSession(DocumentSession.FromBytes(bytes, "Combined.pdf"));
             host.ShowStatus($"Combined {sources.Count} files. Save to keep the result.");
         }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or PdfSharp.PdfSharpException or MuPDFCore.MuPDFException)
+        catch (Exception ex)
         {
             MessageBox.Show(owner, $"Combine failed.\n\n{ex.Message}", "Combine Files", MessageBoxButton.OK, MessageBoxImage.Warning);
         }

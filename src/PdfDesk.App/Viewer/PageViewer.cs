@@ -233,6 +233,13 @@ public sealed class PageViewer : ScrollViewer
             _zoom = Math.Clamp(FitZoom(), MinZoom, MaxZoom);
 
         var n = PageCount;
+        if (n == 0)
+        {
+            _rects = [];
+            _surface.SetExtent(ViewW, ViewH);
+            _surface.InvalidateVisual();
+            return;
+        }
         if (_layout == ViewLayout.SinglePage && anchor is { } sa && sa.Page != _currentPage && sa.Page >= 0 && sa.Page < n)
         {
             _currentPage = sa.Page;
@@ -607,7 +614,7 @@ public sealed class PageViewer : ScrollViewer
                     var vis = Rect.Intersect(vp, r);
                     var visPt = new RectD((vis.X - r.X) / k, (vis.Y - r.Y) / k, vis.Width / k, vis.Height / k);
                     var ok = _detail.TryGetValue(page, out var d) && Math.Abs(d.Scale - scale) < 1e-6
-                             && d.Region.Intersect(visPt) == visPt;
+                             && d.Region.Inflate(0.5).Contains(visPt.X, visPt.Y) && d.Region.Inflate(0.5).Contains(visPt.Right, visPt.Bottom);
                     if (!ok)
                     {
                         var p = page;
@@ -648,7 +655,9 @@ public sealed class PageViewer : ScrollViewer
             _full.Remove(p);
         }
         foreach (var p in _detail.Keys.Where(p => !visible.Contains(p)).ToList()) _detail.Remove(p);
-        _scheduler.Clear(key => key[0] is 'p' or 'd' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
+        // Text layers are small but add up over a long scroll; the engine keeps its own LRU for re-use.
+        foreach (var p in _texts.Keys.Where(p => p < keepFrom - 8 || p > keepTo + 8).ToList()) _texts.Remove(p);
+        _scheduler.Clear(key => key[0] is 'p' or 'd' or 'x' && int.TryParse(key.AsSpan(1), out var p) && (p < keepFrom || p > keepTo));
     }
 
     internal static BitmapSource ToBitmap(RenderedImage img)
@@ -756,6 +765,7 @@ public sealed class PageViewer : ScrollViewer
     // ───────────────────────────── Selection ─────────────────────────────
 
     public bool HasSelection => _selAnchor is { } a && _selActive is { } b && a != b;
+    public bool SelectionIsOnOnePage => _selAnchor is { } a && _selActive is { } b && a.Page == b.Page;
 
     private (TextPos?, TextPos?) OrderedSelection()
     {

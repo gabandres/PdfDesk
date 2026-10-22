@@ -54,7 +54,7 @@ internal static class DevScript
                     case "redo": tab!.Redo(); break;
                     case "scroll": v!.ScrollToVerticalOffset(v.VerticalOffset + double.Parse(arg)); break;
                     case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
-                    case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
+                    case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
                     case "log": log.Add(arg); break;
                     case "mem":
                     {
@@ -68,7 +68,7 @@ internal static class DevScript
                     case "xps":
                     {
                         var sw = System.Diagnostics.Stopwatch.StartNew();
-                        var n = FileActions.WriteXps(tab!.Session.Engine, [.. Enumerable.Range(0, Math.Min(6, v!.PageCount))], arg);
+                        var n = await FileActions.WriteXps(tab!.Session.Engine, [.. Enumerable.Range(0, Math.Min(6, v!.PageCount))], arg);
                         log.Add($"xps: {n} pages, {new FileInfo(arg).Length / 1024} KB in {sw.ElapsedMilliseconds} ms");
                         break;
                     }

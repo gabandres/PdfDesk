@@ -154,6 +154,29 @@ public class PageEditorTests
     }
 
     [Fact]
+    public void UndoingEveryEditMakesTheSessionCleanAgain()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"pdfdesk-{Guid.NewGuid():N}.pdf");
+        File.WriteAllBytes(path, Five);
+        try
+        {
+            using var session = DocumentSession.Open(path);
+            session.Commit(PageEditor.Rotate(session.Data, null, [1, 2], 90), "Rotate");
+            session.Commit(PageEditor.Delete(session.Data, null, [3]), "Delete");
+            session.Undo();
+            Assert.True(session.IsDirty);
+            session.Undo();
+            Assert.False(session.IsDirty);
+            session.Redo();
+            Assert.True(session.IsDirty);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void SessionUndoRedoAndSave()
     {
         var path = Path.Combine(Path.GetTempPath(), $"pdfdesk-{Guid.NewGuid():N}.pdf");

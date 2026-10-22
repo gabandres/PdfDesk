@@ -163,7 +163,7 @@ public partial class MainWindow : Window
                 if (password is null) return;
                 wrong = true;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MuPDFCore.MuPDFException or InvalidOperationException)
+            catch (Exception ex)
             {
                 Mouse.OverrideCursor = null;
                 Log.Write($"Open {full} failed: {ex}");
@@ -365,7 +365,7 @@ public partial class MainWindow : Window
         Bind(Cmd.ShowInFolder, t => Shell.ShowInFolder(t.Session.FilePath!), t => t.Session.FilePath is not null);
         Bind(Cmd.CloseDoc, _ => CloseTab((TabItem)Docs.SelectedItem));
         Bind(Cmd.CloseAll, _ => { foreach (var item in Docs.Items.OfType<TabItem>().ToList()) if (!CloseTab(item)) break; });
-        Bind(Cmd.Print, t => FileActions.Print(this, t));
+        Bind(Cmd.Print, t => _ = FileActions.Print(this, t));
         Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this));
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));
 

@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using PdfDesk.App.Viewer;
 using PdfDesk.Core;
 
@@ -12,7 +13,7 @@ namespace PdfDesk.App;
 /// <summary>Print, export to images, and document properties.</summary>
 public static class FileActions
 {
-    public static void Print(Window owner, DocumentTab tab)
+    public static async Task Print(Window owner, DocumentTab tab)
     {
         var count = tab.PageView.PageCount;
         var selection = tab.SelectedPages;
@@ -42,12 +43,15 @@ public static class FileActions
         tab.SetBusy($"Printing {pages.Length} page(s)…");
         try
         {
-            dlg.PrintDocument(paginator, tab.Session.DisplayName);
+            // Pages render on a background thread (PdfPaginator.GetPageAsync), so the window stays responsive.
+            var writer = PrintQueue.CreateXpsDocumentWriter(dlg.PrintQueue);
+            await WriteAsync(writer, paginator, dlg.PrintTicket);
+            Log.Write($"Printed {pages.Length} page(s) of {tab.Session.DisplayName} to {dlg.PrintQueue.FullName}");
         }
-        catch (Exception ex) when (ex is PrintingCanceledException or PrintSystemException or InvalidOperationException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Log.Write($"Print failed: {ex}");
-            MessageBox.Show(owner, $"Printing failed.\n\n{ex.Message}", "Print", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(owner, $"Printing failed.{Environment.NewLine}{Environment.NewLine}{ex.Message}", "Print", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
@@ -55,13 +59,27 @@ public static class FileActions
         }
     }
 
+    private static Task WriteAsync(System.Windows.Xps.XpsDocumentWriter writer, DocumentPaginator paginator, System.Printing.PrintTicket? ticket)
+    {
+        var done = new TaskCompletionSource();
+        writer.WritingCompleted += (_, e) =>
+        {
+            if (e.Error is not null) done.TrySetException(e.Error);
+            else if (e.Cancelled) done.TrySetCanceled();
+            else done.TrySetResult();
+        };
+        if (ticket is null) writer.WriteAsync(paginator);
+        else writer.WriteAsync(paginator, ticket);
+        return done.Task;
+    }
+
     /// <summary>Dev check: runs the print pipeline into an XPS file (Letter paper, quarter-inch margins).</summary>
-    internal static int WriteXps(PdfEngine engine, int[] pages, string path)
+    internal static async Task<int> WriteXps(PdfEngine engine, int[] pages, string path)
     {
         var paper = new Size(816, 1056);
         var paginator = new PdfPaginator(engine, pages, paper, new Point(24, 24), new Size(768, 1008));
         using var xps = new System.Windows.Xps.Packaging.XpsDocument(path, FileAccess.ReadWrite);
-        System.Windows.Xps.Packaging.XpsDocument.CreateXpsDocumentWriter(xps).Write(paginator);
+        await WriteAsync(System.Windows.Xps.Packaging.XpsDocument.CreateXpsDocumentWriter(xps), paginator, null);
         return paginator.PageCount;
     }
 
@@ -92,7 +110,20 @@ public static class FileActions
         public override Size PageSize { get => paper; set { } }
         public override IDocumentPaginatorSource? Source => null;
 
-        public override DocumentPage GetPage(int pageNumber)
+        private sealed record Placed(BitmapSource Image, bool Rotate, double X, double Y, double W, double H);
+
+        public override DocumentPage GetPage(int pageNumber) => Build(Place(pageNumber));
+
+        /// <summary>Renders on a worker thread and completes on the UI thread (used by XpsDocumentWriter.WriteAsync).</summary>
+        public override void GetPageAsync(int pageNumber, object userState)
+        {
+            Task.Run(() => Place(pageNumber)).ContinueWith(t => OnGetPageCompleted(t.IsFaulted
+                    ? new GetPageCompletedEventArgs(null, pageNumber, t.Exception!.InnerException, false, userState)
+                    : new GetPageCompletedEventArgs(Build(t.Result), pageNumber, null, false, userState)),
+                TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private Placed Place(int pageNumber)
         {
             var index = pages[pageNumber];
             var g = engine.GetPage(index);
@@ -111,27 +142,29 @@ public static class FileActions
 
             var dw = fw * scale;
             var dh = fh * scale;
-            var x = origin.X + (area.Width - dw) / 2;
-            var y = origin.Y + (area.Height - dh) / 2;
+            return new Placed(bmp, rotate, origin.X + (area.Width - dw) / 2, origin.Y + (area.Height - dh) / 2, dw, dh);
+        }
 
+        private DocumentPage Build(Placed p)
+        {
             var visual = new DrawingVisual();
             using (var dc = visual.RenderOpen())
             {
-                if (rotate)
+                if (p.Rotate)
                 {
-                    // Turn the page 90° clockwise into the (dw × dh) box.
-                    dc.PushTransform(new TranslateTransform(x + dw, y));
+                    // Turn the page 90° clockwise into the (W × H) box.
+                    dc.PushTransform(new TranslateTransform(p.X + p.W, p.Y));
                     dc.PushTransform(new RotateTransform(90));
-                    dc.DrawImage(bmp, new Rect(0, 0, dh, dw));
+                    dc.DrawImage(p.Image, new Rect(0, 0, p.H, p.W));
                     dc.Pop();
                     dc.Pop();
                 }
                 else
                 {
-                    dc.DrawImage(bmp, new Rect(x, y, dw, dh));
+                    dc.DrawImage(p.Image, new Rect(p.X, p.Y, p.W, p.H));
                 }
             }
-            return new DocumentPage(visual, paper, new Rect(paper), new Rect(x, y, dw, dh));
+            return new DocumentPage(visual, paper, new Rect(paper), new Rect(p.X, p.Y, p.W, p.H));
         }
     }
 
@@ -173,7 +206,7 @@ public static class FileActions
             host.ShowStatus($"Exported {done} image(s) to {dir}");
             Shell.Open(dir);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MuPDFCore.MuPDFException or ObjectDisposedException)
+        catch (Exception ex)
         {
             MessageBox.Show(owner, $"Export stopped after {done} page(s).\n\n{ex.Message}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
