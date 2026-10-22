@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- MuPDF (AGPL; personal use): rendering, text, search, outline, links. Ships win-arm64 natives. -->
+    <PackageReference Include="MuPDFCore" Version="2.0.1" />
+    <!-- PDFsharp 6.2.x (MIT; 6.5+ is AGPL with a runtime license check): page-level editing (merge, split, insert, delete, reorder, rotate, crop) -->
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <!-- PDFsharp pulls Pkcs 8.0.1 (GHSA-846f-f764-76mx); pin the patched release -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+  </ItemGroup>
+</Project>
