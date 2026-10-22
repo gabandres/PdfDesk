@@ -64,6 +64,32 @@ public partial class App : Application
             "Dark" => ThemeMode.Dark,
             _ => ThemeMode.System,
         };
+        foreach (Window w in Current.Windows) ApplyFrame(w);
+    }
+
+    /// <summary>True when the app shows dark (an explicit choice, or Windows' app mode when following the system).</summary>
+    public static bool IsDark => AppSettings.Current.Theme switch
+    {
+        "Dark" => true,
+        "Light" => false,
+        _ => Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1) is int light && light == 0,
+    };
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    /// <summary>
+    /// Makes the window frame, caption buttons and Mica follow the app theme (also when it differs from Windows'),
+    /// since the title bar is drawn by Windows, not WPF.
+    /// </summary>
+    public static void ApplyFrame(Window window)
+    {
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        var dark = IsDark ? 1 : 0;
+        DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int)); // DWMWA_USE_IMMERSIVE_DARK_MODE
+        var mica = 2;
+        DwmSetWindowAttribute(hwnd, 38, ref mica, sizeof(int)); // DWMWA_SYSTEMBACKDROP_TYPE = Mica
     }
 
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)

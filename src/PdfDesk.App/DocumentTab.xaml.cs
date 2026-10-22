@@ -1051,6 +1051,16 @@ public partial class DocumentTab : UserControl, IDisposable
 
     private bool _disposed;
 
+    /// <summary>Night reading on or off: the page view, thumbnails and organizer cards all follow.</summary>
+    public void SetDarkPages(bool on)
+    {
+        if (Viewer.InvertColors == on) return;
+        Viewer.InvertColors = on;
+        _scheduler.Clear(k => k[0] is 't' or 'o');
+        RebuildThumbs();
+        if (IsOrganizing) Organizer.Load(Session.Engine, Organizer.SelectedPages, Viewer.CurrentPage);
+    }
+
     public void FocusContent()
     {
         if (IsOrganizing) Organizer.Focus();

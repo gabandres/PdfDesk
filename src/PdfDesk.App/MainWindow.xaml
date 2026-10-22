@@ -71,7 +71,8 @@
                                     </Border>
                                 </StackPanel>
                             </Button>
-                            <ToggleButton x:Name="DarkPagesButton" Style="{StaticResource IconButton}" Command="app:Cmd.DarkPages" Content="&#xE708;" ToolTip="Dark pages for night reading" />
+                            <Button x:Name="AppearanceButton" Style="{StaticResource IconButton}" Content="&#xE708;" Click="OnAppearanceClick"
+                                    ToolTip="Appearance: dark mode, light mode, dark pages (Ctrl+Shift+L toggles dark mode)" />
                             <Button Style="{StaticResource IconButton}" Command="app:Cmd.Settings" Content="&#xE713;" ToolTip="Settings (Ctrl+,)" />
                         </StackPanel>
                         <WrapPanel VerticalAlignment="Center">
@@ -139,6 +140,12 @@
                                     <Separator />
                                     <MenuItem x:Name="NavPaneMenu" Command="app:Cmd.NavPane" />
                                     <MenuItem Header="_Bookmarks" Click="OnShowBookmarks" />
+                                    <MenuItem Header="_Theme">
+                                        <MenuItem x:Name="ThemeSystemMenu" Header="Use _Windows setting" Click="OnThemeMenu" Tag="System" />
+                                        <MenuItem x:Name="ThemeLightMenu" Header="_Light" Click="OnThemeMenu" Tag="Light" />
+                                        <MenuItem x:Name="ThemeDarkMenu" Header="_Dark" Click="OnThemeMenu" Tag="Dark" />
+                                    </MenuItem>
+                                    <MenuItem Command="app:Cmd.ToggleDarkMode" />
                                     <MenuItem x:Name="DarkPagesMenu" Command="app:Cmd.DarkPages" />
                                     <MenuItem x:Name="HighlightFieldsMenu" Command="app:Cmd.HighlightFields" />
                                     <MenuItem Command="app:Cmd.FullScreen" />

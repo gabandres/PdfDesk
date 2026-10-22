@@ -66,6 +66,7 @@ public static class Cmd
     public static readonly RoutedUICommand Settings = Make("_Settings…", nameof(Settings), K(Key.OemComma, ModifierKeys.Control, "Ctrl+,"));
     public static readonly RoutedUICommand Shortcuts = Make("_Keyboard Shortcuts", nameof(Shortcuts), K(Key.F1));
     public static readonly RoutedUICommand DarkPages = Make("_Dark Pages (Night Reading)", nameof(DarkPages));
+    public static readonly RoutedUICommand ToggleDarkMode = Make("Toggle Dar_k Mode", nameof(ToggleDarkMode), K(Key.L, ModifierKeys.Control | ModifierKeys.Shift));
 
     // Organize
     public static readonly RoutedUICommand Organize = Make("_Organize Pages", nameof(Organize), K(Key.O, ModifierKeys.Control | ModifierKeys.Shift));

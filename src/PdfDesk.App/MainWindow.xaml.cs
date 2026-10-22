@@ -98,6 +98,7 @@ public partial class MainWindow : Window
         StateChanged += (_, _) => FitToScreenWhenMaximized();
         SourceInitialized += (_, _) =>
         {
+            App.ApplyFrame(this);
             FitToScreenWhenMaximized();
             MeasureCaptionButtons();
         };
@@ -687,11 +688,12 @@ public partial class MainWindow : Window
         BindAlways(Cmd.Settings, ShowSettings);
         BindAlways(Cmd.Shortcuts, () => ShortcutsWindow.Show(this, MainMenu));
         BindAlways(Cmd.FullScreen, ToggleFullScreen);
+        BindAlways(Cmd.ToggleDarkMode, () => SetTheme(App.IsDark ? "Light" : "Dark"));
         BindAlways(Cmd.DarkPages, () =>
         {
             AppSettings.Current.DarkPages = !AppSettings.Current.DarkPages;
             AppSettings.Current.Save();
-            foreach (var t in Tabs) t.PageView.InvertColors = AppSettings.Current.DarkPages;
+            foreach (var t in Tabs) t.SetDarkPages(AppSettings.Current.DarkPages);
             UpdateUi();
         });
 
@@ -968,6 +970,41 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Input, item.Run);
     }
 
+    // ───────────────────────────── Appearance ─────────────────────────────
+
+    /// <summary>The moon/sun button: a small menu for the app theme and dark pages.</summary>
+    private void OnAppearanceClick(object sender, RoutedEventArgs e)
+    {
+        var s = AppSettings.Current;
+        var menu = new ContextMenu { PlacementTarget = AppearanceButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        MenuItem Item(string header, bool check, Action run)
+        {
+            var mi = new MenuItem { Header = header, IsCheckable = true, IsChecked = check };
+            mi.Click += (_, _) => run();
+            return mi;
+        }
+        menu.Items.Add(Item("Dark mode", s.Theme == "Dark", () => SetTheme("Dark")));
+        menu.Items.Add(Item("Light mode", s.Theme == "Light", () => SetTheme("Light")));
+        menu.Items.Add(Item("Use my Windows setting", s.Theme is not ("Light" or "Dark"), () => SetTheme("System")));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("Dark pages (night reading)", s.DarkPages, () => Cmd.DarkPages.Execute(null, this)));
+        menu.IsOpen = true;
+    }
+
+    private void OnThemeMenu(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string theme }) SetTheme(theme);
+    }
+
+    private void SetTheme(string theme)
+    {
+        AppSettings.Current.Theme = theme;
+        AppSettings.Current.Save();
+        App.ApplyTheme();
+        UpdateUi();
+        ShowStatus(theme switch { "Dark" => "Dark mode on", "Light" => "Light mode on", _ => "Following your Windows setting" });
+    }
+
     // ───────────────────────────── Settings ─────────────────────────────
 
     private void ShowSettings()
@@ -987,7 +1024,7 @@ public partial class MainWindow : Window
         s.DarkPages = dark.IsChecked == true;
         s.Save();
         App.ApplyTheme();
-        foreach (var t in Tabs) t.PageView.InvertColors = s.DarkPages;
+        foreach (var t in Tabs) t.SetDarkPages(s.DarkPages);
         UpdateUi();
         ShowStatus("Settings saved");
     }
@@ -1020,7 +1057,11 @@ public partial class MainWindow : Window
         CoverMenu.IsChecked = v?.Layout == ViewLayout.FacingCover;
         NavPaneMenu.IsChecked = t?.NavPaneVisible ?? AppSettings.Current.NavPaneVisible;
         OrganizeButton.IsChecked = OrganizeMenu.IsChecked = t?.IsOrganizing == true;
-        DarkPagesButton.IsChecked = DarkPagesMenu.IsChecked = AppSettings.Current.DarkPages;
+        DarkPagesMenu.IsChecked = AppSettings.Current.DarkPages;
+        ThemeSystemMenu.IsChecked = AppSettings.Current.Theme is not ("Light" or "Dark");
+        ThemeLightMenu.IsChecked = AppSettings.Current.Theme == "Light";
+        ThemeDarkMenu.IsChecked = AppSettings.Current.Theme == "Dark";
+        AppearanceButton.Content = App.IsDark ? "\uE706" : "\uE708"; // sun in dark mode, moon in light mode
 
         UndoMenu.Header = t?.Session.UndoLabel is { } u ? $"_Undo {u}" : "_Undo";
         RedoMenu.Header = t?.Session.RedoLabel is { } r ? $"_Redo {r}" : "_Redo";

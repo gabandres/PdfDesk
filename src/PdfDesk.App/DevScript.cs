@@ -56,6 +56,13 @@ internal static class DevScript
                     case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
                     case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
                     case "log": log.Add(arg); break;
+                    case "cmd":
+                    {
+                        var c = (System.Windows.Input.RoutedUICommand)typeof(Cmd).GetField(arg)!.GetValue(null)!;
+                        log.Add($"cmd {arg}: can={c.CanExecute(null, window)}");
+                        c.Execute(null, window);
+                        break;
+                    }
                     case "fields":
                         log.Add($"fillable widgets: {v!.FillableCount}");
                         for (var i = 0; i < Math.Min(v.FillableCount, int.TryParse(arg, out var nf) ? nf : 6); i++) log.Add("  " + v.DevDescribeField(i));
