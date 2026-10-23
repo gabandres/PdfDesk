@@ -95,7 +95,7 @@ internal static class FormActionDialogs
         var result = buttons.Length - 1;
         var win = new Window
         {
-            Title = "PdfDesk",
+            Title = title,
             Width = 480,
             SizeToContent = SizeToContent.Height,
             ResizeMode = ResizeMode.NoResize,

@@ -173,7 +173,7 @@ public sealed class SignatureCaptureDialog : Window
     private readonly Image _imported = new() { Height = 150, Stretch = Stretch.Uniform };
     private readonly CheckBox _whiteToClear = new() { Content = "Make a white background transparent", IsChecked = true, Margin = new Thickness(0, 8, 0, 0) };
     private readonly TabControl _tabs = new();
-    private readonly TextBlock _error = new() { Foreground = Brushes.Firebrick, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
+    private readonly TextBlock _error = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
     private BitmapSource? _importedSource;
 
     public BitmapSource? Result { get; private set; }
@@ -265,6 +265,7 @@ public sealed class SignatureCaptureDialog : Window
         var body = new StackPanel { Margin = new Thickness(24, 20, 24, 20) };
         body.Children.Add(new TextBlock { Text = Title, FontSize = 20, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
         body.Children.Add(_tabs);
+        _error.SetResourceReference(TextBlock.ForegroundProperty, "SystemFillColorCriticalBrush");
         body.Children.Add(_error);
         body.Children.Add(buttons);
         Content = body;
