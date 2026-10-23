@@ -32,3 +32,6 @@ public readonly record struct RectD(double X, double Y, double Width, double Hei
 
 /// <summary>Page box size in points, as displayed (rotation applied).</summary>
 public readonly record struct PageGeometry(double OriginX, double OriginY, double Width, double Height);
+
+/// <summary>A point in page space: PDF points, origin at the page's top-left, y down.</summary>
+public readonly record struct PointD(double X, double Y);
