@@ -68,7 +68,7 @@ ame-signed.pdf) and verified.
 | Path | What |
 |---|---|
 | `src/PdfDesk.Core` | `PdfEngine` (MuPDF: render, text, links, outline), `PageEditor` (PDFsharp page edits, bytes in → bytes out), `DocumentSession` (bytes + undo snapshots), `PageText`, `PageRange` |
-| `src/PdfDesk.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings); helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
+| `src/PdfDesk.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` (outline editing), `Flattener` (annotations/fields into page content); helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
 | `src/PdfDesk.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing` overlays); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` are the commands |
 | `tests/PdfDesk.Tests` | `dotnet test tests/PdfDesk.Tests` |
 

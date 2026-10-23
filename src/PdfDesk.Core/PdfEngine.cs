@@ -93,7 +93,7 @@ public sealed class PdfEngine : IDisposable
             if (doc.EncryptionState == EncryptionState.Encrypted)
             {
                 if (string.IsNullOrEmpty(password)) throw new PasswordRequiredException(false);
-                if (!doc.TryUnlock(password)) throw new PasswordRequiredException(true);
+                if (!Unlock(doc, password)) throw new PasswordRequiredException(true);
             }
             return new PdfEngine(ctx, doc, encrypted, c => new MuPDFDocument(c, data, type), password);
         }
@@ -272,6 +272,18 @@ public sealed class PdfEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Unlocks an encrypted document. MuPDFCore leaves a document unlocked with its owner (permissions) password marked
+    /// as encrypted, so every page access would still throw; MuPDF itself has accepted the password by then.
+    /// </summary>
+    private static bool Unlock(MuPDFDocument doc, string password)
+    {
+        if (!doc.TryUnlock(password, out var kind)) return false;
+        if (doc.EncryptionState == EncryptionState.Encrypted && kind.HasFlag(PasswordTypes.Owner))
+            typeof(MuPDFDocument).GetProperty(nameof(MuPDFDocument.EncryptionState))?.SetMethod?.Invoke(doc, [EncryptionState.Unlocked]);
+        return doc.EncryptionState != EncryptionState.Encrypted;
+    }
+
     private static void CheckSize(double width, double height)
     {
         if (width * height > MaxPixels)
@@ -288,7 +300,7 @@ public sealed class PdfEngine : IDisposable
         try
         {
             doc = _reopen(ctx);
-            if (doc.EncryptionState == EncryptionState.Encrypted && !doc.TryUnlock(_password ?? ""))
+            if (doc.EncryptionState == EncryptionState.Encrypted && !Unlock(doc, _password ?? ""))
                 throw new PasswordRequiredException(true);
             if (doc.Pages.Count != _pages.Length) throw new InvalidOperationException("The document changed while open.");
         }
@@ -437,7 +449,7 @@ public sealed class PdfEngine : IDisposable
     /// MuPDFCore throws from a finalizer (crashing the process) if a page outlives its context, so pages must be
     /// disposed explicitly, before the document and the context.
     /// </summary>
-    private static void DisposeDocument(MuPDFDocument doc)
+    internal static void DisposeDocument(MuPDFDocument doc)
     {
         doc.Pages.Dispose();
         doc.Dispose();

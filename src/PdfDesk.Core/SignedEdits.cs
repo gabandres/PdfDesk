@@ -73,6 +73,16 @@ public static class SignedEdits
 
     internal static bool RewriteAllowed => Current.Value?.AllowRewrite == true;
 
+    /// <summary>
+    /// For edits that always rewrite the file (encryption, optimizing, flattening): a signed document needs the caller's
+    /// consent (<see cref="Run"/> with the rewrite allowed), else this throws.
+    /// </summary>
+    /// <exception cref="SignaturesWouldBreakException">The document is signed and the rewrite wasn't allowed.</exception>
+    internal static void RequireRewrite(byte[] data, PdfSharp.Pdf.PdfDocument doc, string reason)
+    {
+        if (Incremental.LooksSigned(data) && !RewriteAllowed) throw new SignaturesWouldBreakException(Incremental.CountSignatures(doc), reason);
+    }
+
     internal static void NoteAppended()
     {
         if (Current.Value is { } s) s.Appended = true;
