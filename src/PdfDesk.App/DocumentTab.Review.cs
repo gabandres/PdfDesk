@@ -663,7 +663,7 @@ public partial class DocumentTab
             if (scripted is null) return;
             path = scripted;
         }
-        if (path is null)
+        while (path is null)
         {
             var dlg = new SaveFileDialog
             {
@@ -673,19 +673,81 @@ public partial class DocumentTab
                 InitialDirectory = AppSettings.Current.LastFolder is { Length: > 0 } dir && Directory.Exists(dir) ? dir : null,
             };
             if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-            path = dlg.FileName;
+            if (!PdfFiles.IsOpenInTab(dlg.FileName))
+            {
+                path = dlg.FileName;
+                break;
+            }
+            OpenInTabRefused(dlg.FileName);
         }
+        // Writing over a document open in a tab would swap the file under it (and the tab wouldn't know).
+        if (PdfFiles.IsOpenInTab(path))
+        {
+            OpenInTabRefused(path);
+            return;
+        }
+        if (_disposed) return;
         try
         {
             var data = Session.Data;
             var pw = Session.Password;
-            var target = path;
-            await Task.Run(() => File.WriteAllBytes(target, Attachments.Extract(data, pw, a.Key)));
+            var target = Path.GetFullPath(path);
+            var zone = ZoneIdentifierFor(Session.FilePath);
+            // Atomic (no half-written file), and marked as coming from the internet, like a download: Windows and other
+            // apps then treat it with the same care (SmartScreen, Office Protected View) as the PDF it came from.
+            await Task.Run(() => AtomicFile.WriteAllBytes(target, Attachments.Extract(data, pw, a.Key), tmp => WriteZoneIdentifier(tmp, zone)));
+            await Task.Run(() => WriteZoneIdentifier(target, zone));
             Notify($"Saved {Path.GetFileName(path)}");
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             Prompt.Error(Window.GetWindow(this), "Couldn't save the attachment", ex.Message);
+        }
+    }
+
+    private void OpenInTabRefused(string path) =>
+        Prompt.Info(Window.GetWindow(this), $"{Path.GetFileName(path)} is open in PdfDesk",
+            "Choose a different name, or close that document first.");
+
+    /// <summary>
+    /// The Mark of the Web for a file taken out of the document at <paramref name="source"/>: Internet zone (3) or the
+    /// source's own zone if stricter, the source as ReferrerUrl, and its HostUrl when it has one (as Windows does when
+    /// extracting from a downloaded zip).
+    /// </summary>
+    private static string ZoneIdentifierFor(string? source)
+    {
+        var zone = 3;
+        string? host = null;
+        if (source is not null)
+        {
+            try
+            {
+                foreach (var line in File.ReadAllLines(source + ":Zone.Identifier"))
+                {
+                    if (line.StartsWith("ZoneId=", StringComparison.OrdinalIgnoreCase) && int.TryParse(line[7..], out var z)) zone = Math.Max(zone, z);
+                    else if (line.StartsWith("HostUrl=", StringComparison.OrdinalIgnoreCase)) host = line[8..];
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+            {
+                // No mark on the source (or a file system without streams): Internet zone is the safe default.
+            }
+        }
+        var text = new System.Text.StringBuilder($"[ZoneTransfer]\r\nZoneId={zone}\r\n");
+        if (source is not null) text.Append($"ReferrerUrl={source}\r\n");
+        if (host is not null) text.Append($"HostUrl={host}\r\n");
+        return text.ToString();
+    }
+
+    private static void WriteZoneIdentifier(string path, string zone)
+    {
+        try
+        {
+            File.WriteAllText(path + ":Zone.Identifier", zone);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            Log.Write($"Couldn't mark {Log.Name(path)} as downloaded (Zone.Identifier): {ex.Message}"); // e.g. FAT or a network share
         }
     }
 

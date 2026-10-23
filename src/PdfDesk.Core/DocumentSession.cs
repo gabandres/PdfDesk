@@ -112,6 +112,34 @@ public sealed class DocumentSession : IDisposable
     public void SaveAs(string path)
     {
         path = Path.GetFullPath(path);
+        WriteFile(path, Data);
+        MarkSaved(path, _version);
+    }
+
+    /// <summary>
+    /// <see cref="SaveAs"/> with the writing on a worker thread: the bytes as they are now are written, the session is
+    /// updated on the calling thread afterwards. An edit committed meanwhile leaves the document dirty.
+    /// </summary>
+    public async Task SaveAsAsync(string path)
+    {
+        path = Path.GetFullPath(path);
+        var data = Data;
+        var version = _version;
+        await Task.Run(() => WriteFile(path, data));
+        MarkSaved(path, version);
+    }
+
+    private void MarkSaved(string path, int version)
+    {
+        FilePath = path;
+        DisplayName = Path.GetFileName(path);
+        _savedVersion = version;
+        _onDisk = DiskStamp(path);
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static void WriteFile(string path, byte[] data)
+    {
         var target = new FileInfo(path);
         if (target.Exists && target.IsReadOnly)
             throw new UnauthorizedAccessException($"\"{target.Name}\" is read-only. Save a copy under another name, or clear its read-only attribute.");
@@ -121,7 +149,7 @@ public sealed class DocumentSession : IDisposable
         {
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16))
             {
-                stream.Write(Data);
+                stream.Write(data);
                 stream.Flush(flushToDisk: true);
             }
 
@@ -153,12 +181,6 @@ public sealed class DocumentSession : IDisposable
             {
             }
         }
-
-        FilePath = path;
-        DisplayName = Path.GetFileName(path);
-        _savedVersion = _version;
-        _onDisk = DiskStamp(path);
-        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>True when the file is missing or its size or last-write time differ from when it was opened or last saved.</summary>
@@ -176,18 +198,43 @@ public sealed class DocumentSession : IDisposable
     /// Re-reads the file (same password), discarding unsaved changes and undo history; raises ContentChanged then
     /// StateChanged. On failure (I/O, password, corrupt file) nothing changes.
     /// </summary>
-    public void ReloadFromDisk()
+    public void ReloadFromDisk() => ApplyReload(ReadDiskCopy(FilePath, FileType, Password));
+
+    /// <summary>
+    /// <see cref="ReloadFromDisk"/> with the reading and parsing on a worker thread; the content is swapped on the calling
+    /// thread. Returns false (nothing changed) when <paramref name="stillWanted"/> says no once the file has been read.
+    /// </summary>
+    public async Task<bool> ReloadFromDiskAsync(Func<bool>? stillWanted = null)
     {
-        if (FilePath is null) throw new InvalidOperationException("This document has not been saved to a file.");
-        var stamp = DiskStamp(FilePath);
-        var data = File.ReadAllBytes(FilePath);
-        var engine = PdfEngine.Open(data, FileType, Password);
+        var (path, type, password) = (FilePath, FileType, Password);
+        var copy = await Task.Run(() => ReadDiskCopy(path, type, password));
+        if (stillWanted?.Invoke() == false || path != FilePath)
+        {
+            copy.Engine.Dispose();
+            return false;
+        }
+        ApplyReload(copy);
+        return true;
+    }
+
+    private sealed record DiskCopy(byte[] Data, PdfEngine Engine, (long, DateTime)? Stamp);
+
+    private static DiskCopy ReadDiskCopy(string? path, InputFileTypes type, string? password)
+    {
+        if (path is null) throw new InvalidOperationException("This document has not been saved to a file.");
+        var stamp = DiskStamp(path);
+        var data = File.ReadAllBytes(path);
+        return new DiskCopy(data, PdfEngine.Open(data, type, password), stamp);
+    }
+
+    private void ApplyReload(DiskCopy copy)
+    {
         _undo.Clear();
         _redo.Clear();
-        _onDisk = stamp;
+        _onDisk = copy.Stamp;
         var version = _nextVersion++;
         _savedVersion = version;
-        Swap(data, engine, version);
+        Swap(copy.Data, copy.Engine, version);
     }
 
     private static (long, DateTime)? DiskStamp(string path)

@@ -15,6 +15,8 @@ public static class FileActions
 {
     public static async Task Print(Window owner, DocumentTab tab)
     {
+        // Let a value still being typed land first: the dialog takes focus, which would commit it mid-print.
+        if (!await tab.SettleAsync()) return;
         var count = tab.PageView.PageCount;
         var selection = tab.SelectedPages;
         var current = Organize.CurrentPage(tab);
@@ -27,7 +29,8 @@ public static class FileActions
             MaxPage = (uint)count,
             PageRange = new System.Windows.Controls.PageRange(1, count),
         };
-        if (dlg.ShowDialog() != true) return;
+        if (dlg.ShowDialog() != true || !await tab.SettleAsync()) return;
+        count = tab.PageView.PageCount;
 
         int[] pages = dlg.PageRangeSelection switch
         {
@@ -37,12 +40,14 @@ public static class FileActions
             PageRangeSelection.SelectedPages => selection,
             _ => [.. Enumerable.Range(0, count)],
         };
+        pages = [.. pages.Where(p => p >= 0 && p < count)];
         if (pages.Length == 0) return;
 
+        // Busy before anything else can run: the print holds this engine until it is done.
+        using var busy = tab.BeginBusy($"Printing {Pages(pages.Length)}…");
         var (origin, area) = ImageableArea(dlg);
         using var progress = new ProgressPrompt(owner, "Printing", $"Preparing {Pages(pages.Length)}…");
         var paginator = new PdfPaginator(tab.ViewEngine, pages, new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight), origin, area, progress.Token);
-        tab.SetBusy($"Printing {Pages(pages.Length)}…");
         try
         {
             // Pages render on a background thread (PdfPaginator.GetPageAsync), so the window stays responsive.
@@ -68,10 +73,6 @@ public static class FileActions
         {
             Log.Write($"Print failed: {ex}");
             Prompt.Error(owner, "Printing didn't work", ex.Message);
-        }
-        finally
-        {
-            tab.SetBusy(null);
         }
     }
 
@@ -192,6 +193,7 @@ public static class FileActions
 
     public static async Task ExportImages(Window owner, DocumentTab tab, MainWindow host)
     {
+        if (!await tab.SettleAsync()) return;
         var dlg = new FormDialog(owner, "Export Pages as Images", "Export");
         var range = dlg.AddRange(tab, preferSelection: false);
         var format = dlg.AddChoice("Format", ["PNG (lossless)", "JPEG (smaller)"]);
@@ -206,7 +208,9 @@ public static class FileActions
             if (!range.TryGet(out pages, out var err)) return err;
             return Directory.Exists(folder.Text) ? null : "Choose an existing folder.";
         });
-        if (!dlg.ShowModal()) return;
+        if (!dlg.ShowModal() || !await tab.SettleAsync()) return;
+        pages = [.. pages.Where(p => p < tab.PageView.PageCount)];
+        if (pages.Length == 0) return;
 
         var jpeg = format.SelectedIndex == 1;
         var res = new[] { 72, 96, 150, 200, 300, 600 }[dpi.SelectedIndex];
@@ -217,6 +221,8 @@ public static class FileActions
         // Clamp the resolution of very large pages so one image can't exhaust memory.
         var dpiFor = pages.Distinct().ToDictionary(p => p, p => ClampDpi(engine.GetPage(p), res));
         var clamped = dpiFor.Values.Where(d => d < res).ToList();
+        // Busy from here (also while asking about large pages), so nothing replaces the engine this export reads.
+        using var busy = tab.BeginBusy($"Exporting {Pages(pages.Length)}…");
         if (clamped.Count > 0)
         {
             var lowest = clamped.Min();
@@ -243,7 +249,6 @@ public static class FileActions
         var done = 0;
         using var progress = new ProgressPrompt(owner, "Exporting images", $"Exporting {Pages(pages.Length)}…");
         var cancel = progress.Token;
-        tab.SetBusy($"Exporting {Pages(pages.Length)}…");
         try
         {
             await Task.Run(() =>
@@ -276,10 +281,6 @@ public static class FileActions
         {
             Log.Write($"Export failed after {done} image(s): {ex}");
             Prompt.Error(owner, $"Export stopped after {done} page(s)", ex.Message);
-        }
-        finally
-        {
-            tab.SetBusy(null);
         }
     }
 

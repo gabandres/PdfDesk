@@ -58,7 +58,8 @@ public static class Log
 /// <summary>Writes files via a temporary file in the same folder, then swaps it in, so a crash never leaves half a file.</summary>
 public static class AtomicFile
 {
-    public static void WriteAllBytes(string path, byte[] bytes)
+    /// <param name="prepare">Runs on the finished temporary file before it is swapped in (e.g. to add a stream).</param>
+    public static void WriteAllBytes(string path, byte[] bytes, Action<string>? prepare = null)
     {
         var full = Path.GetFullPath(path);
         var tmp = Path.Combine(Path.GetDirectoryName(full)!, $"~pdfdesk-{Guid.NewGuid():N}.tmp");
@@ -69,6 +70,7 @@ public static class AtomicFile
                 fs.Write(bytes);
                 fs.Flush(flushToDisk: true);
             }
+            prepare?.Invoke(tmp);
             if (!File.Exists(full))
             {
                 File.Move(tmp, full);
@@ -128,7 +130,9 @@ public static class Shell
 /// </summary>
 public sealed class SingleInstance : IDisposable
 {
-    private static readonly string Id = $"PdfDesk-{AppPaths.UserId}";
+    // Same scope for mutex and pipe: per user and per logon session. The mutex is Local\ (per session) but pipe names
+    // are machine-wide, so the name carries the session id too, or a second session would hand its files to the first.
+    private static readonly string Id = $"PdfDesk-{AppPaths.UserId}-{Process.GetCurrentProcess().SessionId}";
     private const int ConnectTimeoutMs = 10_000;
     private const int MaxListenFailures = 8;
 
@@ -233,7 +237,8 @@ public sealed class SingleInstance : IDisposable
             using var client = new NamedPipeClientStream(".", Id, PipeDirection.Out, PipeOptions.CurrentUserOnly);
             // Generous: the owner may itself be starting up (it listens before opening its own files).
             client.Connect(ConnectTimeoutMs);
-            var bytes = Encoding.UTF8.GetBytes(string.Join('\n', args.Select(a => File.Exists(a) ? Path.GetFullPath(a) : a)));
+            // The owner runs in another folder: every path becomes absolute against this launch's working directory.
+            var bytes = Encoding.UTF8.GetBytes(string.Join('\n', args.Select(Absolute)));
             client.Write(bytes);
             client.Flush();
             return true;
@@ -243,6 +248,22 @@ public sealed class SingleInstance : IDisposable
             // The other instance is hung or shutting down: run standalone rather than losing the user's file.
             Log.Write($"Could not reach the running PdfDesk ({ex.GetType().Name}); opening a separate window.");
             return false;
+        }
+    }
+
+    /// <summary><paramref name="arg"/> as a full path (also when no such file exists); options and non-file URIs as they are.</summary>
+    internal static string Absolute(string arg)
+    {
+        if (arg.Length == 0 || arg.StartsWith("--", StringComparison.Ordinal)
+            || Uri.TryCreate(arg, UriKind.Absolute, out var uri) && !uri.IsFile)
+            return arg;
+        try
+        {
+            return Path.GetFullPath(arg);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return arg;
         }
     }
 
@@ -380,16 +401,19 @@ public sealed class AppSettings
 
     public FileState StateOf(string path)
     {
-        if (!Files.TryGetValue(path, out var state)) Files[path] = state = new FileState();
+        // A new entry counts as just opened, so pruning (oldest first) never drops the file being viewed now.
+        if (!Files.TryGetValue(path, out var state)) Files[path] = state = new FileState { LastOpened = DateTime.Now };
         _touched.Add(path);
         Prune();
         return state;
     }
 
+    /// <summary>Keeps the <see cref="MaxFiles"/> most recently opened files; entries this window used since its last save go last.</summary>
     private void Prune()
     {
         if (Files.Count > MaxFiles)
-            foreach (var old in Files.OrderBy(f => f.Value.LastOpened).Take(Files.Count - MaxFiles).Select(f => f.Key).ToList())
+            foreach (var old in Files.OrderBy(f => _touched.Contains(f.Key)).ThenBy(f => f.Value.LastOpened)
+                         .Take(Files.Count - MaxFiles).Select(f => f.Key).ToList())
                 Files.Remove(old);
     }
 
