@@ -99,6 +99,8 @@
                                     <MenuItem Command="app:Cmd.ReloadFromDisk" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Print" />
+                                    <MenuItem Command="app:Cmd.Scan" />
+                                    <MenuItem x:Name="PrintDeskMenu" Header="Printer Settings (Print_Desk)" Click="OnOpenPrintDesk" Visibility="Collapsed" />
                                     <MenuItem Command="app:Cmd.ExportImages" />
                                     <MenuItem Command="app:Cmd.Properties" />
                                     <Separator />
@@ -178,6 +180,7 @@
                                     <Separator />
                                     <MenuItem Command="app:Cmd.InsertPages" />
                                     <MenuItem Command="app:Cmd.InsertBlank" />
+                                    <MenuItem Command="app:Cmd.InsertFromScanner" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.DeletePages" />
                                     <MenuItem Command="app:Cmd.ExtractPages" />

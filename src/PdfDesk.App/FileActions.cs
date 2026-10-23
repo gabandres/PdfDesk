@@ -29,7 +29,9 @@ public static class FileActions
             MaxPage = (uint)count,
             PageRange = new System.Windows.Controls.PageRange(1, count),
         };
+        PrinterCheck.Prewarm(); // the default printer's status, while the dialog is open
         if (dlg.ShowDialog() != true || !await tab.SettleAsync()) return;
+        if (!await ConfirmPrinterReady(owner, PrinterCheck.Describe(dlg.PrintQueue))) return;
         count = tab.PageView.PageCount;
 
         int[] pages = dlg.PageRangeSelection switch
@@ -77,6 +79,27 @@ public static class FileActions
     }
 
     private static string Pages(int n) => n == 1 ? "1 page" : $"{n} pages";
+
+    /// <summary>
+    /// Desk suite: when the chosen queue is a printer PrintDesk knows, shows its status (ready, sleeping, toner) and asks
+    /// before printing to one that is offline or has an error. Takes at most <see cref="PrinterCheck.Budget"/>; without an
+    /// answer, printing goes ahead.
+    /// </summary>
+    private static async Task<bool> ConfirmPrinterReady(Window owner, PrintDesk.Core.Suite.QueueInfo? queue)
+    {
+        if (queue is null || await PrinterCheck.CheckAsync(queue) is not { } check) return true;
+        var (printer, health) = (check.Printer, check.Health);
+        Log.Write($"Printer check: {printer.Name}: {health.State}");
+        if (!health.ShouldWarn)
+        {
+            (owner as MainWindow)?.ShowStatus($"{printer.Name}: {health.Summary}");
+            return true;
+        }
+        var body = health.State == PrintDesk.Core.Suite.Readiness.Offline
+            ? "It didn't answer just now: it may be off, or not on this network. If you print anyway, Windows keeps the job until the printer is back."
+            : $"{health.Summary}.\n\nFix it on the printer first, or print anyway: the job waits in the Windows queue until the printer can print it.";
+        return Prompt.Confirm(owner, $"{printer.Name} {PrinterCheck.Problem(health)}", body, "Print anyway", warning: true);
+    }
 
     private static Task WriteAsync(System.Windows.Xps.XpsDocumentWriter writer, DocumentPaginator paginator, System.Printing.PrintTicket? ticket)
     {

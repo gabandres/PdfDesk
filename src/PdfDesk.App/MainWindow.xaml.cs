@@ -108,6 +108,7 @@ public partial class MainWindow : Window
         RestorePlacement();
         BindCommands();
         RefreshRecent();
+        _ = ShowPrintDeskMenuAsync();
 
         TabArea.SizeChanged += (_, _) => LayoutTabs();
         _tabs.CollectionChanged += (_, _) => LayoutTabs();
@@ -1288,6 +1289,7 @@ public partial class MainWindow : Window
             _ = t.ReloadFromDiskAsync($"Reloaded {t.Session.DisplayName}");
         }, t => t.Session.FilePath is not null && !IsSaving(t));
         Bind(Cmd.Print, t => _ = FileActions.Print(this, t), t => t.PageView.PageCount > 0);
+        BindAlways(Cmd.Scan, () => Scanning.ScanToNewTab(this));
         Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this), t => t.PageView.PageCount > 0);
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));
 
@@ -1347,6 +1349,7 @@ public partial class MainWindow : Window
         BindEdit(Cmd.DeleteSelected, Organize.DeleteSelected, t => Organize.HasSelection(t) && t.SelectedPages.Length < t.PageView.PageCount);
         BindEdit(Cmd.InsertPages, t => Organize.InsertFromFile(this, t));
         BindEdit(Cmd.InsertBlank, t => Organize.InsertBlank(this, t));
+        BindEdit(Cmd.InsertFromScanner, t => Scanning.InsertFromScanner(this, t));
         BindEdit(Cmd.ExtractPages, t => Organize.Extract(this, t, this));
         BindEdit(Cmd.SplitDocument, t => Organize.Split(this, t, this), t => t.PageView.PageCount > 1);
         BindEdit(Cmd.MovePages, t => Organize.Move(this, t), t => t.PageView.PageCount > 1);
@@ -1365,6 +1368,22 @@ public partial class MainWindow : Window
         Bind(Cmd.AddNote, t => ToggleTool(t, ViewerTool.AddNote), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.RecognizeText, t => _ = t.RecognizeText(), t => t.Session.IsPdf);
+    }
+
+    /// <summary>File › Printer Settings (PrintDesk): shown only when PrintDesk is installed (checked off the UI thread).</summary>
+    private async Task ShowPrintDeskMenuAsync()
+    {
+        var installed = await Task.Run(() => Desk.PrintDeskPath is not null);
+        PrintDeskMenu.Visibility = installed ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnOpenPrintDesk(object sender, RoutedEventArgs e)
+    {
+        if (!Desk.OpenPrintDesk())
+        {
+            PrintDeskMenu.Visibility = Visibility.Collapsed;
+            ShowToast(new Toast("PrintDesk couldn't be started. Is it still installed?", IsError: true));
+        }
     }
 
     private void OnAttachFile(object sender, RoutedEventArgs e)
