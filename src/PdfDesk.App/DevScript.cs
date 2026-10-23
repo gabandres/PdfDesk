@@ -902,7 +902,7 @@ internal static class DevScript
         {
             var bg = window.TryFindResource("SolidBackgroundFillColorBaseBrush") as Brush ?? Brushes.White;
             dc.DrawRectangle(bg, null, new Rect(0, 0, content.ActualWidth, content.ActualHeight));
-            dc.DrawRectangle(new VisualBrush(content), null, new Rect(0, 0, content.ActualWidth, content.ActualHeight));
+            dc.DrawRectangle(new VisualBrush(content) { Stretch = Stretch.None, AlignmentX = AlignmentX.Left, AlignmentY = AlignmentY.Top, ViewboxUnits = BrushMappingMode.Absolute, Viewbox = new Rect(0, 0, content.ActualWidth, content.ActualHeight), ViewportUnits = BrushMappingMode.Absolute, Viewport = new Rect(0, 0, content.ActualWidth, content.ActualHeight) }, null, new Rect(0, 0, content.ActualWidth, content.ActualHeight));
         }
         bmp.Render(visual);
         var enc = new PngBitmapEncoder();
