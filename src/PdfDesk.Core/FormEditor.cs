@@ -369,6 +369,20 @@ public static partial class FormEditor
         return (raw, null);
     }
 
+    /// <summary>
+    /// Generates the normal appearance of text and choice fields whose widgets lack one, or of all of them when the form
+    /// asks viewers to (/NeedAppearances), e.g. before the fields are flattened into the page.
+    /// </summary>
+    internal static void EnsureAppearances(PdfDocument doc, PdfDictionary acro)
+    {
+        var all = PdfObj.Resolve(acro.Elements["/NeedAppearances"]) is PdfBoolean { Value: true };
+        var fields = new List<Field>();
+        Collect(doc, acro, fields);
+        foreach (var f in fields)
+            if (f.Type is "/Tx" or "/Ch" && (all || f.Widgets.Any(w => PdfObj.Dict(w.Elements["/AP"])?.Elements["/N"] is null)))
+                WriteAppearances(doc, acro, f);
+    }
+
     /// <summary>Generates the normal appearance of every widget of a text or choice field from its current value.</summary>
     private static void WriteAppearances(PdfDocument doc, PdfDictionary? acro, Field f, JsFormHost? js = null)
     {

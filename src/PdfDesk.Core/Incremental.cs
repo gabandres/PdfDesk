@@ -178,7 +178,7 @@ internal static class Incremental
     }
 
     /// <summary>Signature dictionaries (a /ByteRange and /Contents) in the document, at least 1.</summary>
-    private static int CountSignatures(PdfDocument doc)
+    internal static int CountSignatures(PdfDocument doc)
     {
         try
         {

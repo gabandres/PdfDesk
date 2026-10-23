@@ -138,7 +138,7 @@ public static class Redaction
     }
 
     /// <summary>Takes a widget out of the field tree, dropping fields left without widgets.</summary>
-    private static void RemoveWidget(PdfDictionary? acro, PdfDictionary node, HashSet<PdfObject> removed)
+    internal static void RemoveWidget(PdfDictionary? acro, PdfDictionary node, HashSet<PdfObject> removed)
     {
         for (var guard = 0; guard < 64; guard++)
         {
