@@ -53,7 +53,7 @@ public sealed record OptimizeResult(byte[] Data, long SizeBefore, long SizeAfter
 /// wins); images drawn only elsewhere (patterns, annotations, Type 3 glyphs) are left alone. PDFsharp 6.2 can't write
 /// object streams, so none are made. Signed documents need the caller's consent (<see cref="SignedEdits.Run"/> with the
 /// rewrite allowed), as the rewrite invalidates their signatures. An encrypted document (opened with its owner password)
-/// comes out unencrypted, as from every PDFsharp edit: protect it again with <see cref="PdfSecurity.Protect"/>.
+/// keeps its protection (see <see cref="KeptProtection"/>).
 /// </summary>
 public static class Optimizer
 {

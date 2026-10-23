@@ -11,8 +11,11 @@ public sealed class DocumentSession : IDisposable
     private const int MaxUndoSteps = 50;
     private const long MaxUndoBytes = 768L * 1024 * 1024;
 
-    private readonly LinkedList<(byte[] Data, string Label, int Version)> _undo = new();
-    private readonly Stack<(byte[] Data, string Label, int Version)> _redo = new();
+    /// <summary>An undo/redo state: its bytes, and the passwords that open them (a protection change swaps them).</summary>
+    private readonly record struct Step(byte[] Data, string Label, int Version, string? Password, string? OpenPassword);
+
+    private readonly LinkedList<Step> _undo = new();
+    private readonly Stack<Step> _redo = new();
     private int _version;
     private int _savedVersion;
     private int _nextVersion = 1;
@@ -23,6 +26,11 @@ public sealed class DocumentSession : IDisposable
     public byte[] Data { get; private set; }
     /// <summary>The password the document was opened with; replaced by the permissions password once the user gives it for an edit.</summary>
     public string? Password { get; private set; }
+    /// <summary>
+    /// The document's open (user) password when known: given to open it, or entered so an edit could keep it. Edits of
+    /// an AES-256 file opened with its owner password need it (<see cref="KeptProtection.Run{T}"/>).
+    /// </summary>
+    public string? OpenPassword { get; private set; }
     public InputFileTypes FileType { get; }
     public PdfEngine Engine { get; private set; }
     /// <summary>True when the content differs from what is on disk (undoing back to the saved state clears it).</summary>
@@ -60,7 +68,8 @@ public sealed class DocumentSession : IDisposable
         var data = File.ReadAllBytes(path);
         var type = PdfEngine.TypeFromPath(path);
         var engine = PdfEngine.Open(data, type, password);
-        return new DocumentSession(Path.GetFullPath(path), Path.GetFileName(path), data, password, type, engine) { _onDisk = stamp };
+        var openPassword = type == InputFileTypes.PDF && PdfSecurity.IsOpenPassword(data, password) ? password : null;
+        return new DocumentSession(Path.GetFullPath(path), Path.GetFileName(path), data, password, type, engine) { _onDisk = stamp, OpenPassword = openPassword };
     }
 
     /// <summary>A new, unsaved PDF (e.g. the result of Combine or Extract).</summary>
@@ -73,34 +82,51 @@ public sealed class DocumentSession : IDisposable
     }
 
     /// <summary>Uses the permissions (owner) password for edits from now on (after <see cref="OwnerPasswordRequiredException"/>).</summary>
-    public void UsePassword(string password) => Password = password;
+    /// <remarks>A different password that opened the document but couldn't edit it was its open (user) password.</remarks>
+    public void UsePassword(string password)
+    {
+        if (!string.IsNullOrEmpty(Password) && Password != password && OpenPassword is null) OpenPassword = Password;
+        Password = password;
+    }
+
+    /// <summary>Remembers the document's open password (entered so an edit keeps it).</summary>
+    public void UseOpenPassword(string? openPassword) => OpenPassword = openPassword;
 
     /// <summary>Replaces the content with edited bytes, recording an undo step.</summary>
-    public void Commit(byte[] newData, string label)
+    public void Commit(byte[] newData, string label) => Commit(newData, label, Password, OpenPassword);
+
+    /// <summary>
+    /// Replaces the content with edited bytes that open with other passwords (the protection changed), recording an
+    /// undo step: undoing it goes back to the old bytes and passwords.
+    /// </summary>
+    public void Commit(byte[] newData, string label, string? password, string? openPassword)
     {
-        var engine = PdfEngine.Open(newData, FileType, Password);
-        _undo.AddLast((Data, label, _version));
+        var engine = PdfEngine.Open(newData, FileType, password);
+        _undo.AddLast(new Step(Data, label, _version, Password, OpenPassword));
         TrimUndo();
         _redo.Clear();
+        (Password, OpenPassword) = (password, openPassword);
         Swap(newData, engine, _nextVersion++);
     }
 
     public void Undo()
     {
         if (_undo.Last is not { } node) return;
-        var (data, label, version) = node.Value;
-        var engine = PdfEngine.Open(data, FileType, Password);
+        var step = node.Value;
+        var engine = PdfEngine.Open(step.Data, FileType, step.Password);
         _undo.RemoveLast();
-        _redo.Push((Data, label, _version));
-        Swap(data, engine, version);
+        _redo.Push(step with { Data = Data, Version = _version, Password = Password, OpenPassword = OpenPassword });
+        (Password, OpenPassword) = (step.Password, step.OpenPassword);
+        Swap(step.Data, engine, step.Version);
     }
 
     public void Redo()
     {
         if (!_redo.TryPeek(out var step)) return;
-        var engine = PdfEngine.Open(step.Data, FileType, Password);
+        var engine = PdfEngine.Open(step.Data, FileType, step.Password);
         _redo.Pop();
-        _undo.AddLast((Data, step.Label, _version));
+        _undo.AddLast(step with { Data = Data, Version = _version, Password = Password, OpenPassword = OpenPassword });
+        (Password, OpenPassword) = (step.Password, step.OpenPassword);
         Swap(step.Data, engine, step.Version);
     }
 

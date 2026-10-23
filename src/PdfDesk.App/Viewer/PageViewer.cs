@@ -1097,6 +1097,7 @@ public sealed partial class PageViewer : ScrollViewer
             PaintReview(dc, i);
             PaintSigning(dc, i);
             PaintDrawing(dc, i);
+            PaintSpeech(dc, i);
 
             if (_hitsByPage.TryGetValue(i, out var hits))
                 foreach (var hit in hits)

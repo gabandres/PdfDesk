@@ -146,9 +146,10 @@ public class PageEditorTests
         // Editing needs the owner password; the open (user) password alone is refused with a clear message.
         Assert.Contains("owner", Assert.Throws<OwnerPasswordRequiredException>(() => PageEditor.Delete(locked, "secret", [0])).Message);
         var edited = PageEditor.Delete(locked, "secret-owner", [0]);
-        // PDFsharp saves edits without the protection (the app warns before the first edit).
-        using var engine = PdfEngine.Open(edited, InputFileTypes.PDF, null);
-        Assert.False(engine.IsEncrypted);
+        // The edit keeps the protection: the same open password (recovered from the owner password) still opens it.
+        Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(edited, InputFileTypes.PDF, null));
+        using var engine = PdfEngine.Open(edited, InputFileTypes.PDF, "secret");
+        Assert.True(engine.IsEncrypted);
         Assert.Equal(2, engine.PageCount);
         Assert.Contains("Page 2", engine.GetText(0).Text);
     }

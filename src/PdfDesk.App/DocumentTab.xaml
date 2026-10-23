@@ -90,21 +90,41 @@
                         </ListBox.ContextMenu>
                     </ListBox>
 
-                    <Grid x:Name="BookmarksPanel" Visibility="Collapsed">
-                        <TreeView x:Name="Outline" BorderThickness="0" Background="Transparent" VirtualizingPanel.IsVirtualizing="True"
-                                  AutomationProperties.Name="Bookmarks">
-                            <TreeView.ItemTemplate>
-                                <HierarchicalDataTemplate DataType="{x:Type core:OutlineNode}" ItemsSource="{Binding Children}">
-                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" />
-                                </HierarchicalDataTemplate>
-                            </TreeView.ItemTemplate>
-                        </TreeView>
-                        <StackPanel x:Name="NoBookmarks" Margin="16,24" Visibility="Collapsed">
-                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8A4;" FontSize="28" Opacity="0.5" HorizontalAlignment="Left" />
-                            <TextBlock Text="No bookmarks" FontWeight="SemiBold" Margin="0,10,0,4" />
-                            <TextBlock Text="This document doesn't have a table of contents." TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                    <DockPanel x:Name="BookmarksPanel" Visibility="Collapsed">
+                        <!-- Bookmark editing: add for the current view, delete, expand/collapse (more on right-click) -->
+                        <StackPanel x:Name="BookmarkTools" DockPanel.Dock="Top" Orientation="Horizontal" Margin="6,0,6,4">
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.AddBookmark" Content="&#xE710;" FontSize="14"
+                                    ToolTip="Add a bookmark for the current view" AutomationProperties.Name="Add bookmark" />
+                            <Button x:Name="BookmarkDeleteButton" Style="{StaticResource IconButton}" Content="&#xE74D;" FontSize="14" IsEnabled="False"
+                                    ToolTip="Delete the selected bookmark (Del)" AutomationProperties.Name="Delete bookmark" />
+                            <Button x:Name="BookmarkExpandButton" Style="{StaticResource IconButton}" Content="&#xE70D;" FontSize="14"
+                                    ToolTip="Expand all" AutomationProperties.Name="Expand all bookmarks" />
+                            <Button x:Name="BookmarkCollapseButton" Style="{StaticResource IconButton}" Content="&#xE70E;" FontSize="14"
+                                    ToolTip="Collapse all" AutomationProperties.Name="Collapse all bookmarks" />
                         </StackPanel>
-                    </Grid>
+                        <Grid>
+                            <TreeView x:Name="Outline" BorderThickness="0" Background="Transparent" VirtualizingPanel.IsVirtualizing="True"
+                                      AllowDrop="True" AutomationProperties.Name="Bookmarks">
+                                <TreeView.ItemTemplate>
+                                    <HierarchicalDataTemplate DataType="{x:Type app:BookmarkNode}" ItemsSource="{Binding Children}">
+                                        <Grid>
+                                            <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}"
+                                                       FontWeight="{Binding Weight}" FontStyle="{Binding Style}" Visibility="{Binding TitleVisibility}" />
+                                            <TextBox Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding EditorVisibility}"
+                                                     MinWidth="140" Margin="-4,-3,0,-3" AutomationProperties.Name="Bookmark title"
+                                                     IsVisibleChanged="OnBookmarkEditorVisible" PreviewKeyDown="OnBookmarkEditorKey"
+                                                     LostKeyboardFocus="OnBookmarkEditorLostFocus" />
+                                        </Grid>
+                                    </HierarchicalDataTemplate>
+                                </TreeView.ItemTemplate>
+                            </TreeView>
+                            <StackPanel x:Name="NoBookmarks" Margin="16,24" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE8A4;" FontSize="28" Opacity="0.5" HorizontalAlignment="Left" />
+                                <TextBlock Text="No bookmarks" FontWeight="SemiBold" Margin="0,10,0,4" />
+                                <TextBlock x:Name="NoBookmarksText" Text="This document doesn't have a table of contents." TextWrapping="Wrap" Style="{StaticResource Caption}" />
+                            </StackPanel>
+                        </Grid>
+                    </DockPanel>
 
                     <DockPanel x:Name="SearchPanel" Margin="10,0,10,8" Visibility="Collapsed">
                         <TextBox x:Name="SearchBox" DockPanel.Dock="Top" AutomationProperties.Name="Search text" />

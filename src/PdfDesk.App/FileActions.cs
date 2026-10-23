@@ -358,7 +358,7 @@ public static class FileActions
         Row("Pages", s.Engine.PageCount.ToString());
         Row("Page size", $"{Organize.Inches(g.Width)} × {Organize.Inches(g.Height)} in  ({g.Width * 25.4 / 72:0} × {g.Height * 25.4 / 72:0} mm)  — page {page + 1}");
         Row("PDF version", meta?.Version);
-        Row("Encrypted", s.Engine.IsEncrypted ? "Yes" : null);
+        Row("Security", SecurityActions.Describe(s));
         Row("Created by", meta?.Creator);
         Row("Producer", meta?.Producer);
         Row("Created", meta?.Created?.ToString("g"));

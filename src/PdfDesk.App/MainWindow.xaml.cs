@@ -1075,6 +1075,7 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
             Activate();
+            if (FileTools.HandleWindowDrop(this, files)) return; // images: a new PDF of them, or pages of this one
             OpenFiles(files);
         });
     }
@@ -1256,6 +1257,7 @@ public partial class MainWindow : Window
     private void BindCommands()
     {
         BindAlways(Cmd.Open, ShowOpenDialog);
+        BindToolCommands(); // MainWindow.Tools.cs
         BindAlways(Cmd.Combine, () => _ = Organize.Combine(this, this));
         BindAlways(Cmd.Exit, Close);
         BindAlways(Cmd.CommandPalette, OpenPalette);
