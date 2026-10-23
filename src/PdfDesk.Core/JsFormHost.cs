@@ -36,7 +36,13 @@ public static partial class FormEditor
     /// </summary>
     internal sealed class JsFormHost
     {
-        private static readonly TimeSpan ScriptTimeout = TimeSpan.FromMilliseconds(200);
+        private static readonly TimeSpan ScriptTimeout = TimeSpan.FromMilliseconds(500);
+        /// <summary>
+        /// Setting up the engine (the prelude, the host API) is our own code, but its first run includes JIT compiling Jint
+        /// itself, which on a cold or busy machine takes far longer than any form script should: it gets its own limit and
+        /// doesn't count against the scripts' budget.
+        /// </summary>
+        private static readonly TimeSpan SetupTimeout = TimeSpan.FromSeconds(10);
         private const long TotalBudgetMs = 2000; // all scripts of one fill/read together: past it, scripting turns off
         private const int MaxScriptLength = 256 * 1024;
         internal const int MaxDialogsPerEvent = 3;
@@ -178,6 +184,22 @@ public static partial class FormEditor
             }
         }
 
+        /// <summary>Engine setup: under <see cref="SetupTimeout"/>, not charged to the scripts' budget.</summary>
+        private T Setup<T>(Func<T> run)
+        {
+            _timeout.Longer = SetupTimeout;
+            _timeout.Arm();
+            try
+            {
+                return run();
+            }
+            finally
+            {
+                _timeout.Longer = null;
+                _timeout.Arm();
+            }
+        }
+
         /// <summary>Runs host work (a dialog, a request) without charging its time to the script.</summary>
         private T Outside<T>(Func<T> run)
         {
@@ -228,8 +250,8 @@ public static partial class FormEditor
                     o.Interop.Enabled = false; // no CLR types, namespaces or reflection from scripts
                 });
                 _engine = engine;
-                var factory = Guarded(() => engine.Evaluate(JsPrelude.Source));
-                _api = Guarded(() => engine.Invoke(factory, Host(engine))).AsObject();
+                var factory = Setup(() => engine.Evaluate(JsPrelude.Source));
+                _api = Setup(() => engine.Invoke(factory, Host(engine))).AsObject();
                 RunDocumentScripts(engine);
                 return engine;
             }
@@ -872,18 +894,23 @@ public static partial class FormEditor
         {
             private readonly Stopwatch _clock = new();
             private int _paused;
+            private TimeSpan _limit = TimeSpan.Zero;
 
             public override bool IsAmortizable => true;
 
             public override void Check()
             {
-                if (_clock.Elapsed > limit) throw new TimeoutException("form script took too long");
+                if (_clock.Elapsed > _limit) throw new TimeoutException("form script took too long");
             }
+
+            /// <summary>A longer limit while set (engine setup); Jint re-arms the constraint at every run, so it must stick.</summary>
+            public TimeSpan? Longer { get; set; }
 
             public override void Reset() => Arm();
 
             public void Arm()
             {
+                _limit = Longer ?? limit;
                 _paused = 0;
                 _clock.Restart();
             }

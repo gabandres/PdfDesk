@@ -217,10 +217,13 @@ public class SignatureChangeTests
         {
             var text = Encoding.Latin1.GetString(pdf);
             var start = text.LastIndexOf("/Contents <", StringComparison.Ordinal) + "/Contents <".Length;
-            var hexText = text[start..text.IndexOf('>', start)].TrimEnd('0');
-            if (hexText.Length % 2 == 1) hexText += "0";
+            // The zero padding after the CMS can't just be trimmed (the signature may end in zero bytes): read the DER length.
+            var bytes = Convert.FromHexString(text[start..text.IndexOf('>', start)]);
+            var lengthBytes = bytes[1] & 0x7F;
+            var length = bytes[1] < 0x80 ? bytes[1] : bytes.AsSpan(2, lengthBytes).ToArray().Aggregate(0, (n, b) => (n << 8) | b);
+            var header = bytes[1] < 0x80 ? 2 : 2 + lengthBytes;
             var cms = new System.Security.Cryptography.Pkcs.SignedCms();
-            cms.Decode(Convert.FromHexString(hexText));
+            cms.Decode(bytes.AsSpan(0, header + length));
             return (start, cms);
         }
     }
