@@ -13,10 +13,13 @@ internal enum ConsentChoice { Once, Always, Cancel }
 /// </summary>
 internal static class FormActionDialogs
 {
-    /// <summary>Asks before an outward action: "Allow once", "Always allow for this document", or "Cancel" (also Esc).</summary>
+    /// <summary>
+    /// Asks before an outward action: "Allow once", "Always allow for this destination in this document" (the same data
+    /// to the same place; anything else asks again), or "Cancel" (also Esc; it stops the form's script too).
+    /// </summary>
     public static ConsentChoice Consent(Window? owner, string title, string body, string destination) =>
         Show(owner, title, body, destination, "Only continue if you trust this document.", null, "", "SystemFillColorCautionBrush",
-            [("Allow once", true), ("Always allow for this document", false), ("Cancel", false)], focus: 2) switch
+            [("Allow once", true), ("Always allow for this destination in this document", false), ("Cancel", false)], focus: 2) switch
         {
             0 => ConsentChoice.Once,
             1 => ConsentChoice.Always,

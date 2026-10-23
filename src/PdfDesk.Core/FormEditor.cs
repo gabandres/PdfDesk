@@ -164,7 +164,7 @@ public static partial class FormEditor
         if (!changed && rejected.Count > 0 && js.Touched.Count == 0 && !runner.Changed)
         {
             runner.RunDeferred(data);
-            return new FormFillResult(data, rejected, alerts, js.Log, runner.FocusField);
+            return new FormFillResult(data, rejected, [.. runner.Notices, .. alerts], js.Log, runner.FocusField);
         }
 
         // A hybrid form's XFA would keep showing the old values in Acrobat; the AcroForm is now the truth.
@@ -184,7 +184,7 @@ public static partial class FormEditor
         }
         var saved = PdfObj.Save(doc);
         runner.RunDeferred(saved);
-        return new FormFillResult(saved, rejected, alerts, js.Log, runner.FocusField);
+        return new FormFillResult(saved, rejected, [.. runner.Notices, .. alerts], js.Log, runner.FocusField);
     }
 
     /// <summary>
@@ -231,8 +231,42 @@ public static partial class FormEditor
         else f.Dict.Elements.Remove("/I"); // selected indices would contradict a custom value
     }
 
+    /// <summary>
+    /// A check box / radio field's /Opt: the export value of each widget, by its position among the field's widgets
+    /// (Acrobat writes it, with states named "0", "1"..., when export values aren't plain ASCII or repeat); null when absent.
+    /// </summary>
+    private static List<string>? ButtonOptions(Field f)
+    {
+        if (f.Type != "/Btn" || PdfObj.Array(Inherited(f.Dict, "/Opt")) is not { Elements.Count: > 0 } arr) return null;
+        return [.. arr.Elements.Select(e => PdfObj.Str(e) ?? "")];
+    }
+
+    /// <summary>What a check box / radio value means outside the PDF (scripts, submits, exported data): its on state,
+    /// or with /Opt the export value of the widget having that state. "Off" stays "Off".</summary>
+    internal static string ButtonExport(Field f, string state)
+    {
+        if (state is "Off" or "" || ButtonOptions(f) is not { } opt) return state;
+        for (var i = 0; i < f.Widgets.Count && i < opt.Count; i++)
+            if (OnStateOf(f.Widgets[i]) == state) return opt[i];
+        return int.TryParse(state, System.Globalization.NumberStyles.None, PdfObj.Inv, out var k) && k < opt.Count ? opt[k] : state;
+    }
+
+    /// <summary>The on state a check box / radio value stands for: a state name as is, or an /Opt export value mapped to
+    /// the state of the (first) widget carrying it.</summary>
+    private static string ButtonState(Field f, string value)
+    {
+        if (value is "Off" or "") return value;
+        var states = f.Widgets.Select(OnStateOf).ToList();
+        if (states.Contains(value) || ButtonOptions(f) is not { } opt || opt.IndexOf(value) is not (var i and >= 0)) return value;
+        return i < states.Count && states[i] is { } s ? s : i.ToString(PdfObj.Inv);
+    }
+
+    /// <summary>A field's value as scripts and exported data see it (check boxes and radios through their /Opt).</summary>
+    private static string ExportValueOf(Field f) => f.Type == "/Btn" ? ButtonExport(f, ValueOf(f.Dict, f.Type)) : ValueOf(f.Dict, f.Type);
+
     private static void SetButton(Field f, string value)
     {
+        value = ButtonState(f, value);
         var radio = (f.Flags & FfRadio) != 0;
         var off = value is "Off" or "";
         if (off && radio && (f.Flags & FfNoToggleToOff) != 0) return; // the group must keep a selection
@@ -271,7 +305,7 @@ public static partial class FormEditor
         if (calcs.Count == 0) return changed;
 
         IReadOnlyList<string> ValuesOf(string name) =>
-            [.. fields.Where(f => f.Name == name || f.Name.StartsWith(name + ".", StringComparison.Ordinal)).Select(f => ValueOf(f.Dict, f.Type))];
+            [.. fields.Where(f => f.Name == name || f.Name.StartsWith(name + ".", StringComparison.Ordinal)).Select(ExportValueOf)];
 
         foreach (var (f, script) in calcs)
         {

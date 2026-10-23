@@ -58,15 +58,26 @@ public class FormActionTests
             Calls.Add($"goto {page}");
         }
 
-        public void OpenUrl(string url) => Calls.Add($"url {url}");
+        /// <summary>The answer to consent: false = the user declines every outward step.</summary>
+        public bool Allow { get; set; } = true;
 
-        public Task<int> Submit(FormSubmission submission)
+        public bool OpenUrl(string url)
         {
-            Submits.Add(submission);
-            return Task.FromResult(200);
+            Calls.Add($"url {url}");
+            return Allow;
         }
 
-        public void Mail(FormMail mail) => Mails.Add(mail);
+        public Task<int>? Submit(FormSubmission submission)
+        {
+            Submits.Add(submission);
+            return Allow ? Task.FromResult(200) : null;
+        }
+
+        public bool Mail(FormMail mail)
+        {
+            Mails.Add(mail);
+            return Allow;
+        }
         public void Print(int? fromPage, int? toPage) => Calls.Add("print");
 
         public int Alert(FormAlert alert)
@@ -81,8 +92,17 @@ public class FormActionTests
             return Answer;
         }
 
-        public void OpenRemote(string path, int page) => Calls.Add($"remote {path} {page}");
-        public void Launch(string path) => Calls.Add($"launch {path}");
+        public bool OpenRemote(string path, int page)
+        {
+            Calls.Add($"remote {path} {page}");
+            return Allow;
+        }
+
+        public bool Launch(string path)
+        {
+            Calls.Add($"launch {path}");
+            return Allow;
+        }
         public void Named(string name) => Calls.Add($"named {name}");
 
         public byte[]? ImportData(string? suggestedPath)
@@ -468,5 +488,219 @@ public class FormActionTests
     {
         using var keys = Keys("getField\\('f'\\).value = 'hacked'; this.submitForm\\('https://x.test/'\\); app.launchURL\\('https://x.test/'\\);");
         Assert.True(keys.Run("a", "b", 1, 1)!.Accepted); // runs, but writes and outward calls go nowhere
+    }
+
+    [Fact]
+    public void KeystrokeEngineStartsWhenOpenedNotOnTheFirstKeystroke()
+    {
+        using var keys = Keys("AFNumber_Keystroke\\(2, 0, 0, 0, '', true\\);");
+        Assert.True(keys.Warm);
+    }
+
+    [Fact]
+    public void EditDiffAndLengthFit()
+    {
+        Assert.Equal((3, 3, "4"), FieldKeystrokes.Diff("123", "1234"));
+        Assert.Equal((1, 3, ""), FieldKeystrokes.Diff("1234", "14"));
+        Assert.Equal((0, 4, "(555) "), FieldKeystrokes.Diff("555-1234", "(555) 1234")); // only what differs
+        Assert.Equal((3, 3, "-"), FieldKeystrokes.Diff("5551", "555-1"));
+        Assert.Equal((0, 2, "b"), FieldKeystrokes.Diff("\U0001F600", "b")); // a surrogate pair is never split
+        Assert.Equal("ab", FieldKeystrokes.Fit("123", 3, 3, "abcdef", 5));
+        Assert.Equal("abc", FieldKeystrokes.Fit("123", 1, 3, "abcdef", 4));
+        Assert.Equal("abcdef", FieldKeystrokes.Fit("123", 3, 3, "abcdef", 0));
+        Assert.Equal("", FieldKeystrokes.Fit("12345", 5, 5, "x", 5));
+        Assert.Equal("a", FieldKeystrokes.Fit("123", 3, 3, "a\U0001F600", 5)); // the pair doesn't fit whole: left out
+    }
+
+    // ---------------- Outward caps, consent and hover ----------------
+
+    [Fact]
+    public void OutwardCallsAreCappedPerRunAndTheScriptStops()
+    {
+        var host = new FakeHost();
+        var doc = Doc([
+            Text("a", 0),
+            Button("loop", 1, Js("for \\(;;\\) app.launchURL\\('https://x.test/'\\);")),
+        ]);
+        var r = Run(doc, "loop", host);
+        Assert.Equal(3, host.Calls.Count(c => c.StartsWith("url ", StringComparison.Ordinal)));
+        Assert.Contains(r.Alerts, a => a.Contains("stopped", StringComparison.Ordinal));
+        Assert.Contains(r.Log, l => l.Contains("too many outward", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void OutwardCallsAreCappedPerDocumentPerMinute()
+    {
+        var host = new FakeHost();
+        var doc = Doc([Button("two", 0, Js("app.launchURL\\('https://x.test/1'\\); app.mailMsg\\(false, 'a@x.test'\\);"))]);
+        var notices = new List<int>();
+        for (var i = 0; i < 4; i++) notices.Add(Run(doc, "two", host).Alerts.Count);
+        Assert.Equal(6, host.Calls.Count(c => c.StartsWith("url ", StringComparison.Ordinal)) + host.Mails.Count);
+        Assert.Equal([0, 0, 0, 1], notices);
+        // Another document (another host) has its own allowance.
+        var other = new FakeHost();
+        Run(doc, "two", other);
+        Assert.Single(other.Mails);
+    }
+
+    [Fact]
+    public void DeclinedConsentStopsTheScriptAndTheActionChain()
+    {
+        var host = new FakeHost { Allow = false };
+        var doc = Doc([
+            Text("a", 0, "/V (before)"),
+            Button("js", 1, Js("app.launchURL\\('https://x.test/1'\\); getField\\('a'\\).value = 'after'; app.launchURL\\('https://x.test/2'\\);")),
+            Button("chain", 2, "<< /S /URI /URI (https://x.test/3) /Next << /S /JavaScript /JS (getField\\('a'\\).value = 'next';) >> >>"),
+            Button("send", 3, Js("this.submitForm\\('https://x.test/s'\\); getField\\('a'\\).value = 'sent';")),
+        ]);
+        var r = Run(doc, "js", host);
+        Assert.Equal(["url https://x.test/1"], host.Calls);
+        Assert.Null(r.Data);
+        Assert.Contains(r.Log, l => l.Contains("stopped", StringComparison.Ordinal));
+        Assert.Null(Run(doc, "chain", host).Data);
+        Assert.Null(Run(doc, "send", host).Data);
+        Assert.Single(host.Submits);
+        // Allowed, the same scripts carry on.
+        Assert.Equal("after", ValueOf(Run(doc, "js", new FakeHost()).Data!, "a"));
+    }
+
+    [Fact]
+    public void AlwaysAllowCoversTheDestinationAndWhatIsSent()
+    {
+        FormSubmission Sub(string url, SubmitFormat format, params string[] fields) => new(url, "POST", "x", [], format, fields.Length, fields);
+        var fdf = FormConsent.SubmitKey(Sub("https://x.test/s?a=1", SubmitFormat.Fdf, "a", "b"));
+        Assert.Equal(fdf, FormConsent.SubmitKey(Sub("https://x.test/s?a=2", SubmitFormat.Fdf, "b", "a")));
+        Assert.NotEqual(fdf, FormConsent.SubmitKey(Sub("https://x.test/s", SubmitFormat.Fdf, "a", "b", "ssn")));
+        Assert.NotEqual(fdf, FormConsent.SubmitKey(Sub("https://x.test/s", SubmitFormat.Pdf, "a", "b")));
+        Assert.NotEqual(fdf, FormConsent.SubmitKey(Sub("https://x.test/t", SubmitFormat.Fdf, "a", "b")));
+        Assert.NotEqual(fdf, FormConsent.SubmitKey(Sub("https://x.test/s", SubmitFormat.Fdf, "a", "b") with { Method = "GET" }));
+
+        var msg = new FormMail("a@x.test; B@x.test", "", "", "Hi", "", null, null);
+        Assert.Equal(FormConsent.MailKey(msg), FormConsent.MailKey(msg with { To = "b@x.test,a@x.test", Subject = "Other" }));
+        Assert.NotEqual(FormConsent.MailKey(msg), FormConsent.MailKey(msg with { Bcc = "spy@x.test" }));
+        var data = msg with { Attachment = [1], AttachmentName = "form.fdf", Fields = ["a"] };
+        var pdf = msg with { Attachment = [1], AttachmentName = "form.pdf" };
+        Assert.Equal(3, new[] { FormConsent.MailKey(msg), FormConsent.MailKey(data), FormConsent.MailKey(pdf) }.Distinct().Count());
+        Assert.NotEqual(FormConsent.MailKey(data), FormConsent.MailKey(data with { Fields = ["a", "b"] }));
+    }
+
+    [Fact]
+    public void SubmitsAndMailsSayWhichFieldsTheyCarry()
+    {
+        var host = new FakeHost();
+        var doc = Doc([
+            Text("a", 0, "/V (1)"),
+            Text("b", 1, "/V (2)"),
+            Button("go", 2, Js("this.submitForm\\({cURL: 'https://x.test/s', aFields: ['a']}\\); this.mailForm\\(false, 'z@x.test'\\);")),
+        ]);
+        Run(doc, "go", host);
+        Assert.Equal(["a"], host.Submits.Single().Fields);
+        Assert.Equal(["a", "b"], host.Mails.Single().Fields);
+    }
+
+    [Fact]
+    public void SetFocusFromFocusOrBlurScriptsIsIgnored()
+    {
+        var doc = Doc([
+            Text("a", 0, "/AA << /Fo << /S /JavaScript /JS (getField\\('b'\\).setFocus\\(\\);) >> /Bl << /S /JavaScript /JS (getField\\('b'\\).setFocus\\(\\);) >> " +
+                "/U << /S /JavaScript /JS (getField\\('b'\\).setFocus\\(\\);) >> >>"),
+            Text("b", 1, "/AA << /Fo << /S /JavaScript /JS (getField\\('a'\\).setFocus\\(\\);) >> >>"),
+        ]);
+        var host = new FakeHost();
+        Assert.Null(Run(doc, "a", host, FormTrigger.Focus).FocusField);
+        Assert.Null(Run(doc, "a", host, FormTrigger.Blur).FocusField);
+        Assert.Null(Run(doc, "b", host, FormTrigger.Focus).FocusField);
+        Assert.Equal("b", Run(doc, "a", host, FormTrigger.Up).FocusField); // a click may still move it
+    }
+
+    [Fact]
+    public void HoverRunsScriptsWithoutDialogsPrintingOrOutwardActions()
+    {
+        var host = new FakeHost();
+        var enter = Js("app.alert\\('hi'\\); app.response\\('?'\\); print\\(\\); app.launchURL\\('https://x.test/'\\); this.resetForm\\(\\); " +
+            "getField\\('a'\\).display = display.hidden;");
+        var exit = "<< /S /Named /N /Print /Next [<< /S /Named /N /NextPage >> << /S /URI /URI (https://x.test/u) >> << /S /SubmitForm /F (https://x.test/s) >>] >>";
+        var doc = Doc([
+            Text("a", 0, "/V (keep)"),
+            $"<< {W} /FT /Btn /Ff 65536 /T (hover) /Rect [{Rect(1)}] /AA << /E {enter} /X {exit} >> >>",
+        ], pages: 2);
+        var r = Run(doc, "hover", host, FormTrigger.Enter);
+        Assert.Empty(host.Alerts);
+        Assert.Empty(host.Calls);
+        Assert.Empty(r.Alerts);
+        Assert.NotNull(r.Data); // the harmless part (hiding a field) still happened
+        Assert.DoesNotContain(FormEditor.Read(r.Data!, null), w => w.FieldName == "a");
+        Assert.Contains(r.Log, l => l.Contains("resetForm ignored", StringComparison.Ordinal));
+
+        Run(doc, "hover", host, FormTrigger.Exit);
+        Assert.Equal(["goto 1"], host.Calls); // only the navigation
+        Assert.Empty(host.Submits);
+
+        // Clicked, the same script may open dialogs.
+        var click = new FakeHost();
+        var clickDoc = Doc([Text("a", 0), $"<< {W} /FT /Btn /Ff 65536 /T (b) /Rect [{Rect(1)}] /A {enter} >>"]);
+        Run(clickDoc, "b", click);
+        Assert.Single(click.Alerts);
+    }
+
+    // ---------------- Check boxes and radios with /Opt ----------------
+
+    /// <summary>
+    /// A radio group "r" whose two widgets (states /0 and /1) export the same non-ASCII value "Été" through /Opt (as
+    /// Acrobat writes it), a check box "cb" exporting "Oui" for state /0, a text field "a" and a button "go".
+    /// </summary>
+    private static byte[] OptForm(string script, string radioValue = "/1", string checkValue = "/0")
+    {
+        // Objects: 5 a, 6 r, 7 cb, 8 go, 9-10 r's widgets, 11 the appearance.
+        string Kid(string state, int row) =>
+            $"<< {W} /Parent 6 0 R /Rect [{Rect(row)}] /AS /{(radioValue == "/" + state ? state : "Off")} /AP << /N << /{state} 11 0 R /Off 11 0 R >> >> >>";
+        return Doc([
+            Text("a", 0),
+            $"<< /FT /Btn /Ff 49152 /T (r) /Opt [(Été) (Été)] /V {radioValue} /Kids [9 0 R 10 0 R] >>",
+            $"<< {W} /FT /Btn /T (cb) /Rect [{Rect(3)}] /Opt [(Oui)] /V {checkValue} /AS {checkValue} /AP << /N << /0 11 0 R /Off 11 0 R >> >> >>",
+            Button("go", 4, Js(script)),
+        ], more: [Kid("0", 1), Kid("1", 2), Core2Pdf.Stream("")]);
+    }
+
+    [Fact]
+    public void OptExportValuesAreWhatScriptsSee()
+    {
+        var host = new FakeHost();
+        var doc = OptForm("var r = getField\\('r'\\), c = getField\\('cb'\\); getField\\('a'\\).value = [r.value, r.exportValues.join\\('+'\\), " +
+            "r.isBoxChecked\\(0\\), r.isBoxChecked\\(1\\), c.value, c.exportValues[0]].join\\('|'\\);");
+        Assert.Equal("Été|Été+Été|false|true|Oui|Oui", ValueOf(Run(doc, "go", host).Data!, "a"));
+
+        // checkThisBox picks the widget, even when the export values are the same.
+        var set = OptForm("getField\\('r'\\).checkThisBox\\(0\\); getField\\('a'\\).value = getField\\('r'\\).isBoxChecked\\(0\\) + '' + getField\\('r'\\).isBoxChecked\\(1\\);");
+        Assert.Equal("truefalse", ValueOf(Run(set, "go", host).Data!, "a"));
+
+        // Setting the export value turns its widget on; "Off" clears.
+        var byValue = OptForm("getField\\('cb'\\).value = 'Off'; var a = getField\\('cb'\\).value; getField\\('cb'\\).value = 'Oui'; " +
+            "getField\\('a'\\).value = a + '>' + getField\\('cb'\\).value;", checkValue: "/Off");
+        var data = Run(byValue, "go", host).Data!;
+        Assert.Equal("Off>Oui", ValueOf(data, "a"));
+        Assert.Equal("0", ValueOf(data, "cb")); // stored as the state name
+    }
+
+    [Fact]
+    public void OptExportValuesAreSubmittedAndImported()
+    {
+        var host = new FakeHost();
+        Run(OptForm("this.submitForm\\('https://x.test/s'\\); this.submitForm\\({cURL: 'https://x.test/h', cSubmitAs: 'HTML'}\\);"), "go", host);
+        var fdf = FormData.Parse(host.Submits[0].Body)!;
+        Assert.Equal(["Été"], fdf["r"]);
+        Assert.Equal(["Oui"], fdf["cb"]);
+        var html = Encoding.ASCII.GetString(host.Submits[1].Body);
+        Assert.Contains("cb=Oui", html, StringComparison.Ordinal);
+        Assert.Contains("r=%C3%89t%C3%A9", html, StringComparison.Ordinal);
+
+        // Imported FDF data with export values selects the matching states.
+        var import = new FakeHost { ImportBytes = FormData.Fdf([new FormData.Entry("cb", ["Oui"], true), new FormData.Entry("r", ["Été"], true)], null) };
+        var r = Run(OptForm("this.importAnFDF\\(\\);", radioValue: "/Off", checkValue: "/Off"), "go", import);
+        Assert.Equal("0", ValueOf(r.Data!, "cb"));
+
+        // SetValues takes export values as well as state names.
+        var filled = FormEditor.SetValues(OptForm("1;", checkValue: "/Off"), null, new Dictionary<string, string> { ["cb"] = "Oui" });
+        Assert.Equal("0", ValueOf(filled, "cb"));
     }
 }

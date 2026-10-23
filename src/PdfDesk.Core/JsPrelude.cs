@@ -14,6 +14,94 @@ internal static class JsPrelude
   'use strict';
   var G = globalThis;
 
+  // Built-ins that make one big string in a single call are checked before they allocate (the engine's memory limit
+  // only notices afterwards): no result over MAX_TEXT characters. Arrays are capped by the engine (MaxArraySize).
+  var MAX_TEXT = 1048576;
+  function tooLong() { throw new RangeError('Form scripts can\'t build text longer than ' + MAX_TEXT + ' characters'); }
+  function guard(proto, name, wrap) {
+    var native = proto[name];
+    Object.defineProperty(proto, name, { value: wrap(native), writable: true, configurable: true, enumerable: false });
+  }
+  var sp = String.prototype;
+  guard(sp, 'repeat', function (native) {
+    return function repeat(count) {
+      var n = Number(count);
+      if (this !== null && this !== undefined && String(this).length * n > MAX_TEXT) tooLong();
+      return native.call(this, count);
+    };
+  });
+  function padder(native) {
+    return function (maxLength, fill) {
+      var n = Number(maxLength);
+      if (n > MAX_TEXT && this !== null && this !== undefined && n > String(this).length && (fill === undefined || String(fill) !== '')) tooLong();
+      return native.call(this, maxLength, fill);
+    };
+  }
+  guard(sp, 'padStart', padder);
+  guard(sp, 'padEnd', padder);
+  guard(sp, 'concat', function (native) {
+    return function concat() {
+      if (this === null || this === undefined) return native.apply(this, arguments);
+      var parts = [], total = String(this).length;
+      for (var i = 0; i < arguments.length; i++) {
+        parts.push(String(arguments[i]));
+        total += parts[i].length;
+        if (total > MAX_TEXT) tooLong();
+      }
+      return native.apply(String(this), parts);
+    };
+  });
+  function replacer(native, all) {
+    return function (pattern, replacement) {
+      if (this === null || this === undefined) return native.call(this, pattern, replacement);
+      var s = String(this);
+      if (typeof replacement === 'function') {
+        var f = replacement, total = s.length;
+        replacement = function () {
+          var r = String(f.apply(this, arguments));
+          total += r.length;
+          if (total > MAX_TEXT) tooLong();
+          return r;
+        };
+      } else {
+        // Bound the result: every match takes the replacement, whose $-patterns can each bring back up to the whole text.
+        var text = String(replacement), dollars = text.split('$').length - 1;
+        var each = text.length + dollars * s.length;
+        if (s.length + each > MAX_TEXT) {
+          var global = all || (pattern instanceof RegExp && pattern.global), count = 1;
+          if (global) {
+            count = pattern instanceof RegExp ? (s.match(pattern) || []).length : s.split(String(pattern)).length - 1;
+            if (pattern instanceof RegExp) pattern.lastIndex = 0;
+          }
+          if (s.length + count * each > MAX_TEXT) tooLong();
+        }
+      }
+      return native.call(s, pattern, replacement);
+    };
+  }
+  guard(sp, 'replace', function (native) { return replacer(native, false); });
+  guard(sp, 'replaceAll', function (native) { return replacer(native, true); });
+  var joining = [];
+  guard(Array.prototype, 'join', function (native) {
+    return function join(separator) {
+      var o = Object(this), len = Math.min(Number(o.length) || 0, 4294967295);
+      if (joining.indexOf(o) >= 0) return ''; // an array inside itself
+      var sep = separator === undefined ? ',' : String(separator), parts = [], total = 0;
+      joining.push(o);
+      try {
+        for (var i = 0; i < len; i++) {
+          var e = o[i], t = e === undefined || e === null ? '' : String(e);
+          total += t.length + (i > 0 ? sep.length : 0);
+          if (total > MAX_TEXT) tooLong();
+          parts.push(t);
+        }
+      } finally {
+        joining.pop();
+      }
+      return native.call(parts, sep);
+    };
+  });
+
   var color = {
     transparent: ['T'], black: ['G', 0], white: ['G', 1], red: ['RGB', 1, 0, 0], green: ['RGB', 0, 1, 0],
     blue: ['RGB', 0, 0, 1], cyan: ['CMYK', 1, 0, 0, 0], magenta: ['CMYK', 0, 1, 0, 0], yellow: ['CMYK', 0, 0, 1, 0],
@@ -45,16 +133,9 @@ internal static class JsPrelude
   });
   fp.getArray = function () { return h.kids(this.name).map(function (n) { return new Field(n); }); };
   fp.getItemAt = function (i, bExport) { return h.item(this.name, i, bExport !== false); };
-  fp.isBoxChecked = function (i) {
-    var ev = this.exportValues, v = this.valueAsString;
-    return v !== 'Off' && v !== '' && (ev.length === 0 || ev[i | 0] === v);
-  };
+  fp.isBoxChecked = function (i) { return h.boxChecked(this.name, i | 0); };
   fp.isDefaultChecked = function () { return false; };
-  fp.checkThisBox = function (i, b) {
-    var ev = this.exportValues;
-    if (b === false) { if (this.isBoxChecked(i)) this.value = 'Off'; }
-    else if (ev.length > (i | 0)) this.value = ev[i | 0];
-  };
+  fp.checkThisBox = function (i, b) { h.checkBox(this.name, i | 0, b !== false); };
   var noop = function () {};
   ['setAction', 'setLock', 'buttonSetCaption', 'buttonSetIcon', 'buttonImportIcon', 'signatureSetSeedValue'
   ].forEach(function (n) { fp[n] = noop; });
@@ -390,6 +471,7 @@ internal static class JsPrelude
 
   return {
     begin: function (name, target, value, willCommit, change, selStart, selEnd) {
+      joining.length = 0; // (a script stopped inside join leaves it behind)
       var t = target ? new Field(target) : null;
       G.event = {
         name: name, type: 'Field', value: value, change: change || '', changeEx: '', willCommit: !!willCommit, rc: true,

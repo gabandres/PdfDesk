@@ -159,7 +159,9 @@ public partial class DocumentTab
     /// <summary>
     /// Carries out form actions for this tab. Calls arrive on a background thread; UI work is marshalled to the tab's
     /// dispatcher. Nothing leaves the document without a consent dialog naming the destination ("Always allow" lasts
-    /// for this tab's session, per destination); programs are never started and network shares never opened.
+    /// for this tab's session, per destination and per kind of data sent: see <see cref="FormConsent"/>); programs are
+    /// never started and network shares never opened. Each method reports whether the step went ahead, so a declined
+    /// one stops the script that asked.
     /// </summary>
     private sealed class FormActionHost(DocumentTab tab) : IFormActionHost
     {
@@ -188,10 +190,11 @@ public partial class DocumentTab
 
         private Window? Owner => Window.GetWindow(tab);
 
-        private bool Consent(string kind, string title, string body, string destination) => Ui(() =>
+        /// <summary>Asks (unless "Always allow" was chosen for this <paramref name="key"/>: destination and what is sent).</summary>
+        private bool Consent(string kind, string title, string body, string destination, string? key = null) => Ui(() =>
         {
             if (tab._disposed) return false;
-            var key = kind + "\n" + destination;
+            key ??= kind + "\n" + destination;
             if (_always.Contains(key)) return true;
             var choice = FormActionDialogs.Consent(Owner, title, body, destination);
             if (choice == ConsentChoice.Always) _always.Add(key);
@@ -207,25 +210,27 @@ public partial class DocumentTab
             return 0;
         });
 
-        public void OpenUrl(string url)
+        public bool OpenUrl(string url)
         {
             if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || u.Scheme is not ("http" or "https" or "mailto"))
             {
                 Toast($"The form tried to open {Short(url)}. Only web and email links can be opened from a form.", error: true);
-                return;
+                return false;
             }
             var mail = u.Scheme == "mailto";
-            if (Consent("url", mail ? "Write an email?" : "Open a web page?",
+            if (!Consent("url", mail ? "Write an email?" : "Open a web page?",
                     mail ? "The form wants to start an email in your email app, to:" : "The form wants to open this address in your browser:", u.OriginalString))
-                Post(() => Shell.Open(u.AbsoluteUri));
+                return false;
+            Post(() => Shell.Open(u.AbsoluteUri));
+            return true;
         }
 
-        public Task<int> Submit(FormSubmission s)
+        public Task<int>? Submit(FormSubmission s)
         {
             if (!Uri.TryCreate(s.Url, UriKind.Absolute, out var u) || u.Scheme is not ("http" or "https"))
             {
                 Toast($"The form tried to send its data to {Short(s.Url)}. Form data can only be sent to web addresses (http or https).", error: true);
-                return Task.FromResult(0);
+                return null;
             }
             var what = s.Format switch
             {
@@ -235,8 +240,9 @@ public partial class DocumentTab
                 _ => $"the values of {s.FieldCount} field{Plural(s.FieldCount)} (web form{(s.Method == "GET" ? ", in the address" : $", {Size(s.Body.Length)}")})",
             };
             var destination = $"{s.Method} {u.GetLeftPart(UriPartial.Path)}";
-            if (!Consent("submit", "Send form data?", $"The form wants to send {what} to this address. Nothing is sent unless you allow it.", destination))
-                return Task.FromResult(0);
+            if (!Consent("submit", "Send form data?", $"The form wants to send {what} to this address. Nothing is sent unless you allow it.", destination,
+                    FormConsent.SubmitKey(s)))
+                return null;
             return Send(u, s);
         }
 
@@ -271,12 +277,14 @@ public partial class DocumentTab
             }
         }
 
-        public void Mail(FormMail m)
+        public bool Mail(FormMail m)
         {
             var attachment = m.Attachment is null ? "" : $" The {(m.AttachmentName?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true ? "document" : "form data")} " +
                 $"({Size(m.Attachment.Length)}) is saved to a temporary folder for you to attach.";
             var to = m.To.Length > 0 ? m.To : "(you choose)";
-            if (!Consent("mail", "Write an email?", $"The form wants to start an email in your email app.{attachment}", $"mailto:{to}")) return;
+            var copies = string.Join("", new[] { ("cc", m.Cc), ("bcc", m.Bcc) }.Where(x => x.Item2.Length > 0).Select(x => $"\n{x.Item1}: {Short(x.Item2)}"));
+            if (!Consent("mail", "Write an email?", $"The form wants to start an email in your email app.{attachment}", $"mailto:{Short(to)}{copies}", FormConsent.MailKey(m)))
+                return false;
             string? path = null;
             if (m.Attachment is not null)
             {
@@ -291,7 +299,7 @@ public partial class DocumentTab
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     Toast($"Couldn't save the attachment: {ex.Message}", error: true);
-                    return;
+                    return false;
                 }
             }
             var parts = new List<string>();
@@ -316,6 +324,7 @@ public partial class DocumentTab
                     tab.Notify($"Attach {Path.GetFileName(path)} to the email (its folder is open).");
                 }
             });
+            return true;
         }
 
         public void Print(int? fromPage, int? toPage) => Post(() => Cmd.Print.Execute(null, tab.Viewer));
@@ -336,20 +345,21 @@ public partial class DocumentTab
             }
         });
 
-        public void OpenRemote(string path, int page)
+        public bool OpenRemote(string path, int page)
         {
             if (Resolve(path) is not { } full || !Path.GetExtension(full).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
             {
                 Toast($"The form tried to open {Short(path)}, which isn't a PDF on this computer.", error: true);
-                return;
+                return false;
             }
             if (!File.Exists(full))
             {
                 Toast($"The form tried to open {Path.GetFileName(full)}, which can't be found.", error: true);
-                return;
+                return false;
             }
-            if (!Consent("file", "Open another PDF?", $"The form wants to open this PDF in a new tab{(page > 0 ? $", at page {page + 1}" : "")}:", full)) return;
+            if (!Consent("file", "Open another PDF?", $"The form wants to open this PDF in a new tab{(page > 0 ? $", at page {page + 1}" : "")}:", full)) return false;
             Post(() => _ = OpenPdf(full, page));
+            return true;
         }
 
         private async Task OpenPdf(string path, int page)
@@ -360,32 +370,33 @@ public partial class DocumentTab
                 t.PageView.GoToPage(page);
         }
 
-        public void Launch(string path)
+        public bool Launch(string path)
         {
             if (Resolve(path) is not { } full)
             {
                 Toast($"The form tried to open {Short(path)}, which isn't a file on this computer.", error: true);
-                return;
+                return false;
             }
             var ext = Path.GetExtension(full);
             if (!DocumentTypes.Contains(ext))
             {
                 Log.Write($"Form Launch action refused: {Path.GetFileName(full)}");
                 Toast($"The form tried to start {Path.GetFileName(full)}. PdfDesk never runs programs or scripts from a document.", error: true);
-                return;
+                return false;
             }
             if (!File.Exists(full))
             {
                 Toast($"The form tried to open {Path.GetFileName(full)}, which can't be found.", error: true);
-                return;
+                return false;
             }
             var pdf = ext.Equals(".pdf", StringComparison.OrdinalIgnoreCase);
-            if (!Consent("file", "Open a file?", pdf ? "The form wants to open this PDF in a new tab:" : "The form wants to open this file with its default app:", full)) return;
+            if (!Consent("file", "Open a file?", pdf ? "The form wants to open this PDF in a new tab:" : "The form wants to open this file with its default app:", full)) return false;
             Post(() =>
             {
                 if (pdf) _ = OpenPdf(full, 0);
                 else Shell.Open(full);
             });
+            return true;
         }
 
         public byte[]? ImportData(string? suggestedPath)
