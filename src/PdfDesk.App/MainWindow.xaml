@@ -142,6 +142,8 @@
                                     <MenuItem x:Name="ContinuousMenu" Command="app:Cmd.LayoutContinuous" />
                                     <MenuItem x:Name="FacingMenu" Command="app:Cmd.LayoutFacing" />
                                     <MenuItem x:Name="CoverMenu" Command="app:Cmd.LayoutCover" />
+                                    <MenuItem Command="app:Cmd.RotateViewRight" />
+                                    <MenuItem Command="app:Cmd.RotateViewLeft" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.FirstPage" />
                                     <MenuItem Command="app:Cmd.PrevPage" />

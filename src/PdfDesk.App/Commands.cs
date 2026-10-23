@@ -52,6 +52,8 @@ public static class Cmd
     public static readonly RoutedUICommand LayoutContinuous = Make("_Continuous", nameof(LayoutContinuous), K(Key.D5, ModifierKeys.Control));
     public static readonly RoutedUICommand LayoutFacing = Make("_Two Pages", nameof(LayoutFacing), K(Key.D6, ModifierKeys.Control));
     public static readonly RoutedUICommand LayoutCover = Make("Two Pages with Cover", nameof(LayoutCover), K(Key.D7, ModifierKeys.Control));
+    public static readonly RoutedUICommand RotateViewRight = Make("Rotate _View Clockwise", nameof(RotateViewRight), K(Key.OemPlus, ModifierKeys.Control | ModifierKeys.Shift, "Ctrl+Shift++"), K(Key.Add, ModifierKeys.Control | ModifierKeys.Shift));
+    public static readonly RoutedUICommand RotateViewLeft = Make("Rotate View Countercloc_kwise", nameof(RotateViewLeft), K(Key.OemMinus, ModifierKeys.Control | ModifierKeys.Shift, "Ctrl+Shift+-"), K(Key.Subtract, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand NavPane = Make("_Navigation Pane", nameof(NavPane), K(Key.F4));
     public static readonly RoutedUICommand FullScreen = Make("_Full Screen", nameof(FullScreen), K(Key.F11));
     public static readonly RoutedUICommand FirstPage = Make("_First Page", nameof(FirstPage), K(Key.Home, ModifierKeys.Control));

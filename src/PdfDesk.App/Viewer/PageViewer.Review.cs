@@ -71,22 +71,37 @@ public sealed partial class PageViewer
         RedactionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>The selected text's line boxes per page (page space), for text markup and "redact selected text".</summary>
-    public List<(int Page, List<RectD> Rects)> GetSelectionLineRects()
+    /// <summary>
+    /// The selected text's line boxes per page (page space), for text markup and "redact selected text". Pages whose
+    /// text isn't loaded yet are read on a background thread (a selection can span thousands of pages); reports
+    /// (pages done, total pages).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The document was edited or closed meanwhile.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired.</exception>
+    public async Task<List<(int Page, List<RectD> Rects)>> GetSelectionLineRectsAsync(IProgress<(int Done, int Total)>? progress = null, CancellationToken cancel = default)
     {
-        var result = new List<(int, List<RectD>)>();
         var (from, to) = OrderedSelection();
-        if (from is not { } a || to is not { } b || _engine is null) return result;
-        for (var p = a.Page; p <= Math.Min(b.Page, PageCount - 1); p++)
+        if (from is not { } a || to is not { } b || _engine is null) return [];
+        var engine = _engine;
+        var last = Math.Min(b.Page, PageCount - 1);
+        var cached = new Dictionary<int, PageText>();
+        for (var p = a.Page; p <= last; p++)
+            if (_texts.TryGetValue(p, out var t)) cached[p] = t;
+        var total = last - a.Page + 1;
+        return await Task.Run(() =>
         {
-            var text = _texts.TryGetValue(p, out var t) ? t : _engine.GetText(p);
-            var start = p == a.Page ? a.Caret : 0;
-            var end = p == b.Page ? Math.Min(b.Caret, text.Text.Length) : text.Text.Length;
-            if (end <= start) continue;
-            var rects = text.GetRects(start, end).Where(r => !r.IsEmpty).ToList();
-            if (rects.Count > 0) result.Add((p, rects));
-        }
-        return result;
+            var result = new List<(int, List<RectD>)>();
+            for (var p = a.Page; p <= last; p++)
+            {
+                cancel.ThrowIfCancellationRequested();
+                var text = cached.TryGetValue(p, out var t) ? t : engine.GetText(p, cache: total <= 8, cancel);
+                var start = p == a.Page ? a.Caret : 0;
+                var end = p == b.Page ? Math.Min(b.Caret, text.Text.Length) : text.Text.Length;
+                if (end > start && text.GetRects(start, end).Where(r => !r.IsEmpty).ToList() is { Count: > 0 } rects) result.Add((p, rects));
+                progress?.Report((p - a.Page + 1, total));
+            }
+            return result;
+        }, cancel);
     }
 
     /// <summary>Dev/test entry: selects the text between two page points, like a drag with the Select text tool.</summary>
@@ -106,15 +121,14 @@ public sealed partial class PageViewer
     internal Point? DevPointIn(Visual root, int page, double x, double y)
     {
         if (_engine is null || page < 0 || page >= PageCount || page >= _rects.Length) return null;
-        var k = _zoom * PtToDip;
-        var sp = new Point(_rects[page].X + x * k, _rects[page].Y + y * k);
+        var sp = _rects[page].IsEmpty ? new Point(double.NaN, double.NaN) : ToSurfacePoint(page, x, y);
         var vp = Viewport;
         vp.Inflate(-4, -4);
         if (!vp.Contains(sp))
         {
             EnsureVisible(page, new RectD(x - 2, y - 2, 4, 4));
             UpdateLayout();
-            sp = new Point(_rects[page].X + x * k, _rects[page].Y + y * k);
+            sp = ToSurfacePoint(page, x, y);
         }
         return _surface.TransformToAncestor(root).Transform(sp);
     }

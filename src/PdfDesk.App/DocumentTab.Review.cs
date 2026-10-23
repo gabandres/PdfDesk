@@ -321,7 +321,7 @@ public partial class DocumentTab
         Viewer.NoteRequested += (_, n) => _ = AddNoteAt(n.PageIndex, n.X, n.Y, null);
         Viewer.AnnotationActivated += (_, a) => _ = EditComment(a);
 
-        CtxRedactText.Click += (_, _) => RedactSelection();
+        CtxRedactText.Click += (_, _) => _ = RedactSelection();
         Viewer.ContextMenuOpening += (_, _) =>
         {
             var markup = Session.IsPdf && Viewer.HasSelection;
@@ -544,7 +544,7 @@ public partial class DocumentTab
             Notify("Select at most 50 pages of text to mark it up.", error: true);
             return false;
         }
-        var parts = Viewer.GetSelectionLineRects();
+        if (await SelectionLineRects("Marking up text") is not { } parts) return false;
         if (parts.Count == 0)
         {
             Notify("The selection has no text to mark.");
@@ -1040,11 +1040,36 @@ public partial class DocumentTab
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Marks the selected text's lines for redaction.</summary>
-    public int RedactSelection()
+    /// <summary>
+    /// The selection's line boxes, read in the background; a progress window with Cancel shows if that takes a while.
+    /// Null when cancelled or the document changed meanwhile.
+    /// </summary>
+    private async Task<List<(int Page, List<RectD> Rects)>?> SelectionLineRects(string title)
+    {
+        var engine = Viewer.Engine;
+        using var prompt = new ProgressPrompt(Window.GetWindow(this), title, "Reading the selected text…");
+        try
+        {
+            var parts = await Viewer.GetSelectionLineRectsAsync(
+                new Progress<(int Done, int Total)>(p => prompt.Report($"Reading page {p.Done:N0} of {p.Total:N0}…", (double)p.Done / p.Total)), prompt.Token);
+            return ReferenceEquals(engine, Viewer.Engine) ? parts : null;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (ObjectDisposedException)
+        {
+            Notify("The document changed meanwhile. Select the text again.");
+            return null;
+        }
+    }
+
+    /// <summary>Marks the selected text's lines for redaction. Returns the number of marks, -1 when cancelled.</summary>
+    public async Task<int> RedactSelection()
     {
         if (!Session.IsPdf || !Viewer.HasSelection) return 0;
-        var parts = Viewer.GetSelectionLineRects();
+        if (await SelectionLineRects("Marking text for redaction") is not { } parts) return -1;
         var marks = parts.SelectMany(p => p.Rects.Select(r => new RedactMark(p.Page, r.Inflate(0.5)))).ToList();
         Viewer.AddRedactions(marks);
         Viewer.ClearSelection();

@@ -700,11 +700,13 @@ public partial class DocumentTab : UserControl, IDisposable
         if (!AppSettings.Current.RestorePosition || Session.FilePath is null) return;
         if (!AppSettings.Current.Files.TryGetValue(Session.FilePath, out var state)) return;
         _hadViewState = true; // the reader's own position wins over the document's opening settings
-        if (Enum.TryParse<ZoomMode>(state.ZoomMode, out var mode))
+        var (zoomMode, rotation) = SplitZoomState(state.ZoomMode);
+        if (Enum.TryParse<ZoomMode>(zoomMode, out var mode))
         {
             if (mode == ZoomMode.Custom) Viewer.SetZoom(state.Zoom);
             else Viewer.SetZoomMode(mode);
         }
+        Viewer.SetViewRotation(rotation);
         if (state.Page > 0 && state.Page < Viewer.PageCount)
         {
             var page = state.Page;
@@ -718,9 +720,21 @@ public partial class DocumentTab : UserControl, IDisposable
         if (Session.FilePath is null || Viewer.PageCount == 0) return;
         var state = AppSettings.Current.StateOf(Session.FilePath);
         state.Page = Viewer.CurrentPage;
-        state.ZoomMode = Viewer.ZoomMode.ToString();
+        state.ZoomMode = Viewer.ZoomMode + (Viewer.ViewRotation != 0 ? $"{RotationTag}{Viewer.ViewRotation}" : "");
         state.Zoom = Viewer.Zoom;
         AppSettings.Current.Save();
+    }
+
+    // The view rotation rides along in the saved zoom mode ("FitWidth;rotate=90") until the per-file state gets a
+    // field of its own; an unturned view saves the plain mode, so older settings files read the same.
+    private const string RotationTag = ";rotate=";
+
+    private static (string ZoomMode, int Rotation) SplitZoomState(string? saved)
+    {
+        saved ??= "";
+        var at = saved.IndexOf(RotationTag, StringComparison.Ordinal);
+        if (at < 0) return (saved, 0);
+        return (saved[..at], int.TryParse(saved.AsSpan(at + RotationTag.Length), out var r) ? r : 0);
     }
 
     // ───────────────────────────── Editing ─────────────────────────────
@@ -1366,7 +1380,7 @@ public partial class DocumentTab : UserControl, IDisposable
                     cts.Token.ThrowIfCancellationRequested();
                     try
                     {
-                        var text = engine.GetText(p, cache: false);
+                        var text = engine.GetText(p, cache: false, cts.Token);
                         foreach (var (s, e) in text.Find(query, matchCase, wholeWords, ignoreAccents))
                             batch.Add(new SearchHit(p, s, e, text.GetRects(s, e), text.Excerpt(s, e)));
                     }

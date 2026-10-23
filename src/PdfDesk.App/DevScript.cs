@@ -10,7 +10,7 @@ namespace PdfDesk.App;
 /// Developer aid: <c>PdfDesk.exe file.pdf --script steps.txt</c> runs UI steps off-screen and saves window snapshots,
 /// so the UI can be verified without capturing the user's screen. One step per line:
 /// <c>wait ms · shot out.png · page N · zoom 150|fitwidth|fitpage · layout Continuous|Facing|… · find text ·
-/// findnext · tool hand|select|snapshot|addtext|check|note|redact · selectall · keys text (real key messages, Shift
+/// findnext · tool hand|select|snapshot|addtext|check|note|redact · selectall · rotateview cw|ccw|0|90|180|270 · keys text (real key messages, Shift
 /// for capitals and symbols; {tab} {enter} {sp}; sent to the open dialog if there is one) · editor · nav pages|bookmarks|search · select 1,3 · rotate 90 ·
 /// delete · undo · redo · scroll dy · log text · exit</c>, plus <c>key Delete ctrl shift</c> (one WPF Key with modifiers),
 /// <c>focus</c> (log the focused element) and <c>annots</c> (log the comments). Review steps: <c>selecttext p x1 y1 x2 y2 ·
@@ -73,6 +73,8 @@ internal static class DevScript
             case "zoom" when arg == "fitpage": v!.SetZoomMode(ZoomMode.FitPage); break;
             case "zoom": v!.SetZoom(double.Parse(arg) / 100); break;
             case "layout": v!.SetLayout(Enum.Parse<ViewLayout>(arg, true)); break;
+            case "rotateview" when arg is "cw" or "ccw": (arg == "cw" ? Cmd.RotateViewRight : Cmd.RotateViewLeft).Execute(null, window); break;
+            case "rotateview": v!.SetViewRotation(int.Parse(arg)); break;
             case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, "addtext" => ViewerTool.AddText, "check" => ViewerTool.AddCheck, "note" => ViewerTool.AddNote, "redact" => ViewerTool.Redact, _ => ViewerTool.Hand }; break;
             case "selectall": v!.SelectAll(); break;
             case "find": Cmd.Find.Execute(null, window); SetFindText(tab!, arg); tab!.FindNext(false); break;
@@ -85,7 +87,7 @@ internal static class DevScript
             case "redo": tab!.Redo(); break;
             case "scroll": v!.ScrollToVerticalOffset(v.VerticalOffset + double.Parse(arg)); break;
             case "copytext": log.Add($"selected text: {v!.GetSelectedText().Length} chars: {Trunc(v.GetSelectedText())}"); break;
-            case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
+            case "state": log.Add($"page={v!.CurrentPage + 1}/{v.PageCount} zoom={v.Zoom:P0} mode={v.ZoomMode} layout={v.Layout} rotation={v.ViewRotation} dirty={tab!.Session.IsDirty} undo={tab.Session.UndoLabel ?? "-"} redo={tab.Session.RedoLabel ?? "-"} selected={string.Join(',', tab.SelectedPages.Select(p => p + 1))} {v.Diagnostics}"); break;
             case "log": log.Add(arg); break;
             case "cmd":
             {
@@ -168,7 +170,7 @@ internal static class DevScript
                 log.Add($"redaction marks: {v!.Redactions.Count}");
                 break;
             }
-            case "redact-text": log.Add($"redact-text: {tab!.RedactSelection()} marks"); break;
+            case "redact-text": log.Add($"redact-text: {await tab!.RedactSelection()} marks"); break;
             case "redact-search": log.Add($"redact-search: {tab!.RedactSearchHits()} marks"); break;
             case "apply-redactions": log.Add($"apply-redactions: {await tab!.ApplyRedactions(confirm: arg == "confirm")}"); break;
             case "attachments":
