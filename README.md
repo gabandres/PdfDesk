@@ -1,7 +1,9 @@
 # PdfDesk
 
 A fast PDF viewer and page organizer for Windows on ARM, modeled on PDF-XChange Editor's viewing and
-Organize features. Native ARM64 (.NET 10 WPF + MuPDF), personal use, local git repo, no remote.
+Organize features. Native ARM64 (.NET 10 WPF + MuPDF). Open source under the GNU AGPL v3, by
+[Bermudez Systems](https://bermudezsystems.com). Part of the Desk suite with
+[PrintDesk](https://github.com/gabandres/PrintDesk).
 
 ## Install
 
@@ -90,10 +92,14 @@ writes snapshots (see `DevScript.cs`). Set `PDFDESK_DATA` to a temp folder so th
 leaving your own settings untouched and unsaved. Sample files for the review features: run the tests with
 `PDFDESK_SAMPLES` set to a temp folder (`ReviewSampleTests`).
 
-## Licenses
+## License
 
-MuPDF (via MuPDFCore) is AGPL-3.0: fine for personal use; don't distribute PdfDesk closed-source.
-PDFsharp is pinned to 6.2.x (MIT); 6.5+ changed to AGPL with a runtime license check.
+Copyright Â© 2026 Bermudez Systems LLC. PdfDesk is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License, version 3 (see [LICENSE](LICENSE)). It comes with no warranty.
+
+PdfDesk uses MuPDF (via MuPDFCore), which is AGPL-3.0, so PdfDesk and anything distributed with it must stay under
+the AGPL with its source available. Other dependencies: PDFsharp (MIT; pinned to 6.2.x because 6.5+ changed to AGPL
+with a runtime license check), Jint (BSD-2-Clause), HarfBuzzSharp (MIT).
 `System.Security.Cryptography.Pkcs` is pinned to a patched release (PDFsharp pulls a vulnerable 8.0.1).
 
 ## Known limits

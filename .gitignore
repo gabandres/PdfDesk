@@ -5,3 +5,6 @@ publish/
 *.user
 TestResults/
 .artifacts/
+
+# Agent and editor working folders
+.claude/
