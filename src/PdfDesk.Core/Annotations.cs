@@ -27,6 +27,9 @@ public readonly record struct AnnotColor(double R, double G, double B)
 /// <param name="IsPdfDeskStamp">A Fill &amp; Sign stamp (managed by <see cref="TextStamps"/>).</param>
 /// <param name="ReplyTo">Id of the annotation this one replies to (/IRT), if any.</param>
 /// <param name="Hidden">Hidden or NoView flag set: viewers don't draw it.</param>
+/// <param name="Geometry">Drawing annotations (ink, shapes, lines, polygons, FreeText other than Fill &amp; Sign stamps): where
+/// they are, for selecting, moving and resizing (see <see cref="Annotations.UpdateGeometry"/>); null for other kinds.</param>
+/// <param name="Style">Drawing annotations: how they look (see <see cref="Annotations.UpdateStyle"/>); null for other kinds.</param>
 public sealed record AnnotationInfo(
     string Id,
     AnnotationKind Kind,
@@ -42,14 +45,16 @@ public sealed record AnnotationInfo(
     bool IsPdfDeskStamp,
     string? ReplyTo,
     bool Hidden,
-    double Opacity = 1);
+    double Opacity = 1,
+    AnnotGeometry? Geometry = null,
+    AnnotStyle? Style = null);
 
 /// <summary>
 /// Reads and edits comments (markup annotations): text highlights/underlines/strike-outs/squiggles and sticky notes.
 /// Widgets, links and popups are not listed. Every call takes the document bytes and returns new bytes.
 /// New annotations get their own appearance stream, so every viewer draws them the same way.
 /// </summary>
-public static class Annotations
+public static partial class Annotations
 {
     internal const string IdPrefix = "pdfdesk-annot-";
     private const int FlagHidden = 2, FlagPrint = 4, FlagNoView = 32;
@@ -81,6 +86,7 @@ public static class Annotations
                         quads.Add(FormEditor.ToPageSpace(page, xs.Min(), ys.Min(), xs.Max(), ys.Max()));
                     }
                 var nm = PdfObj.Str(a.Elements["/NM"]);
+                var drawing = IsDrawing(a, subtype) ? Describe(page, a, subtype) : null;
                 list.Add(new AnnotationInfo(
                     IdOf(a, p, i), KindOf(subtype), subtype, p, rect,
                     PdfObj.Str(a.Elements["/Contents"]) ?? "",
@@ -92,7 +98,9 @@ public static class Annotations
                     subtype == "FreeText" && nm?.StartsWith("PdfDesk-", StringComparison.Ordinal) == true,
                     PdfObj.Dict(a.Elements["/IRT"]) is { } irt ? IdOf(irt, p, -1) : null,
                     (flags & (FlagHidden | FlagNoView)) != 0,
-                    PdfObj.Num(a.Elements["/CA"], 1)));
+                    PdfObj.Num(a.Elements["/CA"], 1),
+                    drawing?.Geometry,
+                    drawing?.Style));
             }
         }
         return list;
@@ -195,13 +203,15 @@ public static class Annotations
         return PdfObj.Save(doc);
     }
 
-    /// <summary>Changes a comment's text (the on-page appearance of non-PdfDesk FreeText annotations is not redrawn).</summary>
+    /// <summary>Changes a comment's text. A FreeText box (other than a Fill &amp; Sign stamp) shows the new text: its appearance is rebuilt.</summary>
     public static byte[] SetContents(byte[] data, string? password, string id, string text)
     {
         using var doc = OpenForEdit(data, password);
-        var (_, annot) = Find(doc, id) ?? throw new InvalidOperationException("That comment no longer exists.");
+        var (p, annot) = Find(doc, id) ?? throw new InvalidOperationException("That comment no longer exists.");
         annot.Elements["/Contents"] = PdfObj.MakeString(text);
         annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
+        if (PdfObj.Name(annot.Elements["/Subtype"]) == "FreeText" && IsDrawing(annot, "FreeText") && Describe(doc.Pages[p], annot, "FreeText") is { } ft)
+            Apply(doc, doc.Pages[p], annot, "FreeText", ft.Geometry, ft.Style);
         return PdfObj.Save(doc);
     }
 
