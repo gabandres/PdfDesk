@@ -110,13 +110,14 @@ internal static class PdfObj
     /// signatures valid (see <see cref="Incremental"/>), unless <paramref name="rewrite"/> asks for a full rewrite
     /// (redaction, which must not leave the removed content in the file).
     /// </summary>
+    /// <exception cref="SignaturesWouldBreakException">A signed document whose edit can't be appended (see <see cref="SignedEdits"/>).</exception>
     public static byte[] Save(PdfDocument doc, bool rewrite = false)
     {
         var xmp = Xmp.Read(doc);
-        if (!rewrite && Incremental.TrySave(doc, xmp) is { } appended) return appended;
+        if (!rewrite && Incremental.Save(doc, xmp) is { } appended) return appended;
         using var ms = new MemoryStream();
         doc.Save(ms, false);
-        return Xmp.Patch(ms.ToArray(), doc.Info, xmp);
+        return Xmp.Patch(ms, doc.Info, xmp);
     }
 
     /// <summary>Adds an indirect stream object (a form XObject when <paramref name="bbox"/> is given).</summary>
@@ -155,8 +156,25 @@ internal static class PdfObj
 
     private static (double Bx1, double By2, double W, double H, int Rot) Frame(PdfPage page)
     {
-        var box = page.Elements.ContainsKey("/CropBox") ? page.CropBox : page.MediaBox;
-        return (Math.Min(box.X1, box.X2), Math.Max(box.Y1, box.Y2), Math.Abs(box.X2 - box.X1), Math.Abs(box.Y2 - box.Y1), ((page.Rotate % 360) + 360) % 360);
+        var (x1, y1, x2, y2) = VisibleBox(page);
+        return (x1, y2, x2 - x1, y2 - y1, ((page.Rotate % 360) + 360) % 360);
+    }
+
+    /// <summary>
+    /// The page's visible area (x1 &lt; x2, y1 &lt; y2): its CropBox clipped to its MediaBox, as viewers show it (the
+    /// MediaBox when there is no CropBox or it lies outside the MediaBox).
+    /// </summary>
+    public static (double X1, double Y1, double X2, double Y2) VisibleBox(PdfPage page)
+    {
+        var m = page.MediaBox;
+        var media = (Math.Min(m.X1, m.X2), Math.Min(m.Y1, m.Y2), Math.Max(m.X1, m.X2), Math.Max(m.Y1, m.Y2));
+        if (!page.Elements.ContainsKey("/CropBox")) return media;
+        var c = page.CropBox;
+        var x1 = Math.Max(media.Item1, Math.Min(c.X1, c.X2));
+        var y1 = Math.Max(media.Item2, Math.Min(c.Y1, c.Y2));
+        var x2 = Math.Min(media.Item3, Math.Max(c.X1, c.X2));
+        var y2 = Math.Min(media.Item4, Math.Max(c.Y1, c.Y2));
+        return x2 > x1 && y2 > y1 ? (x1, y1, x2, y2) : media;
     }
 
     /// <summary>PDF user space → page space.</summary>

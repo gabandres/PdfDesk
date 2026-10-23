@@ -133,6 +133,37 @@ public class Core2RedactionTests
         Assert.Equal("KEEPVALUE", fields.Single(f => f.FieldName == "keep").Value); // not under an area: unchanged
     }
 
+    /// <summary>An XFA form whose field is on page 2; page 1 has a link and a comment, and an associated file (/AF).</summary>
+    private static byte[] XfaWithExtras() => Core2Pdf.Build([
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [7 0 R] /XFA [(datasets) 8 0 R] >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 6 0 R >> >> /Annots [9 0 R 10 0 R] /AF [11 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [7 0 R] /Resources << >> >>",
+        Core2Pdf.Stream("BT /F1 24 Tf 72 600 Td (Code TOPSECRET here) Tj ET"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Ada) /Rect [72 400 300 420] /P 4 0 R >>",
+        Core2Pdf.Stream("<xfa:datasets><data><name>Ada</name></data></xfa:datasets>"),
+        "<< /Type /Annot /Subtype /Link /Rect [72 100 200 120] /A << /S /URI /URI (https://example.com/) >> >>",
+        "<< /Type /Annot /Subtype /Text /Rect [500 700 520 720] /Contents (Note) >>",
+        "<< /Type /Filespec /F (source.txt) /UF (source.txt) /AFRelationship /Source /EF << /F 12 0 R >> >>",
+        Core2Pdf.Stream("AFSECRET source of the page", "/Type /EmbeddedFile"),
+    ]);
+
+    [Fact]
+    public void RedactingAPageWithoutFieldsKeepsTheXfaFormButDropsItsAssociatedFiles()
+    {
+        var data = XfaWithExtras();
+        var redacted = Redaction.Apply(data, null, new Dictionary<int, IReadOnlyList<RectD>> { [0] = [new RectD(60, 170, 200, 40)] }, dpi: 72);
+        var everything = AllBytesInflated(redacted);
+        Assert.DoesNotContain("TOPSECRET", everything);
+        Assert.DoesNotContain("AFSECRET", everything);
+        Assert.Contains("<xfa:datasets>", everything); // only a link and a comment went: the form is as it was
+
+        // A redacted widget takes the XFA copy of the values with it.
+        var fieldPage = Redaction.Apply(data, null, new Dictionary<int, IReadOnlyList<RectD>> { [1] = [new RectD(0, 0, 10, 10)] }, dpi: 72);
+        Assert.DoesNotContain("<xfa:datasets>", AllBytesInflated(fieldPage));
+    }
+
     [Fact]
     public void NothingToRedactReturnsTheSameBytes()
     {

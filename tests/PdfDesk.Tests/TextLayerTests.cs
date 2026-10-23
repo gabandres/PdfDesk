@@ -72,6 +72,27 @@ public class TextLayerTests
         Assert.InRange(box.Y, 98.5, 101.5);
     }
 
+    [Theory]
+    [InlineData("q q 2 0 0 2 0 0 cm 0 0 10 10 re f")] // two unbalanced saves
+    [InlineData("Q 2 0 0 2 0 0 cm q 3 0 0 3 0 0 cm 0 0 10 10 re f")] // a restore with nothing saved, then a save
+    public void UnbalancedContentDoesNotMoveTheTextLayer(string content)
+    {
+        var data = Core2Pdf.Build([
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>",
+            Core2Pdf.Stream(content),
+        ]);
+        var withText = TextLayer.AddInvisibleText(data, null, new Dictionary<int, IReadOnlyList<OcrWord>> { [0] = [new("Hello", new RectD(100, 100, 50, 20))] });
+        using var engine = PdfEngine.Open(withText, InputFileTypes.PDF, null);
+        var t = engine.GetText(0);
+        var (s, e) = t.Find("Hello", true, false).Single();
+        var box = t.GetRects(s, e).Aggregate(default(RectD), (a, r) => a.Union(r));
+        Assert.InRange(box.X, 98.5, 101.5);
+        Assert.InRange(box.Y, 98.5, 101.5);
+        Assert.InRange(box.Width, 48, 52);
+    }
+
     [Fact]
     public void NoWordsReturnsTheSameBytes()
     {

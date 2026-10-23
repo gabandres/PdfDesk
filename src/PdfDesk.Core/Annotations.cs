@@ -216,6 +216,7 @@ public static class Annotations
     internal static bool DeleteIn(PdfDocument doc, string id)
     {
         if (Find(doc, id) is not { } found) return false;
+        SignedEdits.NoteRemoval();
         var all = new List<PdfDictionary>();
         for (var p = 0; p < doc.PageCount; p++)
             if (PdfObj.Array(doc.Pages[p].Elements["/Annots"]) is { } annots)

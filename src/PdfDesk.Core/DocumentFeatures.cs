@@ -179,8 +179,8 @@ public static class DocumentFeatures
     private static (double? X, double? Y) Point(PdfPage page, double? left, double? top)
     {
         if (left is null && top is null) return (null, null);
-        var box = page.Elements.ContainsKey("/CropBox") ? page.CropBox : page.MediaBox;
-        var (px, py) = PdfObj.ToPage(page, left ?? Math.Min(box.X1, box.X2), top ?? Math.Max(box.Y1, box.Y2));
+        var (bx1, _, _, by2) = PdfObj.VisibleBox(page);
+        var (px, py) = PdfObj.ToPage(page, left ?? bx1, top ?? by2);
         var rot = ((page.Rotate % 360) + 360) % 360;
         // On a page shown sideways the PDF's "top" becomes a horizontal position; report what's meaningful for scrolling.
         return rot is 90 or 270 ? (top is null ? null : px, left is null ? null : py) : (left is null ? null : px, top is null ? null : py);

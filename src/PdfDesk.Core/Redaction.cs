@@ -104,10 +104,13 @@ public static class Redaction
         if (PdfObj.Array(page.Elements["/Annots"]) is { } annots)
         {
             var acro = PdfObj.Dict(doc.Internals.Catalog.Elements["/AcroForm"]);
+            var widgets = false;
             foreach (var a in annots.Elements.Select(PdfObj.Dict).OfType<PdfDictionary>().ToList())
             {
                 removed.Add(a);
-                if (PdfObj.NameOf(a, "/Subtype") == "/Widget") RemoveWidget(acro, a, removed);
+                if (PdfObj.NameOf(a, "/Subtype") != "/Widget") continue;
+                RemoveWidget(acro, a, removed);
+                widgets = true;
             }
             if (acro is not null)
             {
@@ -115,8 +118,9 @@ public static class Redaction
                 if (PdfObj.Array(acro.Elements["/CO"]) is { } co)
                     for (var i = co.Elements.Count - 1; i >= 0; i--)
                         if (PdfObj.Dict(co.Elements[i]) is { } f && removed.Contains(f)) co.Elements.RemoveAt(i);
-                // ...and an XFA form keeps its own copy of every value (datasets): AcroForm fields are what remains.
-                if (removed.Count > 0) acro.Elements.Remove("/XFA");
+                // ...and an XFA form keeps its own copy of every value (datasets): once a field went, AcroForm fields are
+                // what remains. Comments and links alone leave the form (and its XFA) as it was.
+                if (widgets) acro.Elements.Remove("/XFA");
             }
             // Annotations elsewhere pointing at removed ones (a popup's /Parent, a reply's /IRT) would keep them reachable.
             foreach (var other in doc.Pages)
@@ -125,7 +129,9 @@ public static class Redaction
                         foreach (var key in new[] { "/Parent", "/IRT" })
                             if (PdfObj.Dict(a.Elements[key]) is { } target && removed.Contains(target)) a.Elements.Remove(key);
         }
-        foreach (var key in new[] { "/Annots", "/Thumb", "/PieceInfo", "/StructParents", "/Group", "/B", "/Metadata", "/SeparationInfo", "/AA" })
+        // What else a page can carry of its old content: thumbnail image, application data (PieceInfo), separations,
+        // article beads, actions, its XMP, and PDF 2.0 associated files (/AF: e.g. the source the page was made from).
+        foreach (var key in new[] { "/Annots", "/Thumb", "/PieceInfo", "/StructParents", "/Group", "/B", "/Metadata", "/SeparationInfo", "/AA", "/AF" })
             page.Elements.Remove(key);
         ScrubStructure(doc, page, removed);
         StructTree.Prune(doc, [page], parentKeys, removed.Contains);

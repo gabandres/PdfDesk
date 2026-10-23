@@ -173,11 +173,9 @@ public static class TextStamps
     /// <summary>Inverse of <see cref="FormEditor.ToPageSpace"/>: page space (rotated, top-left origin) to PDF user space.</summary>
     internal static (double X1, double Y1, double X2, double Y2) FromPageSpace(PdfPage page, RectD r)
     {
-        var box = page.Elements.ContainsKey("/CropBox") ? page.CropBox : page.MediaBox;
-        var bx1 = Math.Min(box.X1, box.X2);
-        var by2 = Math.Max(box.Y1, box.Y2);
-        var w = Math.Abs(box.X2 - box.X1);
-        var h = Math.Abs(box.Y2 - box.Y1);
+        var (bx1, by1, bx2, by2) = PdfObj.VisibleBox(page);
+        var w = bx2 - bx1;
+        var h = by2 - by1;
         var rot = ((page.Rotate % 360) + 360) % 360;
 
         (double X, double Y) Map(double px, double py)

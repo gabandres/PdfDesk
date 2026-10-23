@@ -21,8 +21,9 @@ public sealed record PdfSource(byte[] Data, string? Password, string Name);
 /// Page-level edits. Every operation takes the current PDF bytes and returns new bytes, which keeps undo trivial
 /// (snapshots) and leaves the original document untouched until the user saves. Edits happen in place (Modify mode)
 /// so bookmarks, forms and metadata survive wherever the pages they belong to survive. Removing pages drops the
-/// bookmarks, links, named destinations and form widgets that pointed at them; imported pages bring their bookmarks,
-/// links and form fields along.
+/// bookmarks, links, actions, named destinations, article beads and form widgets that pointed at them; imported pages
+/// bring their bookmarks, links and form fields along (never hidden copies of pages they lead to). Page labels follow
+/// their pages.
 /// </summary>
 public static class PageEditor
 {
@@ -33,6 +34,7 @@ public static class PageEditor
             if (pages.Distinct().Count() >= doc.PageCount)
                 throw new InvalidOperationException("A document must keep at least one page.");
             PdfStructure.RemovePages(doc, pages.Distinct());
+            SignedEdits.NoteRemoval();
         });
     }
 
@@ -103,6 +105,7 @@ public static class PageEditor
             outline.AddRange(import.Outline());
             PdfStructure.WriteOutline(doc, outline);
             import.RegisterFields();
+            PdfStructure.DropStrayReferences(doc);
         });
     }
 
@@ -133,6 +136,7 @@ public static class PageEditor
             var import = new PdfStructure.Import(doc, copy, copies, i => originals[i]);
             import.FixLinks();
             import.RegisterFields();
+            PdfStructure.DropStrayReferences(doc);
         });
     }
 
@@ -183,6 +187,7 @@ public static class PageEditor
             import.RegisterFields();
         }
         PdfStructure.WriteOutline(doc, outline);
+        PdfStructure.DropStrayReferences(doc);
         return Save(doc);
     }
 
@@ -194,12 +199,12 @@ public static class PageEditor
             foreach (var i in pages.Distinct())
             {
                 var page = doc.Pages[i];
-                var box = page.Elements.ContainsKey("/CropBox") ? page.CropBox : page.MediaBox;
+                var (bx1, by1, bx2, by2) = PdfObj.VisibleBox(page);
                 var (l, b, r, t) = ToPdfSpace(m, page.Rotate);
-                var x1 = Math.Min(box.X1, box.X2) + l;
-                var y1 = Math.Min(box.Y1, box.Y2) + b;
-                var x2 = Math.Max(box.X1, box.X2) - r;
-                var y2 = Math.Max(box.Y1, box.Y2) - t;
+                var x1 = bx1 + l;
+                var y1 = by1 + b;
+                var x2 = bx2 - r;
+                var y2 = by2 - t;
                 if (x2 - x1 < 1 || y2 - y1 < 1)
                     throw new InvalidOperationException($"The margins are larger than page {i + 1}.");
                 page.CropBox = new PdfRectangle(new PdfSharp.Drawing.XPoint(x1, y1), new PdfSharp.Drawing.XPoint(x2, y2));
@@ -207,17 +212,28 @@ public static class PageEditor
         });
     }
 
-    /// <summary>Removes any crop, showing each page's full media box again.</summary>
+    /// <summary>
+    /// Removes any crop (the CropBox, which is all <see cref="Crop"/> sets), showing each page's full media box again.
+    /// The print production boxes (TrimBox, BleedBox, ArtBox) stay, clipped to the media box.
+    /// </summary>
     public static byte[] Uncrop(byte[] data, string? password, IReadOnlyCollection<int> pages)
     {
         return Edit(data, password, doc =>
         {
             foreach (var i in pages.Distinct())
             {
-                doc.Pages[i].Elements.Remove("/CropBox");
-                doc.Pages[i].Elements.Remove("/TrimBox");
-                doc.Pages[i].Elements.Remove("/BleedBox");
-                doc.Pages[i].Elements.Remove("/ArtBox");
+                var page = doc.Pages[i];
+                page.Elements.Remove("/CropBox");
+                var (mx1, my1, mx2, my2) = PdfObj.VisibleBox(page);
+                foreach (var key in new[] { "/TrimBox", "/BleedBox", "/ArtBox" })
+                {
+                    if (PdfObj.Array(page.Elements[key]) is not { Elements.Count: 4 } box) continue;
+                    double ax = PdfObj.Num(box, 0), ay = PdfObj.Num(box, 1), bx = PdfObj.Num(box, 2), by = PdfObj.Num(box, 3);
+                    var (x1, y1, x2, y2) = (Math.Max(mx1, Math.Min(ax, bx)), Math.Max(my1, Math.Min(ay, by)), Math.Min(mx2, Math.Max(ax, bx)), Math.Min(my2, Math.Max(ay, by)));
+                    if (x2 <= x1 || y2 <= y1) page.Elements.Remove(key);
+                    else if (x1 != Math.Min(ax, bx) || y1 != Math.Min(ay, by) || x2 != Math.Max(ax, bx) || y2 != Math.Max(ay, by))
+                        page.Elements[key] = PdfObj.Reals(doc, x1, y1, x2, y2);
+                }
             }
         });
     }
@@ -270,7 +286,9 @@ public static class PageEditor
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
         var xmp = Xmp.Read(doc);
+        var labels = PdfStructure.ReadLabels(doc);
         edit(doc);
+        if (labels is not null) PdfStructure.WriteLabels(doc, labels);
         doc.Info.ModificationDate = DateTime.Now;
         return Save(doc, xmp, rewrite);
     }
@@ -283,14 +301,15 @@ public static class PageEditor
     /// <param name="xmp">The XMP packet the document had before the edit, if any. PDFsharp always replaces it with one of
     /// its own (unescaped, ModifyDate = CreationDate), so the original is written back updated from the Info values.</param>
     /// <param name="rewrite">Skip the incremental update a signed document otherwise gets (see <see cref="Incremental"/>).</param>
+    /// <exception cref="SignaturesWouldBreakException">A signed document whose edit can't be appended (see <see cref="SignedEdits"/>).</exception>
     private static byte[] Save(PdfDocument doc, XDocument? xmp = null, bool rewrite = false)
     {
-        if (!rewrite && Incremental.TrySave(doc, xmp) is { } appended) return appended;
+        if (!rewrite && Incremental.Save(doc, xmp) is { } appended) return appended;
         doc.Options.CompressContentStreams = true;
         doc.Options.NoCompression = false;
         using var ms = new MemoryStream();
         doc.Save(ms, closeStream: false);
-        return Xmp.Patch(ms.ToArray(), doc.Info, xmp);
+        return Xmp.Patch(ms, doc.Info, xmp);
     }
 }
 
@@ -332,7 +351,72 @@ internal static class PdfStructure
     private static PdfString Text(string s) =>
         new(s, s.All(c => c < 128) ? PdfStringEncoding.PDFDocEncoding : PdfStringEncoding.Unicode);
 
-    /// <summary>Removes pages along with the bookmarks, links, named destinations and form widgets that lead to them.</summary>
+    /// <summary>A page's label as its /PageLabels range makes it: style (D, R, r, A, a; null = prefix only), prefix, number.</summary>
+    internal readonly record struct PageLabel(string? Style, string Prefix, int Number);
+
+    /// <summary>Each page's label, in page order, or null when the document has no /PageLabels.</summary>
+    public static List<(PdfPage Page, PageLabel Label)>? ReadLabels(PdfDocument doc)
+    {
+        if (Dict(doc.Internals.Catalog.Elements["/PageLabels"]) is not { } tree) return null;
+        var ranges = PdfObj.NumberTree(tree).Where(e => e.Key >= 0).OrderBy(e => e.Key).ToList();
+        var list = new List<(PdfPage, PageLabel)>(doc.PageCount);
+        var r = -1;
+        for (var i = 0; i < doc.PageCount; i++)
+        {
+            while (r + 1 < ranges.Count && ranges[r + 1].Key <= i) r++;
+            if (r < 0)
+            {
+                list.Add((doc.Pages[i], new PageLabel("D", "", i + 1))); // before the first range: shown as plain numbers
+                continue;
+            }
+            var d = Dict(ranges[r].Value);
+            var first = Math.Clamp(PdfObj.Int(d?.Elements["/St"]) ?? 1, 1, 1_000_000_000);
+            list.Add((doc.Pages[i], new PageLabel(PdfObj.Name(d?.Elements["/S"]), PdfObj.Str(d?.Elements["/P"]) ?? "",
+                (int)Math.Min(int.MaxValue, (long)first + i - ranges[r].Key))));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Rewrites /PageLabels after pages were removed, added or reordered: every page keeps the label it had (it usually
+    /// matches the number printed on it), a new page continues the numbering of the page before it, and the labels are
+    /// written as the fewest ranges (/S, /P, /St). Nothing changes when the pages are as they were.
+    /// </summary>
+    public static void WriteLabels(PdfDocument doc, List<(PdfPage Page, PageLabel Label)> before)
+    {
+        if (doc.PageCount == before.Count && Enumerable.Range(0, doc.PageCount).All(i => ReferenceEquals(doc.Pages[i], before[i].Page))) return;
+        var known = new Dictionary<PdfPage, PageLabel>(ReferenceEqualityComparer.Instance);
+        foreach (var (page, label) in before) known.TryAdd(page, label);
+
+        var nums = new PdfArray(doc);
+        PageLabel? previous = null;
+        for (var i = 0; i < doc.PageCount; i++)
+        {
+            var label = known.TryGetValue(doc.Pages[i], out var l) ? l
+                : previous is { } p ? p with { Number = p.Number == int.MaxValue ? p.Number : p.Number + 1 }
+                : new PageLabel("D", "", 1);
+            if (previous is not { } prev || prev.Style != label.Style || prev.Prefix != label.Prefix || (label.Style is not null && label.Number != prev.Number + 1))
+            {
+                var range = new PdfDictionary(doc);
+                if (label.Style is { } style) range.Elements.SetName("/S", "/" + style);
+                if (label.Prefix.Length > 0) range.Elements["/P"] = Text(label.Prefix);
+                if (label.Style is not null && label.Number != 1) range.Elements.SetInteger("/St", label.Number);
+                nums.Elements.Add(new PdfInteger(i));
+                nums.Elements.Add(range);
+            }
+            previous = label;
+        }
+        var tree = new PdfDictionary(doc);
+        tree.Elements["/Nums"] = nums;
+        doc.Internals.Catalog.Elements["/PageLabels"] = tree;
+    }
+
+    /// <summary>
+    /// Removes pages along with the bookmarks, links, named destinations, form widgets, article beads and actions
+    /// (any annotation's /A and /AA, the page and document /AA, /OpenAction) that lead to them. Whatever else still
+    /// refers to them is cut too (<see cref="DropStrayReferences"/>), so a file saved from the result can't carry a
+    /// removed page's content along (Extract and Split rely on this).
+    /// </summary>
     public static void RemovePages(PdfDocument doc, IEnumerable<int> pages)
     {
         var removedPages = new HashSet<object>();
@@ -355,21 +439,168 @@ internal static class PdfStructure
 
         WriteOutline(doc, Prune(ReadOutline(doc), item => Dead(names.Of(item.Dict))));
 
+        // A jump (or a chain of actions with one) to a removed page: the action goes.
+        bool DeadAction(PdfItem? item)
+        {
+            for (var depth = 0; depth < MaxDepth && Dict(item) is { } action; depth++)
+            {
+                if (action.Elements.GetName("/S") == "/GoTo" && Dead(names.Explicit(action.Elements["/D"]))) return true;
+                item = Resolve(action.Elements["/Next"]) is PdfArray next ? next.Elements.FirstOrDefault(DeadAction) : action.Elements["/Next"];
+            }
+            return false;
+        }
+        void DropDeadTriggers(PdfDictionary owner)
+        {
+            if (Dict(owner.Elements["/AA"]) is not { } aa) return;
+            foreach (var key in aa.Elements.Keys.ToList())
+                if (DeadAction(aa.Elements[key])) aa.Elements.Remove(key);
+        }
+
         for (var i = 0; i < doc.PageCount; i++)
-            if (Arr(doc.Pages[i].Elements["/Annots"]) is { } annots)
-                for (var k = annots.Elements.Count - 1; k >= 0; k--)
-                    if (Dict(annots.Elements[k]) is { } a && IsLink(a) && Dead(names.Of(a)))
-                        annots.Elements.RemoveAt(k);
+        {
+            var page = doc.Pages[i];
+            DropDeadTriggers(page);
+            if (Arr(page.Elements["/Annots"]) is not { } annots) continue;
+            for (var k = annots.Elements.Count - 1; k >= 0; k--)
+            {
+                if (Dict(annots.Elements[k]) is not { } a) continue;
+                if (IsLink(a) && Dead(names.Of(a)))
+                {
+                    annots.Elements.RemoveAt(k);
+                    continue;
+                }
+                // Form buttons, widgets and other annotations jump with actions (a /Dest is only for links).
+                if (DeadAction(a.Elements["/A"])) a.Elements.Remove("/A");
+                if (!IsLink(a) && Dead(names.Explicit(a.Elements["/Dest"]))) a.Elements.Remove("/Dest");
+                DropDeadTriggers(a);
+            }
+        }
 
         var catalog = doc.Internals.Catalog;
         var open = Resolve(catalog.Elements["/OpenAction"]);
-        if ((open is PdfArray dest && Dead(dest)) ||
-            (open is PdfDictionary action && action.Elements.GetName("/S") == "/GoTo" && Dead(names.Explicit(action.Elements["/D"]))))
+        if ((open is PdfArray dest && Dead(dest)) || (open is PdfDictionary && DeadAction(open)))
             catalog.Elements.Remove("/OpenAction");
+        DropDeadTriggers(catalog);
 
         names.RemoveWhere(Dead);
         DropWidgets(doc, removedAnnots.Contains);
         StructTree.Prune(doc, gonePages, goneKeys, a => removedAnnots.Contains(Id(a)));
+        PruneThreads(doc);
+        DropStrayReferences(doc, id => removedPages.Contains(id) || removedAnnots.Contains(id));
+    }
+
+    /// <summary>
+    /// Article threads (/Threads): beads on pages no longer in the document are unlinked from their thread's ring, and a
+    /// thread left without beads is dropped.
+    /// </summary>
+    private static void PruneThreads(PdfDocument doc)
+    {
+        var catalog = doc.Internals.Catalog;
+        if (Arr(catalog.Elements["/Threads"]) is not { } threads) return;
+        var live = new HashSet<object>();
+        for (var i = 0; i < doc.PageCount; i++) live.Add(Id(doc.Pages[i]));
+        for (var t = threads.Elements.Count - 1; t >= 0; t--)
+        {
+            if (Dict(threads.Elements[t]) is not { } thread)
+            {
+                threads.Elements.RemoveAt(t);
+                continue;
+            }
+            var beads = new List<PdfDictionary>();
+            var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+            for (var bead = Dict(thread.Elements["/F"]); bead is not null && beads.Count < 100_000 && seen.Add(bead); bead = Dict(bead.Elements["/N"]))
+                if (bead.Elements["/P"] is { } p && live.Contains(Id(p))) beads.Add(bead);
+            if (beads.Count == 0)
+            {
+                threads.Elements.RemoveAt(t);
+                continue;
+            }
+            if (beads.Count == seen.Count) continue;
+            foreach (var b in beads)
+                if (b.Reference is null) doc.Internals.AddObject(b);
+            for (var k = 0; k < beads.Count; k++)
+            {
+                beads[k].Elements.SetReference("/N", beads[(k + 1) % beads.Count]);
+                beads[k].Elements.SetReference("/V", beads[(k + beads.Count - 1) % beads.Count]);
+                if (k > 0) beads[k].Elements.Remove("/T");
+            }
+            if (thread.IsIndirect) beads[0].Elements.SetReference("/T", thread);
+            thread.Elements.SetReference("/F", beads[0]);
+        }
+        if (threads.Elements.Count == 0) catalog.Elements.Remove("/Threads");
+    }
+
+    /// <summary>
+    /// Cuts every remaining reference to a page that isn't in the document (a removed page, or a stray copy PDFsharp made
+    /// of a source page an imported annotation pointed at) and to the objects <paramref name="gone"/> picks (by id), so the
+    /// saved file can't carry their content along. A destination array or GoTo action leading to such a page is dropped
+    /// from whatever holds it (an /A or /AA entry, an action's /Next, a name or number tree pair, an array), and so is an
+    /// annotation or bead whose /P is such a page. References elsewhere (a structure element's /Pg, a reply's /IRT) are
+    /// removed.
+    /// </summary>
+    internal static void DropStrayReferences(PdfDocument doc, Func<object, bool>? gone = null)
+    {
+        var pages = new HashSet<object>();
+        for (var i = 0; i < doc.PageCount; i++) pages.Add(Id(doc.Pages[i]));
+        // Indirect objects → whether they are gone (or lead only to a gone page); false while being visited (cycles).
+        var memo = new Dictionary<PdfObjectID, bool>();
+        var catalog = doc.Internals.Catalog;
+        Container(catalog, 0);
+        if (doc.Info is { } info) Container(info, 0);
+
+        bool Dead(PdfItem? item, int depth)
+        {
+            if (depth > 512) return false;
+            switch (item)
+            {
+                case PdfReference r:
+                    if (gone?.Invoke(r.ObjectID) == true) return true;
+                    if (memo.TryGetValue(r.ObjectID, out var known)) return known;
+                    if (r.Value is PdfDictionary d && d.Elements.GetName("/Type") == "/Page" && !pages.Contains(r.ObjectID)) return memo[r.ObjectID] = true;
+                    memo[r.ObjectID] = false;
+                    return memo[r.ObjectID] = Container(r.Value, depth + 1);
+                case PdfDictionary or PdfArray:
+                    return Container((PdfObject)item, depth + 1);
+                default:
+                    return false;
+            }
+        }
+
+        // Prunes what a dictionary or array holds; true when the container itself must go.
+        bool Container(PdfObject? obj, int depth)
+        {
+            switch (obj)
+            {
+                case PdfDictionary d:
+                    foreach (var key in d.Elements.Keys.ToList())
+                    {
+                        var value = d.Elements[key];
+                        if (key is "/Names" or "/Nums" && Resolve(value) is PdfArray pairs)
+                        {
+                            for (var i = (pairs.Elements.Count & ~1) - 2; i >= 0; i -= 2)
+                                if (Dead(pairs.Elements[i + 1], depth))
+                                {
+                                    pairs.Elements.RemoveAt(i + 1);
+                                    pairs.Elements.RemoveAt(i);
+                                }
+                            continue;
+                        }
+                        if (!Dead(value, depth)) continue;
+                        if (key == "/P" && value is PdfReference { Value: PdfDictionary p } && p.Elements.GetName("/Type") == "/Page") return true; // an annotation or bead of a gone page
+                        d.Elements.Remove(key);
+                        if (key == "/D" && d.Elements.GetName("/S") == "/GoTo") return true; // a jump to a gone page
+                    }
+                    return false;
+                case PdfArray a:
+                    // A destination: [page /XYZ left top zoom], [page /Fit]…
+                    if (a.Elements.Count > 1 && Resolve(a.Elements[1]) is PdfName && a.Elements[0] is PdfReference first && Dead(first, depth)) return true;
+                    for (var i = a.Elements.Count - 1; i >= 0; i--)
+                        if (Dead(a.Elements[i], depth)) a.Elements.RemoveAt(i);
+                    return false;
+                default:
+                    return false;
+            }
+        }
     }
 
     /// <summary>The document's bookmarks as a tree (empty if none).</summary>
@@ -630,7 +861,12 @@ internal static class PdfStructure
         private (bool IsPage, PdfPage? Page) Map(PdfArray? dest) =>
             TargetOf(dest) is { } id && _srcIndex.TryGetValue(id, out var index) ? (true, _target(index)) : (false, null);
 
-        /// <summary>Points internal links on the imported pages at the imported pages; drops links to pages left behind.</summary>
+        /// <summary>
+        /// Points internal links on the imported pages at the imported pages, and drops links to pages left behind; the
+        /// same for the GoTo actions of other annotations (form buttons' /A, the /AA triggers). PDFsharp would otherwise
+        /// bring a hidden copy of every page they lead to along (see <see cref="DropStrayReferences"/>, which callers run
+        /// afterwards for whatever else still leads to such a copy).
+        /// </summary>
         public void FixLinks()
         {
             foreach (var (source, page) in _pages)
@@ -640,8 +876,15 @@ internal static class PdfStructure
                 if (from is null || to is null || from.Elements.Count != to.Elements.Count) continue;
                 for (var k = to.Elements.Count - 1; k >= 0; k--)
                 {
-                    if (Dict(from.Elements[k]) is not { } link || !IsLink(link) || Dict(to.Elements[k]) is not { } copy) continue;
-                    var dest = _srcNames.Of(link);
+                    if (Dict(from.Elements[k]) is not { } annot || Dict(to.Elements[k]) is not { } copy) continue;
+                    if (!IsLink(annot))
+                    {
+                        Retarget(annot, copy, "/A");
+                        if (Dict(annot.Elements["/AA"]) is { } triggers && Dict(copy.Elements["/AA"]) is { } copied)
+                            foreach (var key in triggers.Elements.Keys) Retarget(triggers, copied, key);
+                        continue;
+                    }
+                    var dest = _srcNames.Of(annot);
                     var (isPage, target) = Map(dest);
                     if (!isPage) continue;
                     if (target is null)
@@ -653,6 +896,24 @@ internal static class PdfStructure
                     copy.Elements["/Dest"] = Dest(_doc, target, dest);
                 }
             }
+        }
+
+        /// <summary>A copied GoTo action (<paramref name="key"/> of <paramref name="to"/>) aimed at the imported page, or dropped when its page wasn't imported.</summary>
+        private void Retarget(PdfDictionary from, PdfDictionary to, string key)
+        {
+            if (Dict(from.Elements[key]) is not { } action || action.Elements.GetName("/S") != "/GoTo") return;
+            var dest = _srcNames.Explicit(action.Elements["/D"]);
+            var (isPage, target) = Map(dest);
+            if (!isPage) return;
+            if (target is null)
+            {
+                to.Elements.Remove(key);
+                return;
+            }
+            var jump = new PdfDictionary(_doc);
+            jump.Elements.SetName("/S", "/GoTo");
+            jump.Elements["/D"] = Dest(_doc, target, dest);
+            to.Elements[key] = jump;
         }
 
         /// <summary>The source's bookmarks, recreated for the imported pages (bookmarks to pages left behind are dropped, their children kept).</summary>
@@ -875,8 +1136,11 @@ internal static class Xmp
         }
     }
 
-    /// <summary>Replaces the XMP packet PDFsharp just wrote at the end of <paramref name="pdf"/>; returns the input if it can't.</summary>
-    public static byte[] Patch(byte[] pdf, PdfDocumentInformation info, XDocument? original)
+    /// <summary>
+    /// The file PDFsharp just saved into <paramref name="saved"/>, with its XMP packet replaced; as saved if it can't be.
+    /// Read straight from the stream's buffer, so the file is copied once.
+    /// </summary>
+    public static byte[] Patch(MemoryStream saved, PdfDocumentInformation info, XDocument? original)
     {
         byte[] packet;
         try
@@ -885,9 +1149,9 @@ internal static class Xmp
         }
         catch (Exception ex) when (ex is XmlException or ArgumentException or InvalidOperationException)
         {
-            return pdf;
+            return saved.ToArray();
         }
-        return Replace(pdf, packet) ?? pdf;
+        return Replace(saved.GetBuffer().AsSpan(0, (int)saved.Length), packet) ?? saved.ToArray();
     }
 
     internal static byte[] Build(PdfDocumentInformation info, XDocument? original)
@@ -979,11 +1243,11 @@ internal static class Xmp
     /// PDFsharp writes its metadata stream as the last object before the xref table, uncompressed and unencrypted:
     /// swap it for <paramref name="packet"/> and move the xref offset. Nothing before it moves, so the table stays valid.
     /// </summary>
-    private static byte[]? Replace(byte[] pdf, byte[] packet)
+    private static byte[]? Replace(ReadOnlySpan<byte> pdf, byte[] packet)
     {
         var latin1 = Encoding.Latin1;
         var tailStart = Math.Max(0, pdf.Length - 4096);
-        var tail = latin1.GetString(pdf, tailStart, pdf.Length - tailStart);
+        var tail = latin1.GetString(pdf[tailStart..]);
         var sx = tail.LastIndexOf("startxref", StringComparison.Ordinal);
         var tr = tail.LastIndexOf("trailer", StringComparison.Ordinal);
         if (sx < 0 || tr < 0 || tail.IndexOf("/Encrypt", tr, StringComparison.Ordinal) >= 0) return null;
@@ -992,10 +1256,10 @@ internal static class Xmp
         var numberEnd = numberStart;
         while (numberEnd < tail.Length && char.IsAsciiDigit(tail[numberEnd])) numberEnd++;
         if (!int.TryParse(tail.AsSpan(numberStart, numberEnd - numberStart), out var xref) || xref <= 0 || xref >= pdf.Length) return null;
-        if (latin1.GetString(pdf, xref, Math.Min(4, pdf.Length - xref)) != "xref") return null;
+        if (latin1.GetString(pdf.Slice(xref, Math.Min(4, pdf.Length - xref))) != "xref") return null;
 
         var windowStart = Math.Max(0, xref - (1 << 20));
-        var window = latin1.GetString(pdf, windowStart, xref - windowStart);
+        var window = latin1.GetString(pdf[windowStart..xref]);
         var header = System.Text.RegularExpressions.Regex.Match(window,
             @"(?<=\n)(\d+) 0 obj\s*<</Type/Metadata/Subtype/XML/Length \d+>>\s*stream\r?\n", System.Text.RegularExpressions.RegexOptions.RightToLeft);
         if (!header.Success || !window.TrimEnd().EndsWith("endstream\nendobj", StringComparison.Ordinal)) return null;
@@ -1006,14 +1270,17 @@ internal static class Xmp
         var foot = latin1.GetBytes("\nendstream\nendobj\n");
         var newXref = objStart + head.Length + packet.Length + foot.Length;
 
-        using var ms = new MemoryStream(newXref + (pdf.Length - xref) + 16);
-        ms.Write(pdf, 0, objStart);
-        ms.Write(head);
-        ms.Write(packet);
-        ms.Write(foot);
-        ms.Write(pdf, xref, tailStart + numberStart - xref);
-        ms.Write(latin1.GetBytes(newXref.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-        ms.Write(pdf, tailStart + numberEnd, pdf.Length - tailStart - numberEnd);
-        return ms.ToArray();
+        var digits = latin1.GetBytes(newXref.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var tableAndTrailer = pdf[xref..(tailStart + numberStart)];
+        var rest = pdf[(tailStart + numberEnd)..];
+        var result = new byte[newXref + tableAndTrailer.Length + digits.Length + rest.Length];
+        pdf[..objStart].CopyTo(result);
+        head.CopyTo(result, objStart);
+        packet.CopyTo(result, objStart + head.Length);
+        foot.CopyTo(result, objStart + head.Length + packet.Length);
+        tableAndTrailer.CopyTo(result.AsSpan(newXref));
+        digits.CopyTo(result, newXref + tableAndTrailer.Length);
+        rest.CopyTo(result.AsSpan(newXref + tableAndTrailer.Length + digits.Length));
+        return result;
     }
 }

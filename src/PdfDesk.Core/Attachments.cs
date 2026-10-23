@@ -106,6 +106,7 @@ public static class Attachments
             var entries = PdfObj.NameTree(EmbeddedFilesRoot(doc)).ToList();
             if (entries.RemoveAll(e => e.Key == name) == 0) throw new InvalidOperationException("That attachment no longer exists.");
             WriteTree(doc, entries);
+            SignedEdits.NoteRemoval();
         }
         return PdfObj.Save(doc);
     }

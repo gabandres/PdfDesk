@@ -1009,7 +1009,9 @@ public partial class DocumentTab
 
     /// <summary>
     /// Edits of a signed document are appended after the signed bytes (incremental update), which keeps the signatures
-    /// valid. Only an encrypted signed document is rewritten (redaction too, which warns on its own).
+    /// valid. An encrypted signed document is always rewritten: it is warned about before the first edit. Any other edit
+    /// that can't be appended stops with <see cref="SignaturesWouldBreakException"/> and asks
+    /// (<see cref="ConfirmSignatureRewrite"/>) before it is redone as a rewrite. Redaction warns on its own.
     /// </summary>
     private bool NeedsSignedWarning => _signedOnOpen && !_signatureWarned && Session.Engine.IsEncrypted;
 
@@ -1022,6 +1024,29 @@ public partial class DocumentTab
                 "Edit anyway", warning: true)) return false;
         _signatureWarned = true;
         return true;
+    }
+
+    /// <summary>An edit of a signed document can't be appended: saving it rewrites the file. True when the user goes ahead.</summary>
+    private bool ConfirmSignatureRewrite(int signatures) =>
+        Prompt.Confirm(Window.GetWindow(this), "This edit breaks the signatures",
+            $"This edit can't be added to the signed file as an update, so saving it will invalidate {(signatures == 1 ? "its signature" : $"its {signatures} signatures")}: they will no longer verify. Continue? To keep the signed original, save your changes as a copy (Save As).",
+            "Edit anyway", warning: true);
+
+    /// <summary>
+    /// A removal (pages, a comment, an attachment) appended to a signed document leaves the item in the file's earlier,
+    /// signed revision: say so, and offer the rewrite that removes it for good.
+    /// </summary>
+    private void NotifyRemovedItemKept() =>
+        Notify("The removed item is still recoverable from the signed original revision. To remove it for good, flatten the file and save it as a copy (this breaks the signatures).",
+            "Flatten…", () => _ = FlattenRevisionsAsync());
+
+    private async Task FlattenRevisionsAsync()
+    {
+        if (_disposed || IsBusy) return;
+        if (!Prompt.Confirm(Window.GetWindow(this), "Flatten the signed file?",
+                "The file is rewritten as a single revision: what your edits removed is gone for good, and its signatures will no longer verify. Save the result as a copy (Save As) to keep the signed original.",
+                "Flatten", warning: true)) return;
+        await RunEdit("Flatten (remove earlier revisions)", SignedEdits.Flatten);
     }
 
     // ───────────────────────────── Redaction ─────────────────────────────
