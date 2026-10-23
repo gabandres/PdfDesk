@@ -343,6 +343,13 @@ public sealed class AppSettings
     /// <summary>Add an RFC 3161 timestamp (sends only a hash of the signature to <see cref="TimestampUrl"/>).</summary>
     public bool SignTimestamp { get; set; }
     public string TimestampUrl { get; set; } = "http://timestamp.digicert.com";
+    /// <summary>Scan dialog (Desk suite): the last scanner (its PrintDesk UUID) and the choices made for it.</summary>
+    public string ScanDevice { get; set; } = "";
+    public string ScanSource { get; set; } = "";
+    public bool ScanColor { get; set; } = true;
+    public int ScanResolution { get; set; } = 300;
+    public string ScanPageSize { get; set; } = "";
+    public bool ScanOcr { get; set; } = true;
     /// <summary>Per-file view state, keyed by full path (most recent 300 kept).</summary>
     public Dictionary<string, FileState> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 

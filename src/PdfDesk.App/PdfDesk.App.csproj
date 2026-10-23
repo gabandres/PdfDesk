@@ -14,6 +14,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\PdfDesk.Core\PdfDesk.Core.csproj" />
+    <!-- Desk suite: eSCL scanning, printer status and discovery from PrintDesk (no packages: protocols + WinRT only) -->
+    <ProjectReference Include="$(PrintDeskRoot)src\PrintDesk.Core\PrintDesk.Core.csproj" />
+    <ProjectReference Include="$(PrintDeskRoot)src\PrintDesk.Windows\PrintDesk.Windows.csproj" />
   </ItemGroup>
   <!-- Publish: our own symbols are embedded (Directory.Build.props); packages' loose .pdb files (e.g. libHarfBuzzSharp.pdb,
        23 MB) would land next to the single-file exe, so leave every .pdb out of the publish output. -->

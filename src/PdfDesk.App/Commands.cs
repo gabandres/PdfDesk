@@ -46,6 +46,7 @@ public static class Cmd
     public static readonly RoutedUICommand CloseDoc = Make("_Close", nameof(CloseDoc), K(Key.W, ModifierKeys.Control), K(Key.F4, ModifierKeys.Control));
     public static readonly RoutedUICommand CloseAll = Make("Close A_ll", nameof(CloseAll), K(Key.W, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand Print = Make("_Print…", nameof(Print), K(Key.P, ModifierKeys.Control));
+    public static readonly RoutedUICommand Scan = Make("Sca_n…", nameof(Scan));
     public static readonly RoutedUICommand ExportImages = Make("Export Pages as _Images…", nameof(ExportImages));
     public static readonly RoutedUICommand Properties = Make("Document P_roperties…", nameof(Properties), K(Key.D, ModifierKeys.Control));
     public static readonly RoutedUICommand ShowInFolder = Make("Show in _Folder", nameof(ShowInFolder));
@@ -115,6 +116,7 @@ public static class Cmd
     public static readonly RoutedUICommand DeleteSelected = Make("Delete Selected Pages", nameof(DeleteSelected));
     public static readonly RoutedUICommand InsertPages = Make("_Insert Pages from File…", nameof(InsertPages), K(Key.I, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand InsertBlank = Make("Insert _Blank Pages…", nameof(InsertBlank));
+    public static readonly RoutedUICommand InsertFromScanner = Make("Insert from Sca_nner…", nameof(InsertFromScanner));
     public static readonly RoutedUICommand ExtractPages = Make("_Extract Pages…", nameof(ExtractPages), K(Key.E, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand SplitDocument = Make("_Split Document…", nameof(SplitDocument));
     public static readonly RoutedUICommand MovePages = Make("_Move Pages…", nameof(MovePages), K(Key.M, ModifierKeys.Control | ModifierKeys.Shift));

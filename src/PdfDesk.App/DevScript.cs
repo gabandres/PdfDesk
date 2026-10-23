@@ -19,7 +19,9 @@ namespace PdfDesk.App;
 /// apply-redactions [confirm] · attachments · attach path · extract i path · open-attachment i · remove-attachment i ·
 /// layers · layer name on|off · sigs · bars · labels · gotopage label · title · open path · pane-state</c>. Signing:
 /// <c>makepfx path password name · sign pfx password [box p x y w h | field name | invisible] [ts url] · addsig p x y ·
-/// movesig i p x y w h · delsig i</c>.
+/// movesig i p x y w h · delsig i</c>. Desk suite: <c>scandialog</c> (the open Scan dialog's scanners and choices) <c>·
+/// scanpage file.jpg [dpi]</c> (give the open Scan dialog a page, as if scanned) <c>·
+/// printercheck queue[|port]</c> (printer status for a Windows queue) <c>· desk</c> (is PrintDesk found).
 /// Mouse (page points, top-left origin): <c>mouse move|down|up|click|dbl|right p x y · drag p x1 y1 x2 y2 · tip</c> (the
 /// hover tip's text) <c>· menu Header</c> (click an item of the open context menu) <c>· mouselog</c>. Prompts and file
 /// pickers: <c>prompt Button · answer Button</c> (for the prompt the next step opens) <c>· windows · dialogok Cmd …
@@ -282,6 +284,30 @@ internal static class DevScript
             case "shotwin":
                 // shotwin out.png: snapshot of the topmost open dialog.
                 Shot(Application.Current.Windows.OfType<Window>().Last(w => w != window && w.IsVisible), arg);
+                break;
+            case "scandialog":
+                // scandialog: the open Scan dialog's scanners and choices (use with "later" while Cmd Scan is open).
+                log.Add(Application.Current.Windows.OfType<ScanDialog>().FirstOrDefault()?.DevDescribe() ?? "scandialog: none open");
+                break;
+            case "scanpage":
+            {
+                // scanpage <file.jpg> [dpi]: hand the open Scan dialog a page as if scanned (then press its finish button).
+                var a = arg.Split(' ');
+                var dlg = Application.Current.Windows.OfType<ScanDialog>().First();
+                await dlg.DevAddPageAsync(await File.ReadAllBytesAsync(a[0]), a.Length > 1 ? int.Parse(a[1]) : 150);
+                log.Add($"scanpage: {dlg.DevDescribe()}");
+                break;
+            }
+            case "printercheck":
+            {
+                // printercheck <queue name>[|port]: the Desk printer-status check for a Windows queue (read-only probe).
+                var q = arg.Split('|', 2);
+                var r = await PrinterCheck.CheckAsync(new PrintDesk.Core.Suite.QueueInfo(q[0], q.Length > 1 ? q[1] : null));
+                log.Add(r is null ? $"printercheck '{q[0]}': no PrintDesk printer" : $"printercheck '{q[0]}': {r.Printer.Name} ({r.Printer.Host}) {r.Health.State} warn={r.Health.ShouldWarn} '{r.Health.Summary}' supplies=[{string.Join("; ", r.Health.Supplies)}]");
+                break;
+            }
+            case "desk":
+                log.Add($"desk: PrintDesk={(Desk.PrintDeskPath is { } pd ? Log.Name(pd) : "not installed")} menu={window.PrintDeskMenu.Visibility}");
                 break;
             case "windows":
                 // windows: the open secondary windows (prompts, dialogs, menus), with their heading and buttons.
