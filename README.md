@@ -73,6 +73,14 @@ wipe their values); each value set is recorded, with the value it replaced, in `
 - **Comments** (Review menu): highlight / underline / strike out selected text (Ctrl+Shift+H / U / X, or right-click),
   sticky notes (Ctrl+Shift+C), hover to read; the Comments pane lists them by page with replies, filter, edit and delete
   (undoable).
+- **Draw** (Review › Draw, or the Draw button): pen (P), highlighter pen (M), rectangle (R), ellipse (E), line (L), arrow (W),
+  text box (B: click to type a line, drag for a wrapped box) and callout (C: drag from what it points at to where its text
+  goes). Live preview with mouse, pen or touch; Shift draws squares, circles and 45° lines; Esc goes back to the hand tool.
+  With the hand tool, click a drawing to select it: drag to move, drag a handle to resize (a line's ends and a callout's
+  tip move on their own), arrow keys nudge (Shift: 10 pt), Del deletes, double-click or Enter edits a text box. A
+  floating style bar sets color (8 swatches or any color), line width, opacity, fill, border, text size and arrowheads;
+  each tool remembers its last look. Every change is one undo step and shows in the Comments pane (picking one there
+  selects it on the page). Works on turned views and turned pages; on a signed file it is an allowed change.
 - **Attachments**: list, save, open attached PDFs in a tab, attach and remove files (never run by PdfDesk). Saved
   attachments are marked as downloaded from the internet (Mark of the Web), like a browser download, so Windows and
   Office treat them with the same care.
@@ -129,8 +137,8 @@ wipe their values); each value set is recorded, with the value it replaced, in `
 | Path | What |
 |---|---|
 | `src/PdfDesk.Core` | `PdfEngine` (MuPDF: render, text, links, outline), `PageEditor` (PDFsharp page edits, bytes in → bytes out), `DocumentSession` (bytes + undo snapshots), `PageText`, `PageRange` |
-| `src/PdfDesk.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` (outline editing), `Flattener` (annotations/fields into page content); helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
-| `src/PdfDesk.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing` overlays); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` are the commands |
+| `src/PdfDesk.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments, drawings) + `DrawingGeometry` (hit-testing, resize handles), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings); helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
+| `src/PdfDesk.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing`, `.Drawing` overlays; `DrawTools`); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Drawing.cs`: drawing edits and the style bar; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` are the commands |
 | `src/PdfDesk.App` (Desk suite) | `ScanDialog.cs` (Scan / Insert from Scanner), `Desk.cs` (printer status check, opening PrintDesk) |
 | `tests/PdfDesk.Tests` | `dotnet test tests/PdfDesk.Tests` |
 
@@ -181,6 +189,7 @@ All dependencies and their licenses: `THIRD-PARTY-NOTICES.md` (also in Help › 
   Scripts that open URLs, submit, print or mail are ignored. XFA-only forms can't be filled.
 - Right-to-left text with explicit bidi controls (embeddings, overrides, isolates) isn't laid out in new annotations,
   stamps and fields.
-- No shape/ink drawing tools or editing of existing page text.
+- No editing of existing page text. Drawing: no polygon tool (existing polygons and polylines can be moved, resized and
+  restyled), each pen stroke is its own annotation, and pen pressure is ignored.
 - Scanning works with network scanners that speak eSCL (AirScan/Mopria); USB-only, WIA and TWAIN scanners aren't
   listed. Printer status needs the printer to be one PrintDesk remembers.

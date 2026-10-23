@@ -350,6 +350,9 @@ public sealed class AppSettings
     public int ScanResolution { get; set; } = 300;
     public string ScanPageSize { get; set; } = "";
     public bool ScanOcr { get; set; } = true;
+
+    /// <summary>Each drawing tool's last look, by tool name ("Pen", "Rectangle"…); see <c>DrawStyles</c>.</summary>
+    public Dictionary<string, DrawStyleSetting> DrawStyles { get; set; } = [];
     /// <summary>Per-file view state, keyed by full path (most recent 300 kept).</summary>
     public Dictionary<string, FileState> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -359,6 +362,19 @@ public sealed class AppSettings
         public string ZoomMode { get; set; } = "FitWidth";
         public double Zoom { get; set; } = 1;
         public DateTime LastOpened { get; set; }
+    }
+
+    /// <summary>A drawing tool's look as saved: colors as "#RRGGBB" (null = none), sizes in points.</summary>
+    public sealed class DrawStyleSetting
+    {
+        public string? Color { get; set; }
+        public string? Fill { get; set; }
+        public string? TextColor { get; set; }
+        public double Width { get; set; }
+        public double Opacity { get; set; } = 1;
+        public double FontSize { get; set; } = 12;
+        public string? StartEnding { get; set; }
+        public string? EndEnding { get; set; }
     }
 
     /// <summary>What <see cref="ClearRecent"/> removed, for its Undo.</summary>

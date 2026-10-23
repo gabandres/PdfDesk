@@ -135,6 +135,30 @@ public static class Cmd
     public static readonly RoutedUICommand StrikeOut = Make("_Strike Out Text", nameof(StrikeOut), K(Key.X, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand AddNote = Make("Add _Note", nameof(AddNote), K(Key.C, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand Redact = Make("_Redact", nameof(Redact));
+
+    // Drawing tools. Their keys (P, M, R, E, L, W, B, C) are page-view keys like H and T, not commands: see DrawTools.KeyOf.
+    public static readonly RoutedUICommand ToolPen = Make("_Pen", nameof(ToolPen));
+    public static readonly RoutedUICommand ToolHighlighter = Make("_Highlighter Pen", nameof(ToolHighlighter));
+    public static readonly RoutedUICommand ToolRectangle = Make("_Rectangle", nameof(ToolRectangle));
+    public static readonly RoutedUICommand ToolEllipse = Make("_Ellipse", nameof(ToolEllipse));
+    public static readonly RoutedUICommand ToolLine = Make("_Line", nameof(ToolLine));
+    public static readonly RoutedUICommand ToolArrow = Make("_Arrow", nameof(ToolArrow));
+    public static readonly RoutedUICommand ToolTextBox = Make("Te_xt Box", nameof(ToolTextBox));
+    public static readonly RoutedUICommand ToolCallout = Make("_Callout", nameof(ToolCallout));
+
+    /// <summary>The command that picks a drawing tool.</summary>
+    public static RoutedUICommand DrawTool(Viewer.ViewerTool tool) => tool switch
+    {
+        Viewer.ViewerTool.Pen => ToolPen,
+        Viewer.ViewerTool.Highlighter => ToolHighlighter,
+        Viewer.ViewerTool.Rectangle => ToolRectangle,
+        Viewer.ViewerTool.Ellipse => ToolEllipse,
+        Viewer.ViewerTool.Line => ToolLine,
+        Viewer.ViewerTool.Arrow => ToolArrow,
+        Viewer.ViewerTool.TextBox => ToolTextBox,
+        Viewer.ViewerTool.Callout => ToolCallout,
+        _ => throw new ArgumentOutOfRangeException(nameof(tool)),
+    };
     public static readonly RoutedUICommand RecognizeText = Make("Recognize Te_xt (OCR)…", nameof(RecognizeText));
     public static readonly RoutedUICommand ReloadFromDisk = Make("Re_load from Disk", nameof(ReloadFromDisk), K(Key.F5));
 }

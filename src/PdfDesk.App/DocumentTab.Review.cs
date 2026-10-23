@@ -20,7 +20,10 @@ public sealed class CommentItem(AnnotationInfo info, string pageHeader, int dept
     public string Contents => Info.Contents.Trim();
     public Visibility ContentsVisibility => Contents.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
-    public string Title => Info.ReplyTo is not null ? "Reply" : Info.Kind switch
+    public string Title => TitleOf(Info);
+
+    /// <summary>What a comment is called ("Highlight", "Arrow", "Callout"…).</summary>
+    public static string TitleOf(AnnotationInfo info) => info.ReplyTo is not null ? "Reply" : DrawingTitle(info) ?? info.Kind switch
     {
         AnnotationKind.Text => "Note",
         AnnotationKind.FreeText => "Text box",
@@ -33,8 +36,16 @@ public sealed class CommentItem(AnnotationInfo info, string pageHeader, int dept
         AnnotationKind.Ink => "Drawing",
         AnnotationKind.Caret => "Insert text",
         AnnotationKind.Redact => "Redaction mark",
-        AnnotationKind.Other => Info.Subtype,
-        _ => Info.Kind.ToString(),
+        AnnotationKind.Other => info.Subtype,
+        _ => info.Kind.ToString(),
+    };
+
+    private static string? DrawingTitle(AnnotationInfo a) => !DrawTools.IsDrawing(a) || DrawTools.ToolOf(a) is not { } tool ? null : a.Subtype switch
+    {
+        "Polygon" => "Polygon",
+        "PolyLine" => "Polyline",
+        "FreeText" when tool == ViewerTool.TextBox && a.Style?.Color is null => "Typewriter text",
+        _ => DrawTools.Title(tool),
     };
 
     public string Meta
@@ -47,7 +58,7 @@ public sealed class CommentItem(AnnotationInfo info, string pageHeader, int dept
         }
     }
 
-    public string Glyph => Info.Kind switch
+    public string Glyph => DrawTools.IsDrawing(Info) && DrawTools.ToolOf(Info) is { } tool ? DrawTools.Glyph(tool) : Info.Kind switch
     {
         AnnotationKind.Highlight => "",
         AnnotationKind.Underline or AnnotationKind.Squiggly => "",
@@ -258,7 +269,20 @@ public partial class DocumentTab
             var sel = CommentList.SelectedItem as CommentItem;
             CommentEditButton.IsEnabled = CommentEditMenu.IsEnabled = sel is not null;
             CommentDeleteButton.IsEnabled = CommentDeleteMenu.IsEnabled = sel is not null;
-            if (sel is not null && !_syncingComments) FlashComment(sel.Info);
+            if (sel is not null && !_syncingComments)
+            {
+                FlashComment(sel.Info);
+                // A drawing picked in the list is selected on the page too (ready to move, restyle or delete).
+                _syncingComments = true;
+                try { Viewer.SelectDrawing(DrawTools.IsDrawing(sel.Info) ? sel.Info.Id : null); }
+                finally { _syncingComments = false; }
+            }
+        };
+        CommentList.PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            // Clicking the drawing already selected in the list selects it on the page again (after the page lost it).
+            if (ItemData<CommentItem>(e.OriginalSource) is { } c && c == CommentList.SelectedItem && DrawTools.IsDrawing(c.Info) && Viewer.SelectedDrawing?.Id != c.Info.Id)
+                Viewer.SelectDrawing(c.Info.Id);
         };
         CommentList.MouseDoubleClick += (_, e) =>
         {
@@ -335,6 +359,7 @@ public partial class DocumentTab
                 item.Visibility = markup ? Visibility.Visible : Visibility.Collapsed;
         };
         InitSigning();
+        InitDrawing();
         _ = LoadReviewAsync();
     }
 

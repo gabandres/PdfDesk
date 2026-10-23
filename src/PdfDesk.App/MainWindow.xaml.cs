@@ -107,6 +107,7 @@ public partial class MainWindow : Window
         TabStrip.ItemsSource = _tabs;
         RestorePlacement();
         BindCommands();
+        FillDrawMenu(DrawMenu);
         RefreshRecent();
         _ = ShowPrintDeskMenuAsync();
 
@@ -632,6 +633,13 @@ public partial class MainWindow : Window
         var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
         foreach (var item in DocCommands.OverflowItems)
         {
+            if (item == DrawButton)
+            {
+                var draw = new MenuItem { Header = "_Draw", Icon = new TextBlock { Text = DrawButtonIcon.Text, FontFamily = (FontFamily)FindResource("Icons"), FontSize = 14 } };
+                FillDrawMenu(draw);
+                menu.Items.Add(draw);
+                continue;
+            }
             if (item is not System.Windows.Controls.Primitives.ButtonBase b)
             {
                 if (menu.Items.Count > 0 && menu.Items[^1] is not Separator) menu.Items.Add(new Separator()); // a bar separator
@@ -674,6 +682,7 @@ public partial class MainWindow : Window
         }
         Walk(CommandBar);
         Walk(StartPage);
+        foreach (var tool in DrawTools.All) glyphs.TryAdd(Cmd.DrawTool(tool), DrawTools.Glyph(tool));
         return glyphs;
     }
 
@@ -1367,6 +1376,8 @@ public partial class MainWindow : Window
         Bind(Cmd.StrikeOut, t => _ = t.MarkupSelection(TextMarkupKind.StrikeOut), t => t.CanMarkup);
         Bind(Cmd.AddNote, t => ToggleTool(t, ViewerTool.AddNote), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
+        foreach (var tool in DrawTools.All)
+            Bind(Cmd.DrawTool(tool), t => ToggleTool(t, tool), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.RecognizeText, t => _ = t.RecognizeText(), t => t.Session.IsPdf);
     }
 
@@ -1406,6 +1417,33 @@ public partial class MainWindow : Window
         if (ActiveTab is { IsBusy: false } t) _ = t.ApplyRedactions();
     }
 
+    /// <summary>The drawing tools as menu items (the Review menu's Draw submenu, the Draw button's dropdown, the More menu).</summary>
+    private void FillDrawMenu(ItemsControl menu)
+    {
+        menu.Items.Clear();
+        var current = ActiveTab?.PageView.Tool;
+        foreach (var tool in DrawTools.All)
+        {
+            menu.Items.Add(new MenuItem
+            {
+                Command = Cmd.DrawTool(tool),
+                InputGestureText = DrawTools.KeyOf(tool).ToString(),
+                Icon = new TextBlock { Text = DrawTools.Glyph(tool), FontFamily = (FontFamily)FindResource("Icons"), FontSize = 14 },
+                IsChecked = current == tool,
+            });
+            if (tool is ViewerTool.Highlighter or ViewerTool.Arrow) menu.Items.Add(new Separator());
+        }
+    }
+
+    private void OnDrawClick(object sender, RoutedEventArgs e)
+    {
+        var menu = new ContextMenu { PlacementTarget = DrawButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        FillDrawMenu(menu);
+        menu.Closed += (_, _) => UpdateUi();
+        menu.IsOpen = true;
+        UpdateUi(); // the button shows whether a drawing tool is on, not the click
+    }
+
     /// <summary>Fill and Sign tools toggle: clicking the active one goes back to the hand tool.</summary>
     private void ToggleTool(DocumentTab t, ViewerTool tool)
     {
@@ -1416,6 +1454,11 @@ public partial class MainWindow : Window
             ViewerTool.AddCheck => "Click where each check mark should go; click a mark again to remove it",
             ViewerTool.AddNote => "Click on the page where the note should go",
             ViewerTool.Redact => "Drag over the areas to black out; nothing is removed until you apply the redactions",
+            ViewerTool.Pen or ViewerTool.Highlighter => "Draw on the page with the mouse, pen or a finger; Esc goes back to the hand tool",
+            ViewerTool.Rectangle or ViewerTool.Ellipse => "Drag to draw; Shift makes a square or circle. Esc goes back to the hand tool",
+            ViewerTool.Line or ViewerTool.Arrow => "Drag to draw; Shift keeps it horizontal, vertical or at 45°. Esc goes back to the hand tool",
+            ViewerTool.TextBox => "Click to type a line, or drag a box for wrapped text",
+            ViewerTool.Callout => "Drag from what the callout points at to where its text goes",
             _ => "Click where each cross should go; click one again to remove it",
         });
         UpdateUi();
@@ -1749,6 +1792,10 @@ public partial class MainWindow : Window
         AddSignatureButton.IsChecked = v?.Tool is ViewerTool.AddSignature or ViewerTool.PlaceSignature;
         NoteButton.IsChecked = NoteMenu.IsChecked = v?.Tool == ViewerTool.AddNote;
         RedactButton.IsChecked = RedactMenu.IsChecked = v?.Tool == ViewerTool.Redact;
+        var drawTool = v is not null && DrawTools.IsDrawTool(v.Tool) ? v.Tool : (ViewerTool?)null;
+        DrawButton.IsChecked = drawTool is not null;
+        if (drawTool is { } dt) DrawButtonIcon.Text = DrawTools.Glyph(dt);
+        foreach (var mi in DrawMenu.Items.OfType<MenuItem>()) mi.IsChecked = drawTool is { } d && mi.Command == Cmd.DrawTool(d);
         var pdf = t is { IsBusy: false, IsOrganizing: false, Session.IsPdf: true };
         AttachMenu.IsEnabled = pdf;
         RedactTextMenu.IsEnabled = pdf && v!.HasSelection;

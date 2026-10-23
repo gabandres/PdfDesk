@@ -9,7 +9,12 @@ namespace PdfDesk.App.Viewer;
 
 public enum ViewLayout { SinglePage, Continuous, Facing, FacingCover }
 public enum ZoomMode { Custom, FitWidth, FitPage }
-public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact, PlaceSignature, AddSignature }
+public enum ViewerTool
+{
+    Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact, PlaceSignature, AddSignature,
+    // Drawing (see DrawTools)
+    Pen, Highlighter, Rectangle, Ellipse, Line, Arrow, TextBox, Callout,
+}
 
 public sealed record SearchHit(int Page, int Start, int End, IReadOnlyList<RectD> Rects, string Excerpt)
 {
@@ -159,6 +164,7 @@ public sealed partial class PageViewer : ScrollViewer
         _surface.MouseMove += OnSurfaceMove;
         _surface.MouseLeftButtonUp += OnSurfaceUp;
         _surface.LostMouseCapture += (_, _) => EndDrag();
+        InitDrawing();
         ScrollChanged += (_, e) =>
         {
             // ScrollChanged bubbles: an inline editor's own text scroller (a TextBox growing or turning) isn't the view.
@@ -223,6 +229,7 @@ public sealed partial class PageViewer : ScrollViewer
             _tool = value;
             IsManipulationEnabled = value == ViewerTool.Hand;
             if (value != ViewerTool.SelectText && !_caretBrowsing) ClearSelection();
+            OnDrawToolChanged();
             UpdateCursor(Mouse.GetPosition(_surface));
             ToolChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -1089,6 +1096,7 @@ public sealed partial class PageViewer : ScrollViewer
             PaintForms(dc, i);
             PaintReview(dc, i);
             PaintSigning(dc, i);
+            PaintDrawing(dc, i);
 
             if (_hitsByPage.TryGetValue(i, out var hits))
                 foreach (var hit in hits)
@@ -1162,10 +1170,11 @@ public sealed partial class PageViewer : ScrollViewer
             Set(editor, HeightProperty, Math.Max(thickness, 16));
             (left, top) = (r.X, r.Y);
         }
-        else if (_editorStamp is { } s && s.Page < _rects.Length && !_rects[s.Page].IsEmpty)
+        else if ((_editorStamp is { } s ? (s.Page, s.Pt) : _editorDrawing is { } d ? (d.Page, new Point(d.Box.X, d.Box.Y)) : (-1, default)) is var (sPage, sPt)
+                 && sPage >= 0 && sPage < _rects.Length && !_rects[sPage].IsEmpty)
         {
             // The text's top-left corner stays where it is on the page; the editor hangs from it, turned.
-            var p = ToSurfacePoint(s.Page, s.Pt.X, s.Pt.Y);
+            var p = ToSurfacePoint(sPage, sPt.X, sPt.Y);
             angle = _viewRotation;
             double ew = editor.ActualWidth, eh = editor.ActualHeight;
             (left, top) = angle switch
@@ -1242,6 +1251,7 @@ public sealed partial class PageViewer : ScrollViewer
 
     private void OnSurfaceDown(object sender, MouseButtonEventArgs e)
     {
+        var hadTextEditor = _editorDrawing is not null; // a click that only closes a text box's editor doesn't start another
         Focus();
         if (_engine is null) return;
         var sp = e.GetPosition(_surface);
@@ -1256,6 +1266,7 @@ public sealed partial class PageViewer : ScrollViewer
         if (e.ChangedButton == MouseButton.Left && HandleFormMouseDown(e, page, sp)) return;
         CommitEditor();
         if (HandleSigningDown(e, page, sp)) return;
+        if (HandleDrawingDown(e, page, sp, hadTextEditor)) return;
         if (HandleReviewDown(e, page, sp)) return;
 
         switch (_tool)
@@ -1321,6 +1332,7 @@ public sealed partial class PageViewer : ScrollViewer
 
             AutoScroll(vpPos);
             if (MoveSigningDrag(sp)) return;
+            if (MoveDrawing(e, sp)) return;
             if (_selecting && _dragged)
             {
                 var p = HitPage(sp);
@@ -1381,6 +1393,12 @@ public sealed partial class PageViewer : ScrollViewer
             _surface.Cursor = signCursor;
             return;
         }
+        if (DrawingCursor(page, sp) is { } drawCursor)
+        {
+            if (DrawTools.IsDrawTool(_tool) || !ShowAnnotTip(page, sp)) HideLinkTip(); // a drawing's comment shows on hover too
+            _surface.Cursor = drawCursor;
+            return;
+        }
         if (page >= 0 && LinkAt(page, ToPagePoint(page, sp)) is { } link)
         {
             ShowLinkTip(page, link, keyboard: false);
@@ -1402,7 +1420,7 @@ public sealed partial class PageViewer : ScrollViewer
     private void OnSurfaceUp(object sender, MouseButtonEventArgs e)
     {
         var sp = e.GetPosition(_surface);
-        if (EndSigningDrag())
+        if (EndSigningDrag() || EndDrawingDrag(sp))
         {
             EndDrag();
             UpdateCursor(sp);
@@ -1439,6 +1457,7 @@ public sealed partial class PageViewer : ScrollViewer
     {
         _panning = _selecting = false;
         CancelSigningDrag();
+        CancelDrawingDrag();
         if (_markPage >= 0)
         {
             _markPage = -1;
@@ -1552,7 +1571,7 @@ public sealed partial class PageViewer : ScrollViewer
         // Keys typed into a field or Fill & Sign editor bubble up here. Leave them alone: handling KeyDown makes WPF
         // drop the character, so viewer shortcuts (H, A, T, Space…) would eat letters from the user's text.
         if (IsEditorKey(e)) return;
-        if (_engine is not null && (HandleFormKey(e) || HandleSigningKey(e) || HandleCaretKey(e)))
+        if (_engine is not null && (HandleFormKey(e) || HandleSigningKey(e) || HandleDrawingKey(e) || HandleCaretKey(e)))
         {
             e.Handled = true;
             return;
@@ -1610,6 +1629,12 @@ public sealed partial class PageViewer : ScrollViewer
                 break;
             case Key.X:
                 Tool = ViewerTool.AddCross;
+                break;
+            case var k when CanAnnotate && DrawTools.ToolForKey(k) is { } drawTool:
+                Tool = drawTool;
+                break;
+            case Key.Escape when DrawTools.IsDrawTool(_tool):
+                Tool = ViewerTool.Hand;
                 break;
             case Key.Escape when HasSelection:
                 ClearSelection();

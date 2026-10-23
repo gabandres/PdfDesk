@@ -45,6 +45,7 @@ public sealed partial class PageViewer
     {
         _annotsByPage = annotations.Where(a => !a.Hidden).GroupBy(a => a.PageIndex).ToDictionary(g => g.Key, g => g.ToList());
         if (_tipAnnot is not null) HideLinkTip();
+        OnDrawingsReloaded();
     }
 
     public IReadOnlyList<RedactMark> Redactions => _redactions;
@@ -263,6 +264,7 @@ public sealed partial class PageViewer
         _flashTimer?.Stop();
         _markPage = -1;
         ResetSigning();
+        ResetDrawing();
         if (_redactions.Count == 0) return;
         _redactions.Clear();
         RedactionsChanged?.Invoke(this, EventArgs.Empty);
