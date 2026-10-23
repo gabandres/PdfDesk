@@ -24,11 +24,13 @@
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
       <!-- Native PDB writer the runtime pack carries for debugging tools; the app never writes PDBs -->
-      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.arm64.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.arm64.dll' or '%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.amd64.dll'" />
     </ItemGroup>
   </Target>
   <ItemGroup>
     <Resource Include="..\..\assets\PdfDesk.ico" Link="PdfDesk.ico" />
     <Resource Include="..\..\assets\PdfDesk-512.png" Link="PdfDeskLogo.png" />
+    <!-- Shown by Help > About > Third-party notices; packaging/pack-msix.ps1 also copies it into the MSIX -->
+    <Resource Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" />
   </ItemGroup>
 </Project>

@@ -1709,6 +1709,8 @@ public partial class MainWindow : Window
         var dark = dlg.AddCheck("Dark pages (inverted colors for night reading)", s.DarkPages);
         var author = dlg.AddText("Author name on comments", s.AuthorName is { Length: > 0 } a ? a : Environment.UserName);
         dlg.AddNote("To make PdfDesk your default PDF app: Windows Settings › Apps › Default apps › PdfDesk.");
+        var defaults = dlg.Add(null, new Button { Content = "Open Default apps", HorizontalAlignment = HorizontalAlignment.Left });
+        defaults.Click += (_, _) => Shell.Open(AppEnvironment.DefaultAppsUri);
         if (!dlg.ShowModal()) return;
 
         s.Theme = theme.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "System" };
@@ -1887,6 +1889,32 @@ public partial class MainWindow : Window
         dlg.Add(null, new TextBlock { Text = $"PdfDesk {version?.ToString(3)}", FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 10, 0, 0) });
         dlg.AddNote($"Read, search, print and organize PDFs. Native {RuntimeInformation.ProcessArchitecture} build.");
         dlg.AddNote("Rendering, text and search: MuPDF (AGPL-3.0) via MuPDFCore. Page editing: PDFsharp (MIT). Personal use. Nothing you open leaves this computer.");
+        if (AppEnvironment.IsPackaged) dlg.AddNote("Installed as an app package; Windows keeps it up to date.");
+        var notices = dlg.Add(null, new Button { Content = "Third-party notices…", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) });
+        notices.Click += (_, _) => ShowThirdPartyNotices(dlg);
+        dlg.ShowModal();
+    }
+
+    /// <summary>The licenses of the libraries PdfDesk ships (THIRD-PARTY-NOTICES.md, embedded as a resource).</summary>
+    private static void ShowThirdPartyNotices(Window owner)
+    {
+        string text;
+        try
+        {
+            var info = Application.GetResourceStream(new Uri("pack://application:,,,/THIRD-PARTY-NOTICES.md"));
+            using var reader = new StreamReader(info.Stream);
+            text = reader.ReadToEnd();
+        }
+        catch (IOException ex)
+        {
+            text = $"The notices could not be loaded: {ex.Message}";
+        }
+        var dlg = new FormDialog(owner, "Third-party notices", "Close", 640);
+        dlg.Add(null, new TextBox
+        {
+            Text = text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, Height = 420,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+        });
         dlg.ShowModal();
     }
 }

@@ -2,6 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Architecture-neutral IL, so the x64 and ARM64 app builds (Directory.Build.props defaults to win-arm64) can both reference it -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
   </PropertyGroup>
   <ItemGroup>
     <!-- HarfBuzzSharp (MIT): complex-script shaping and font subsetting for Fill & Sign, form appearances and OCR text. Ships win-arm64 natives. -->
