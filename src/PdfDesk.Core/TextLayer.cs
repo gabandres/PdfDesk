@@ -12,8 +12,8 @@ public sealed record OcrWord(string Text, RectD Rect);
 /// <summary>
 /// Invisible text over scanned pages (an OCR text layer): the page looks the same, but its words can be selected,
 /// copied and searched. Each word is written with text render mode 3 (no paint), stretched horizontally to its box, in
-/// a content stream of its own appended to the page (the existing content is wrapped in q/Q so its graphics state can't
-/// leak into it), with an embedded subset Unicode font whose /ToUnicode returns the words as recognized.
+/// a content stream of its own placed before the page's content (so the existing content's graphics state, balanced or
+/// not, can't leak into it), with an embedded subset Unicode font whose /ToUnicode returns the words as recognized.
 /// </summary>
 public static class TextLayer
 {
@@ -36,7 +36,7 @@ public static class TextLayer
             for (var n = 1; fonts.Elements.Keys.Any(k => k.StartsWith(prefix, StringComparison.Ordinal)); n++) prefix = $"/PdOcr{n}_";
             var writer = new CidFontWriter(prefix);
 
-            var ops = new StringBuilder("Q\nq BT 3 Tr 0 Tc 0 Tw 0 Ts\n");
+            var ops = new StringBuilder("q BT 3 Tr 0 Tc 0 Tw 0 Ts\n");
             var words = all.Where(Usable).ToList();
             var space = TextShaper.Shape(" ", primary);
             for (var i = 0; i < words.Count; i++)
@@ -68,7 +68,12 @@ public static class TextLayer
             if (writer.IsEmpty) continue;
 
             foreach (var (name, font) in writer.BuildFonts(doc).Elements) fonts.Elements[name] = font;
+            // The layer goes first, in the page's initial graphics state: whatever the existing content does to the state
+            // (a scaling cm left in an unbalanced q, or a stray Q that pops more than it pushed) can't reach it, and as the
+            // text is invisible, painting order doesn't matter. The existing content is wrapped in q…Q so what follows it
+            // (another tool's additions) starts clean too.
             var contents = new PdfArray(doc);
+            contents.Elements.Add(PdfObj.AddStream(doc, Encoding.ASCII.GetBytes(ops.ToString())).Reference!);
             contents.Elements.Add(PdfObj.AddStream(doc, "q\n"u8.ToArray(), compress: false).Reference!);
             switch (page.Elements["/Contents"])
             {
@@ -82,7 +87,7 @@ public static class TextLayer
                     contents.Elements.Add(r);
                     break;
             }
-            contents.Elements.Add(PdfObj.AddStream(doc, Encoding.ASCII.GetBytes(ops.ToString())).Reference!);
+            contents.Elements.Add(PdfObj.AddStream(doc, "\nQ\n"u8.ToArray(), compress: false).Reference!);
             page.Elements["/Contents"] = contents;
         }
         return PdfObj.Save(doc);

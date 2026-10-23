@@ -772,11 +772,14 @@ public partial class DocumentTab : UserControl, IDisposable
             var data = Session.Data;
             var password = Session.Password;
             byte[] result;
+            SignedEditReport report;
+            var rewrite = _signatureWarned; // already accepted that edits break the signatures (encrypted signed file)
             while (true)
             {
                 try
                 {
-                    result = await Task.Run(() => edit(data, password));
+                    var allowRewrite = rewrite;
+                    (result, report) = await Task.Run(() => SignedEdits.Run(() => edit(data, password), allowRewrite));
                     break;
                 }
                 catch (OwnerPasswordRequiredException ex) when (!_disposed)
@@ -786,13 +789,20 @@ public partial class DocumentTab : UserControl, IDisposable
                         return EditOutcome.Declined;
                     password = owner;
                 }
+                catch (SignaturesWouldBreakException ex) when (!_disposed && !rewrite)
+                {
+                    // The edit can't be appended to the signed file: say so before anything is committed, then redo it as a rewrite.
+                    Log.Write($"{label}: {ex.Reason}");
+                    if (!ConfirmSignatureRewrite(ex.SignatureCount)) return EditOutcome.Declined;
+                    rewrite = true;
+                }
             }
             if (_disposed) return EditOutcome.Failed;
             if (password is not null && password != Session.Password) Session.UsePassword(password); // only once it worked
             if (ReferenceEquals(result, data)) return EditOutcome.NoChange; // nothing to do: no undo step
             // Signed document: an edit a signature doesn't allow (a page change, or one that couldn't be appended and
             // rewrites the file) shows that signature as invalid from then on. Say so before it happens.
-            if (_signedOnOpen && !signaturesWarned && !_signatureWarned)
+            if (_signedOnOpen && !signaturesWarned && !rewrite)
             {
                 var broken = await Task.Run(() => Signatures.BrokenByEdits(Signatures.Verify(data, password), result, password));
                 if (_disposed) return EditOutcome.Failed;
@@ -821,6 +831,7 @@ public partial class DocumentTab : UserControl, IDisposable
                     Undo();
                 });
             }
+            if (report.RemovedItemKept) NotifyRemovedItemKept();
             return EditOutcome.Done;
         }
         catch (OperationCanceledException)

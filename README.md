@@ -88,7 +88,9 @@ PDFsharp is pinned to 6.2.x (MIT); 6.5+ changed to AGPL with a runtime license c
 - Page edits go through PDFsharp, which rewrites the whole file, so its size can change. Signed PDFs are the
   exception: edits are appended as an incremental update, so signatures stay intact and show as "changed after
   signing". Redaction, page extraction and encrypted signed files still rewrite the file and break signatures
-  (PdfDesk warns first). Revocation is checked only on request.
+  (PdfDesk warns first), as does any edit whose update can't be appended (PdfDesk asks before committing it). Pages,
+  comments and attachments removed from a signed file stay recoverable from its signed revision until the file is
+  flattened (offered after such a removal; breaks the signatures). Revocation is checked only on request.
 - Signing: no long-term validation data (no DSS/VRI, no embedded OCSP/CRL responses, no document timestamps), no
   field locks (FieldMDP), and DocMDP permissions of a certified file aren't enforced when verifying. Encrypted PDFs can't be
   signed (save an unprotected copy first). A self-signed ID shows as untrusted on other PCs until they trust it.

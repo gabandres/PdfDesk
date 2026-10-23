@@ -25,7 +25,9 @@ namespace PdfDesk.Core;
 /// </para>
 /// Not incremental (full rewrite, which breaks the signatures): encrypted documents, redaction (it must remove data,
 /// <see cref="PdfObj.Save(PdfDocument, bool)"/> with rewrite), files whose last xref can't be located, and anything
-/// that fails here (the caller falls back to the rewrite).
+/// that fails here. A signed document is never rewritten silently: <see cref="Save"/> throws
+/// <see cref="SignaturesWouldBreakException"/> instead, unless the edit runs in <see cref="SignedEdits.Run"/> with the
+/// rewrite allowed (the user accepted the warning).
 /// </summary>
 internal static class Incremental
 {
@@ -46,6 +48,9 @@ internal static class Incremental
 
     private static readonly ConditionalWeakTable<PdfDocument, Base> Tracked = [];
 
+    /// <summary>Signed documents opened for editing → why they can't be appended to (empty while nothing failed).</summary>
+    private static readonly ConditionalWeakTable<PdfDocument, StrongBox<string>> Signed = [];
+
     /// <summary>Signed-looking files carry a /ByteRange; signature dictionaries are never compressed into object streams.</summary>
     public static bool LooksSigned(byte[] data) => data.AsSpan().IndexOf("/ByteRange"u8) >= 0;
 
@@ -59,15 +64,31 @@ internal static class Incremental
     /// </summary>
     public static void Track(PdfDocument doc, byte[] data, string? password, bool force = false)
     {
-        if ((!force && !LooksSigned(data)) || data.AsSpan().IndexOf("/Encrypt"u8) >= 0) return;
+        var signed = LooksSigned(data);
+        var why = new StrongBox<string>("");
+        if (signed) Signed.AddOrUpdate(doc, why);
+        if (!force && !signed) return;
+        if (data.AsSpan().IndexOf("/Encrypt"u8) >= 0)
+        {
+            why.Value = "it is encrypted";
+            return;
+        }
         try
         {
-            if (Tail(data) is not { } tail) return;
+            if (Tail(data) is not { } tail)
+            {
+                why.Value = "its last cross-reference section can't be found";
+                return;
+            }
             using var orig = string.IsNullOrEmpty(password)
                 ? PdfReader.Open(new MemoryStream(data, writable: false), PdfDocumentOpenMode.Import)
                 : PdfReader.Open(new MemoryStream(data, writable: false), password, PdfDocumentOpenMode.Import);
             var pairs = Pair(orig, doc, tail.HasInfo);
-            if (pairs is null) return;
+            if (pairs is null)
+            {
+                why.Value = "its objects can't be matched up";
+                return;
+            }
 
             // Keep only pairs whose objects match through the pairing (pages and page tree nodes: apart from what
             // PDFsharp's page tree flattening changes); dropping one changes how its referrers serialize, so repeat
@@ -99,7 +120,11 @@ internal static class Incremental
                     }
                 }
             } while (changed);
-            if (map.Count == 0) return;
+            if (map.Count == 0)
+            {
+                why.Value = "its objects can't be matched up";
+                return;
+            }
 
             // Flattened pages point at the root /Pages now; written back alone, they keep their original /Parent.
             var parents = new Dictionary<PdfObjectID, (int, int)>();
@@ -130,13 +155,44 @@ internal static class Incremental
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // Not trackable: the edit is saved by rewriting the file.
+            // Not trackable: the edit can only be saved by rewriting the file.
+            why.Value = $"its structure can't be extended ({ex.Message})";
+        }
+    }
+
+    /// <summary>
+    /// Saves an edit of a document opened through <see cref="PdfObj.Open"/>: the incremental update when it is a tracked
+    /// signed document; null when the caller may rewrite the file (it isn't signed, or <see cref="SignedEdits.Run"/>
+    /// allowed the rewrite).
+    /// </summary>
+    /// <exception cref="SignaturesWouldBreakException">A signed document whose edit can't be appended.</exception>
+    public static byte[]? Save(PdfDocument doc, XDocument? xmp)
+    {
+        if (TrySave(doc, xmp) is { } appended)
+        {
+            SignedEdits.NoteAppended();
+            return appended;
+        }
+        if (!Signed.TryGetValue(doc, out var why) || SignedEdits.RewriteAllowed) return null;
+        throw new SignaturesWouldBreakException(CountSignatures(doc), why.Value is { Length: > 0 } reason ? reason : "the update can't be written");
+    }
+
+    /// <summary>Signature dictionaries (a /ByteRange and /Contents) in the document, at least 1.</summary>
+    private static int CountSignatures(PdfDocument doc)
+    {
+        try
+        {
+            return Math.Max(1, doc.Internals.GetAllObjects().Count(o => o is PdfDictionary d && d.Elements.ContainsKey("/ByteRange") && d.Elements.ContainsKey("/Contents")));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return 1;
         }
     }
 
     /// <summary>
     /// The original bytes followed by an incremental update holding the edits, or null when <paramref name="doc"/> isn't
-    /// a tracked signed document (or the update can't be written): the caller then rewrites the file.
+    /// a tracked signed document (or the update can't be written).
     /// </summary>
     /// <param name="xmp">The XMP packet before the edit: written back updated from the Info values, as a full save does.</param>
     public static byte[]? TrySave(PdfDocument doc, XDocument? xmp)
@@ -151,12 +207,11 @@ internal static class Incremental
                 meta.Elements.Remove("/DecodeParms");
                 meta.Elements["/Length"] = new PdfInteger(meta.Stream.Value.Length);
             }
-            var bytes = Write(doc, b);
-            using var check = PdfReader.Open(new MemoryStream(bytes, writable: false), PdfDocumentOpenMode.Import);
-            return check.PageCount == doc.PageCount ? bytes : null;
+            return Write(doc, b);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            if (Signed.TryGetValue(doc, out var why)) why.Value = $"the update can't be written ({ex.Message})";
             return null;
         }
     }
@@ -232,13 +287,18 @@ internal static class Incremental
             write.Add((id.Item1, id.Item2, obj, replace));
         }
 
-        using var ms = new MemoryStream(b.Original.Length + 4096);
-        ms.Write(b.Original);
-        if (b.Original.Length > 0 && b.Original[^1] is not ((byte)'\n' or (byte)'\r')) ms.WriteByte((byte)'\n');
+        // Self-check (cheaper than reading the result back): every page and the page tree root must lead somewhere.
+        if (Id(catalog.Reference!.ObjectID) is null || PdfObj.Dict(catalog.Elements["/Pages"])?.Reference is not { } pagesRoot || Id(pagesRoot.ObjectID) is null ||
+            Enumerable.Range(0, doc.PageCount).Any(p => doc.Pages[p].Reference is not { } pr || Id(pr.ObjectID) is null))
+            throw new InvalidOperationException("The page tree doesn't line up with the original.");
+
+        // The update is written on its own and joined to the original once, so the file is copied a single time.
+        var at = b.Original.Length + (b.Original.Length > 0 && b.Original[^1] is not ((byte)'\n' or (byte)'\r') ? 1 : 0);
+        using var ms = new MemoryStream();
         var offsets = new SortedDictionary<int, (long Offset, int Gen)>();
         foreach (var (num, gen, obj, replace) in write.OrderBy(w => w.Num))
         {
-            offsets[num] = (ms.Position, gen);
+            offsets[num] = (at + ms.Position, gen);
             Ascii(ms, $"{num} {gen} obj\n");
             ms.Write(Serialize(obj, Id, null, null, replace));
             Ascii(ms, "\nendobj\n");
@@ -247,7 +307,7 @@ internal static class Incremental
         var root = Id(doc.Internals.Catalog.Reference!.ObjectID)!.Value;
         var infoRef = info.Reference is { } ir && Id(ir.ObjectID) is { } i ? $" /Info {i.Item1} {i.Item2} R" : "";
         var trailerKeys = $"/Root {root.Item1} {root.Item2} R{infoRef}{(b.Id is null ? "" : $" /ID {b.Id}")} /Prev {b.StartXref}";
-        var xrefAt = ms.Position;
+        var xrefAt = at + ms.Position;
         if (b.XrefStream)
         {
             var self = next++;
@@ -279,7 +339,11 @@ internal static class Incremental
             Ascii(ms, sb.ToString());
         }
         Ascii(ms, $"startxref\n{xrefAt}\n%%EOF\n");
-        return ms.ToArray();
+        var result = new byte[at + ms.Length];
+        b.Original.CopyTo(result, 0);
+        if (at > b.Original.Length) result[b.Original.Length] = (byte)'\n';
+        ms.GetBuffer().AsSpan(0, (int)ms.Length).CopyTo(result.AsSpan(at));
+        return result;
     }
 
     private static IEnumerable<(int Start, int Count)> Runs(IEnumerable<int> sorted)
@@ -607,11 +671,8 @@ internal static class Incremental
 
     internal static TailInfo? Tail(byte[] data)
     {
-        var from = Math.Max(0, data.Length - 4096);
-        var tail = Encoding.Latin1.GetString(data, from, data.Length - from);
-        var m = Regex.Match(tail, @"startxref\s+(\d+)", RegexOptions.RightToLeft);
-        if (!m.Success || !long.TryParse(m.Groups[1].Value, PdfObj.Inv, out var at) || at <= 0 || at >= data.Length) return null;
-        var region = Encoding.Latin1.GetString(data, (int)at, (int)Math.Min(data.Length - at, 1 << 16));
+        if (StartXref(data) is not { } at) return null;
+        var region = Encoding.Latin1.GetString(data, (int)at, (int)Math.Min(data.Length - at, 1 << 16)).TrimStart('\0', '\t', '\n', '\f', '\r', ' ');
         bool stream;
         string dict;
         if (region.StartsWith("xref", StringComparison.Ordinal))
@@ -634,8 +695,108 @@ internal static class Incremental
         }
         else return null;
         var size = Regex.Match(dict, @"/Size\s+(\d+)");
-        var id = Regex.Match(dict, @"/ID\s*(\[\s*<[0-9A-Fa-f\s]*>\s*<[0-9A-Fa-f\s]*>\s*\])");
         return new TailInfo(at, stream, size.Success && int.TryParse(size.Groups[1].Value, PdfObj.Inv, out var n) ? n : 0,
-            id.Success ? Regex.Replace(id.Groups[1].Value, @"\s+", " ") : null, Regex.IsMatch(dict, @"/Info\s+\d+\s+\d+\s+R"));
+            FileId(dict), Regex.IsMatch(dict, @"/Info\s+\d+\s+\d+\s+R"));
+    }
+
+    /// <summary>
+    /// The offset after the file's last "startxref". Usually in the last few hundred bytes, but producers append junk
+    /// after %%EOF (padding, a second copy of a trailer, mail gateway footers), so the whole file is searched backwards.
+    /// </summary>
+    internal static long? StartXref(byte[] data)
+    {
+        var end = data.Length;
+        while (end > 0 && data.AsSpan(0, end).LastIndexOf("startxref"u8) is var k and >= 0)
+        {
+            var p = k + "startxref".Length;
+            while (p < data.Length && data[p] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n' or (byte)'\f' or 0) p++;
+            long at = 0;
+            var digits = 0;
+            for (; p < data.Length && data[p] is >= (byte)'0' and <= (byte)'9' && digits < 18; p++, digits++) at = at * 10 + (data[p] - '0');
+            if (digits > 0 && at > 0 && at < data.Length) return at;
+            end = k; // e.g. "startxref" inside a stream after the real one: keep looking further back
+        }
+        return null;
+    }
+
+    /// <summary>The trailer's /ID as two hex strings ("[&lt;…&gt; &lt;…&gt;]"), whether the file wrote them as hex or literal strings.</summary>
+    internal static string? FileId(string dict)
+    {
+        var m = Regex.Match(dict, @"/ID\s*\[");
+        if (!m.Success) return null;
+        var p = m.Index + m.Length;
+        var parts = new List<string>();
+        while (parts.Count < 2)
+        {
+            while (p < dict.Length && char.IsWhiteSpace(dict[p])) p++;
+            if (p >= dict.Length) return null;
+            if (dict[p] == '<')
+            {
+                var close = dict.IndexOf('>', p);
+                if (close < 0) return null;
+                var hex = string.Concat(dict.AsSpan(p + 1, close - p - 1).ToString().Where(c => !char.IsWhiteSpace(c)));
+                if (!hex.All(char.IsAsciiHexDigit)) return null;
+                parts.Add(hex.Length % 2 == 1 ? hex + "0" : hex);
+                p = close + 1;
+            }
+            else if (dict[p] == '(')
+            {
+                if (Literal(dict, ref p) is not { } bytes) return null;
+                parts.Add(Convert.ToHexString(bytes));
+            }
+            else return null;
+        }
+        return $"[<{parts[0]}> <{parts[1]}>]";
+    }
+
+    /// <summary>A literal string's bytes (balanced parentheses, backslash escapes); <paramref name="p"/> at its "(", left after its ")".</summary>
+    private static byte[]? Literal(string s, ref int p)
+    {
+        var bytes = new List<byte>();
+        var depth = 0;
+        for (p++; p < s.Length; p++)
+        {
+            var c = s[p];
+            if (c == '\\')
+            {
+                if (++p >= s.Length) return null;
+                c = s[p];
+                switch (c)
+                {
+                    case 'n': bytes.Add((byte)'\n'); break;
+                    case 'r': bytes.Add((byte)'\r'); break;
+                    case 't': bytes.Add((byte)'\t'); break;
+                    case 'b': bytes.Add((byte)'\b'); break;
+                    case 'f': bytes.Add((byte)'\f'); break;
+                    case '\r':
+                        if (p + 1 < s.Length && s[p + 1] == '\n') p++; // a line continuation
+                        break;
+                    case '\n':
+                        break;
+                    case >= '0' and <= '7':
+                        var v = 0;
+                        for (var k = 0; k < 3 && p < s.Length && s[p] is >= '0' and <= '7'; k++, p++) v = v * 8 + (s[p] - '0');
+                        p--;
+                        bytes.Add((byte)v);
+                        break;
+                    default: bytes.Add((byte)c); break; // \( \) \\ and unknown escapes: the character itself
+                }
+                continue;
+            }
+            if (c == '(') depth++;
+            else if (c == ')' && depth-- == 0)
+            {
+                p++;
+                return [.. bytes];
+            }
+            if (c == '\r')
+            {
+                // An end of line in a literal string reads as a single \n.
+                if (p + 1 < s.Length && s[p + 1] == '\n') p++;
+                c = '\n';
+            }
+            bytes.Add((byte)c);
+        }
+        return null;
     }
 }

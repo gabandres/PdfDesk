@@ -12,7 +12,7 @@ namespace PdfDesk.Tests;
 /// <summary>Edits of signed documents are saved as incremental updates, so the signatures keep verifying.</summary>
 public class IncrSignatureTests
 {
-    private const int ContentsHexLength = 16384;
+    internal const int ContentsHexLength = 16384;
 
     /// <summary>
     /// A signed form: a signature field ("Approval", signed), a text field ("Name"), optionally a second page. With
@@ -82,7 +82,7 @@ public class IncrSignatureTests
         static byte[] Be(int v, int width) => [.. Enumerable.Range(0, width).Select(k => (byte)(v >> (8 * (width - 1 - k))))];
     }
 
-    private static byte[] Sign(byte[] pdf, string placeholderRange)
+    internal static byte[] Sign(byte[] pdf, string placeholderRange)
     {
         var text = Encoding.Latin1.GetString(pdf);
         var gapStart = text.IndexOf("/Contents <", StringComparison.Ordinal) + "/Contents ".Length;
