@@ -80,8 +80,11 @@ public class Core2SignatureTests
         var pdf = Signed();
         var original = Signatures.Verify(pdf);
         Assert.Empty(Signatures.BrokenByEdits(original, pdf));
-        // Most edits are appended (the signature stays intact); redaction rewrites the file.
-        Assert.Empty(Signatures.BrokenByEdits(original, PageEditor.Rotate(pdf, null, [0], 90)));
+        // Most edits are appended (the signature stays intact); redaction rewrites the file. Rotating a signed page is
+        // appended too, but it changes what was signed.
+        Assert.Empty(Signatures.BrokenByEdits(original, Annotations.AddNote(pdf, null, 0, 300, 100, "ok", "me")));
+        var rotated = Assert.Single(Signatures.BrokenByEdits(original, PageEditor.Rotate(pdf, null, [0], 90)));
+        Assert.Equal("Approval", rotated.FieldName);
         var edited = Redaction.Apply(pdf, null, new Dictionary<int, IReadOnlyList<RectD>> { [0] = [new RectD(72, 60, 100, 20)] }, 72);
         var broken = Signatures.BrokenByEdits(original, edited);
         Assert.Equal("Approval", Assert.Single(broken).FieldName); // the unsigned "Witness" field isn't reported

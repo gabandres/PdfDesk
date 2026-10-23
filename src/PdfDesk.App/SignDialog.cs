@@ -269,7 +269,7 @@ public static class SignDialog
         dlg.Validate(() =>
         {
             if (string.IsNullOrWhiteSpace(name.Text)) return "Enter your name.";
-            if (backup.IsChecked == true && pw1.Password.Length < 6) return "Use a backup password of at least 6 characters.";
+            if (backup.IsChecked == true && pw1.Password.Length < 10) return "Use a backup password of at least 10 characters.";
             if (backup.IsChecked == true && pw1.Password != pw2.Password) return "The passwords don't match.";
             return null;
         });

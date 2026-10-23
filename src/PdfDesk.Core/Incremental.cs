@@ -462,7 +462,7 @@ internal static class Incremental
     /// </summary>
     /// <param name="skip">Top-level dictionary keys left out (for comparing).</param>
     /// <param name="replace">A top-level dictionary key written with this value text instead.</param>
-    private static byte[] Serialize(PdfObject obj, Func<PdfObjectID, (int, int)?> id, Dictionary<PdfDictionary, byte[]>? streamHash,
+    internal static byte[] Serialize(PdfObject obj, Func<PdfObjectID, (int, int)?> id, Dictionary<PdfDictionary, byte[]>? streamHash,
         IReadOnlySet<string>? skip = null, (string Key, string Value)? replace = null)
     {
         using var ms = new MemoryStream();
@@ -603,9 +603,9 @@ internal static class Incremental
 
     // ---- The original's last trailer ----
 
-    private sealed record TailInfo(long StartXref, bool XrefStream, int Size, string? Id, bool HasInfo);
+    internal sealed record TailInfo(long StartXref, bool XrefStream, int Size, string? Id, bool HasInfo);
 
-    private static TailInfo? Tail(byte[] data)
+    internal static TailInfo? Tail(byte[] data)
     {
         var from = Math.Max(0, data.Length - 4096);
         var tail = Encoding.Latin1.GetString(data, from, data.Length - from);

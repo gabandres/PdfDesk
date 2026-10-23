@@ -101,17 +101,21 @@ public class IncrSignatureTests
 
     private static SignatureInfo Approval(byte[] pdf) => Signatures.Verify(pdf).Single(s => s.FieldName == "Approval");
 
-    /// <summary>The edit kept the signed bytes as they were and the signature still checks out, with later changes.</summary>
-    private static void AssertAppended(byte[] original, byte[] edited)
+    /// <summary>
+    /// The edit kept the signed bytes as they were and the signature still checks out, with later changes: permitted ones
+    /// (form filling, comments, metadata), or, with <paramref name="permitted"/> false, ones that change the signed pages.
+    /// </summary>
+    private static void AssertAppended(byte[] original, byte[] edited, bool permitted = true)
     {
         Assert.Equal(SignatureStatus.Valid, Approval(original).Status);
         Assert.True(edited.Length > original.Length);
         Assert.True(edited.AsSpan(0, original.Length).SequenceEqual(original), "the original bytes must be kept as they are");
         var s = Approval(edited);
-        Assert.Equal(SignatureStatus.ModifiedAfterSigning, s.Status);
+        Assert.Equal(permitted ? SignatureStatus.ModifiedAfterSigning : SignatureStatus.DisallowedChanges, s.Status);
         Assert.False(s.CoversWholeDocument);
         Assert.Equal("Incremental Signer", s.SignerName);
-        Assert.Empty(Signatures.BrokenByEdits(Signatures.Verify(original), edited));
+        if (permitted) Assert.Empty(Signatures.BrokenByEdits(Signatures.Verify(original), edited));
+        else Assert.Contains("page", s.Detail);
         // Unchanged objects (the signed page content) aren't repeated in the update.
         Assert.DoesNotContain("Hello contract", Encoding.Latin1.GetString(edited, original.Length, edited.Length - original.Length));
     }
@@ -177,11 +181,13 @@ public class IncrSignatureTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void PageRotateAndDeleteAreAppended(bool xrefStream)
+    public void PageRotateAndDeleteAreAppendedButNotPermitted(bool xrefStream)
     {
+        // The signature stays intact, but rotating or removing a signed page changes what was signed.
         var pdf = SignedForm(xrefStream, twoPages: true);
         var rotated = PageEditor.Rotate(pdf, null, [1], 90);
-        AssertAppended(pdf, rotated);
+        AssertAppended(pdf, rotated, permitted: false);
+        Assert.Contains("page 2", Approval(rotated).Detail);
         using (var doc = PdfReader.Open(new MemoryStream(rotated), PdfDocumentOpenMode.Import))
         {
             Assert.Equal(0, doc.Pages[0].Rotate);
@@ -195,7 +201,8 @@ public class IncrSignatureTests
         }
 
         var deleted = PageEditor.Delete(pdf, null, [1]);
-        AssertAppended(pdf, deleted);
+        AssertAppended(pdf, deleted, permitted: false);
+        Assert.Contains("pages added, removed or moved", Approval(deleted).Detail);
         using (var engine = PdfEngine.Open(deleted, InputFileTypes.PDF, null)) Assert.Equal(1, engine.PageCount);
         Assert.Contains("Hello contract", Core2Pdf.AllText(deleted));
     }
@@ -232,7 +239,7 @@ public class IncrSignatureTests
         Assert.Contains("Ada", Core2Pdf.AllText(filled));
 
         var rotated = PageEditor.Rotate(filled, null, [0], 180);
-        Assert.Equal(SignatureStatus.ModifiedAfterSigning, Approval(rotated).Status);
+        Assert.Equal(SignatureStatus.DisallowedChanges, Approval(rotated).Status);
         using (var engine = PdfEngine.Open(rotated, InputFileTypes.PDF, null))
         {
             Assert.Equal(1, engine.PageCount);
@@ -242,7 +249,7 @@ public class IncrSignatureTests
 
         // Adding a page rewrites the (flattened) page tree; the old page keeps its inherited size.
         var grown = PageEditor.InsertBlank(rotated, null, 1, 1, 300, 300);
-        Assert.Equal(SignatureStatus.ModifiedAfterSigning, Approval(grown).Status);
+        Assert.Equal(SignatureStatus.DisallowedChanges, Approval(grown).Status);
         using (var engine = PdfEngine.Open(grown, InputFileTypes.PDF, null))
         {
             Assert.Equal(2, engine.PageCount);
@@ -250,10 +257,10 @@ public class IncrSignatureTests
             Assert.Equal(300, engine.GetPage(1).Width, 1);
         }
         var shrunk = PageEditor.Delete(grown, null, [1]);
-        Assert.Equal(SignatureStatus.ModifiedAfterSigning, Approval(shrunk).Status);
+        Assert.Equal(SignatureStatus.DisallowedChanges, Approval(shrunk).Status);
         using (var engine = PdfEngine.Open(shrunk, InputFileTypes.PDF, null)) Assert.Equal(1, engine.PageCount);
 
-        var titled = PageEditor.WriteMetadata(rotated, null, "Signed contract", "", "", "");
+        var titled = PageEditor.WriteMetadata(filled, null, "Signed contract", "", "", "");
         Assert.Equal(SignatureStatus.ModifiedAfterSigning, Approval(titled).Status);
         Assert.Equal("Signed contract", PageEditor.ReadMetadata(titled, null).Title);
         using var doc = PdfReader.Open(new MemoryStream(titled), PdfDocumentOpenMode.Import);

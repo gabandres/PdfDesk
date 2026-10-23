@@ -143,9 +143,13 @@ public class SigningTests
         Assert.Equal(SignatureStatus.Valid, Only(certified).Status);
         Assert.Equal(CertificationLevel.FormFilling, Signing.Certification(certified));
         Assert.Throws<SigningException>(() => Signing.Sign(certified, null, new SignRequest { Certificate = cert, Certify = CertificationLevel.FormFilling }));
-        // Form filling allowed: an approval signature may follow.
-        var approved = Signing.Sign(certified, null, new SignRequest { Certificate = cert });
+        // Form filling and signing allowed, but only in the certifier's own signature fields: a new one is refused
+        // (SignatureChangeTests covers signing an existing field).
+        Assert.Throws<SigningException>(() => Signing.Sign(certified, null, new SignRequest { Certificate = cert }));
+        var commentsToo = Signing.Sign(TestPdf.Make(1), null, new SignRequest { Certificate = cert, Certify = CertificationLevel.FormFillingAndComments });
+        var approved = Signing.Sign(commentsToo, null, new SignRequest { Certificate = cert });
         Assert.Equal(2, Signatures.Verify(approved).Count);
+        Assert.Equal(SignatureStatus.ModifiedAfterSigning, Signatures.Verify(approved).Single(s => s.CertificationLevel == 3).Status);
 
         var locked = Signing.Sign(TestPdf.Make(1), null, new SignRequest { Certificate = cert, Certify = CertificationLevel.NoChanges });
         Assert.Equal(CertificationLevel.NoChanges, Signing.Certification(locked));
@@ -161,6 +165,8 @@ public class SigningTests
         var s = Only(signed);
         Assert.Equal(SignatureStatus.Valid, s.Status);
         Assert.True(s.HasTimestamp);
+        // The fake authority isn't trusted: its time doesn't vouch for the certificate, and the details say so.
+        Assert.Contains("timestamp authority isn't trusted", s.Detail);
         Assert.Equal(1, tsa.Requests);
         Assert.InRange(s.SigningTime!.Value, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddMinutes(1));
 

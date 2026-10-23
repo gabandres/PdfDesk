@@ -90,7 +90,8 @@ public static class DigitalIds
         }
         var now = DateTimeOffset.UtcNow;
         using var cert = req.CreateSelfSigned(now.AddMinutes(-10), now.AddYears(years));
-        return cert.Export(X509ContentType.Pfx, password);
+        // AES-256 with PBKDF2 (not the legacy 3DES/SHA-1 default): the backup file may be copied anywhere.
+        return cert.ExportPkcs12(Pkcs12ExportPbeParameters.Pbes2Aes256Sha256, password);
     }
 
     /// <summary>

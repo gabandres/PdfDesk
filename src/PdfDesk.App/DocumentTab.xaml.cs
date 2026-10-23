@@ -726,8 +726,9 @@ public partial class DocumentTab : UserControl, IDisposable
     // ───────────────────────────── Editing ─────────────────────────────
 
     /// <summary>Runs a page edit off the UI thread and commits it as one undo step. True when it was committed.</summary>
-    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false) =>
-        await TryEdit(label, edit, goToPage, quiet, contentOnly) is EditOutcome.Done or EditOutcome.NoChange;
+    public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false,
+        bool signaturesWarned = false) =>
+        await TryEdit(label, edit, goToPage, quiet, contentOnly, signaturesWarned) is EditOutcome.Done or EditOutcome.NoChange;
 
     /// <summary>
     /// <see cref="RunEdit"/> that says why nothing was committed: <see cref="EditOutcome.NoChange"/> (the edit returned the
@@ -735,7 +736,9 @@ public partial class DocumentTab : UserControl, IDisposable
     /// warning prompt holds the tab: try again once idle), <see cref="EditOutcome.Declined"/> (the user said no to the
     /// password/signature warning) or <see cref="EditOutcome.Failed"/> (the edit threw, or the file isn't a PDF).
     /// </summary>
-    public async Task<EditOutcome> TryEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false)
+    /// <param name="signaturesWarned">The caller already said the edit breaks signatures (redaction): don't ask again.</param>
+    public async Task<EditOutcome> TryEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false,
+        bool signaturesWarned = false)
     {
         if (!Session.IsPdf)
         {
@@ -787,6 +790,14 @@ public partial class DocumentTab : UserControl, IDisposable
             if (_disposed) return EditOutcome.Failed;
             if (password is not null && password != Session.Password) Session.UsePassword(password); // only once it worked
             if (ReferenceEquals(result, data)) return EditOutcome.NoChange; // nothing to do: no undo step
+            // Signed document: an edit a signature doesn't allow (a page change, or one that couldn't be appended and
+            // rewrites the file) shows that signature as invalid from then on. Say so before it happens.
+            if (_signedOnOpen && !signaturesWarned && !_signatureWarned)
+            {
+                var broken = await Task.Run(() => Signatures.BrokenByEdits(Signatures.Verify(data, password), result, password));
+                if (_disposed) return EditOutcome.Failed;
+                if (broken.Count > 0 && !ConfirmBreakingEdit(label, broken)) return EditOutcome.Declined;
+            }
             _contentOnlyCommit = contentOnly;
             try
             {

@@ -158,7 +158,13 @@ public sealed class SignatureItem(SignatureInfo info, string? pageLabel, bool br
         get
         {
             var lines = new List<string> { $"Field: {Info.FieldName}{(pageLabel is null ? " (invisible)" : $", page {pageLabel}")}" };
-            if (Info.SigningTime is { } t) lines.Add($"Signed: {t.LocalDateTime:F}{(Info.HasTimestamp ? " (timestamped)" : "")}");
+            if (Info.SigningTime is { } t) lines.Add($"Signed: {t.LocalDateTime:F}{(Info.HasTimestamp ? " (timestamped)" : " (the signer's clock)")}");
+            if (Info.CertificationLevel is { } p) lines.Add(p switch
+            {
+                1 => "Certified: no changes allowed",
+                2 => "Certified: filling in forms and signing allowed",
+                _ => "Certified: filling in forms, signing and comments allowed",
+            });
             if (!string.IsNullOrWhiteSpace(Info.Reason)) lines.Add($"Reason: {Info.Reason}");
             if (!string.IsNullOrWhiteSpace(Info.Location)) lines.Add($"Location: {Info.Location}");
             if (Info.SubFilter is { } f) lines.Add($"Format: {f}");
@@ -433,7 +439,7 @@ public partial class DocumentTab
         var files = Try<IReadOnlyList<AttachmentInfo>>("attachments", () => Attachments.List(data, pw), []);
         var layers = Try<IReadOnlyList<LayerInfo>>("layers", () => Layers.List(data, pw), []);
         var order = layers.Count > 0 ? Try<IReadOnlyList<LayerOrderNode>>("layer order", () => Layers.ReadOrder(data, pw), []) : [];
-        var sigs = Try<IReadOnlyList<SignatureInfo>?>("signatures", () => Signatures.Verify(data, pw), null);
+        var sigs = Try<IReadOnlyList<SignatureInfo>?>("signatures", () => Signatures.Verify(data, pw, checkRevocationOnline: true), null);
         var xfa = first ? Try<(bool, bool)?>("XFA", () => FormEditor.HasXfa(data, pw), null) : null;
         var prefs = first ? Try<ViewerPrefs?>("opening settings", () => DocumentFeatures.ReadViewerPrefs(data, pw), null) : null;
         var title = wantTitle ? Try<string?>("title", () => PageEditor.ReadMetadata(data, pw).Title, null) : null;
@@ -908,7 +914,7 @@ public partial class DocumentTab
     /// That's the expected effect of editing a signed file, not tampering, so it is reported as such.
     /// </summary>
     internal bool BrokenByEdits(SignatureInfo s) =>
-        s.Status == SignatureStatus.Invalid
+        s.Status is SignatureStatus.Invalid or SignatureStatus.DisallowedChanges
         && _signaturesOnOpen.TryGetValue(s.FieldName, out var before)
         && before.Status is SignatureStatus.Valid or SignatureStatus.ModifiedAfterSigning;
 
@@ -920,7 +926,7 @@ public partial class DocumentTab
     internal static string SignatureSeverity(SignatureInfo s, bool brokenByEdits = false) => brokenByEdits ? "warn" : s.Status switch
     {
         SignatureStatus.Unsigned => "none",
-        SignatureStatus.Invalid => "bad",
+        SignatureStatus.Invalid or SignatureStatus.DisallowedChanges => "bad",
         SignatureStatus.Valid when s.CertificateTrusted => "ok",
         _ => "warn",
     };
@@ -931,6 +937,7 @@ public partial class DocumentTab
     {
         SignatureStatus.Unsigned => "Empty signature field.",
         SignatureStatus.Invalid => "Invalid: the signed content was altered, or the signature is damaged.",
+        SignatureStatus.DisallowedChanges => "Invalid: the signed bytes are intact, but the document was later changed in ways this signature doesn't allow, so what you see may not be what was signed.",
         SignatureStatus.Unsupported => "Not checked: PdfDesk can't verify this kind of signature.",
         SignatureStatus.ModifiedAfterSigning => s.CertificateTrusted
             ? "The signature is valid, but the document was modified after signing."
@@ -943,6 +950,7 @@ public partial class DocumentTab
     {
         SignatureStatus.ModifiedAfterSigning when AppendedByEdits(s) => "intact; your changes were added after signing",
         SignatureStatus.Invalid => "invalid",
+        SignatureStatus.DisallowedChanges => "invalid: changed in ways the signature doesn't allow",
         SignatureStatus.Unsupported => "can't be checked",
         SignatureStatus.ModifiedAfterSigning => "modified after signing",
         _ when !s.CertificateTrusted => "certificate not trusted",
@@ -1024,6 +1032,17 @@ public partial class DocumentTab
         return true;
     }
 
+    /// <summary>Before an edit that would invalidate signatures that are intact now.</summary>
+    private bool ConfirmBreakingEdit(string label, IReadOnlyList<SignatureInfo> broken)
+    {
+        var who = broken.Count == 1 ? $"the signature of {broken[0].SignerName ?? broken[0].FieldName}" : $"{broken.Count} signatures";
+        return Prompt.Confirm(Window.GetWindow(this), $"{label} invalidates {who}",
+            "A signature allows filling in forms, comments and more signatures afterwards, but not this change: it alters what was signed, " +
+            "or it can't be added without rewriting the file. Afterwards the signature shows as invalid.\n\n" +
+            "To keep the signed original, undo the change, or save your changes as a copy (Save As).",
+            $"{label} anyway", warning: true);
+    }
+
     // ───────────────────────────── Redaction ─────────────────────────────
 
     private void UpdateRedactBar()
@@ -1101,7 +1120,7 @@ public partial class DocumentTab
             {
                 Dispatcher.Invoke(progress.Dispose);
             }
-        });
+        }, signaturesWarned: confirm);
         if (ok)
         {
             Viewer.ClearRedactions();

@@ -74,7 +74,8 @@ public sealed class SigningException(string message, Exception? inner = null) : 
 /// Applies digital signatures (PAdES / PKCS#7 detached CMS) to PDFs. The signature is always appended as an incremental
 /// update (see <see cref="Incremental"/>), so the original bytes, and any earlier signature, stay intact; /Contents is
 /// reserved as a zero-filled hex string, the /ByteRange around it is patched in and hashed, and the CMS is written into
-/// the gap. Not supported: encrypted documents, LTV (DSS/VRI, embedded revocation data), field locks (FieldMDP).
+/// the gap. A signature field's /Lock is honored (FieldMDP reference, locked fields made read-only). Not supported:
+/// encrypted documents, LTV (DSS/VRI, embedded revocation data).
 /// </summary>
 public static class Signing
 {
@@ -98,8 +99,14 @@ public static class Signing
         var signedBefore = existing.Any(s => s.Status != SignatureStatus.Unsigned);
         if (req.Certify != CertificationLevel.None && signedBefore)
             throw new SigningException("A certifying signature must be the document's first signature: this document is already signed.");
-        if (Certification(data, password) == CertificationLevel.NoChanges)
+        var certification = Certification(data, password);
+        if (certification == CertificationLevel.NoChanges)
             throw new SigningException("This document is certified with no changes allowed: another signature would invalidate the certification.");
+        // Form filling and signing (P=2) covers signing the signature fields the certifier put there, not adding new ones.
+        if (certification == CertificationLevel.FormFilling && req.FieldName is null)
+            throw new SigningException("This document is certified to allow only filling in forms and signing its existing signature fields: sign one of its empty signature fields instead.");
+        if (existing.FirstOrDefault(s => s.Status == SignatureStatus.DisallowedChanges && s.CertificationLevel is not null) is { } broken)
+            throw new SigningException($"The changes made to this document since it was certified aren't allowed by the certification ({broken.Detail}). Undo them, then sign.");
 
         var reserve = req.Timestamp is null ? 16384 : 32768;
         for (var attempt = 0; attempt < 3; attempt++)
@@ -245,6 +252,23 @@ public static class Signing
                 sigRef.Elements["/TransformParams"] = tp;
                 sig.Elements["/Reference"] = new PdfArray(doc, sigRef);
             }
+            // A signature field's /Lock names the fields signing it locks (FieldMDP): record it in the signature, and make
+            // those fields read-only, as Acrobat does.
+            if (req.FieldName is not null && PdfObj.Dict(fieldDict.Elements["/Lock"]) is { } lockDict)
+            {
+                var tp = new PdfDictionary(doc);
+                tp.Elements["/Type"] = new PdfName("/TransformParams");
+                tp.Elements["/Action"] = lockDict.Elements["/Action"] ?? new PdfName("/All");
+                if (lockDict.Elements["/Fields"] is { } lockFields) tp.Elements["/Fields"] = lockFields;
+                tp.Elements["/V"] = new PdfName("/1.2");
+                var sigRef = new PdfDictionary(doc);
+                sigRef.Elements["/Type"] = new PdfName("/SigRef");
+                sigRef.Elements["/TransformMethod"] = new PdfName("/FieldMDP");
+                sigRef.Elements["/TransformParams"] = tp;
+                if (PdfObj.Array(sig.Elements["/Reference"]) is { } refs) refs.Elements.Add(sigRef);
+                else sig.Elements["/Reference"] = new PdfArray(doc, sigRef);
+                LockFields(doc, acro, lockDict, req.FieldName);
+            }
             doc.Internals.AddObject(sig);
             fieldDict.Elements["/V"] = sig.Reference!;
             if (req.Certify != CertificationLevel.None)
@@ -295,6 +319,22 @@ public static class Signing
             if (PdfObj.Array(doc.Pages[p].Elements["/Annots"]) is { } annots && annots.Elements.Any(e => ReferenceEquals(PdfObj.Dict(e), widget)))
                 return p;
         return -1;
+    }
+
+    /// <summary>Sets the read-only flag on the fields a signature field's /Lock names (/All, /Include or /Exclude).</summary>
+    private static void LockFields(PdfDocument doc, PdfDictionary acro, PdfDictionary lockDict, string signatureField)
+    {
+        var names = PdfObj.Array(lockDict.Elements["/Fields"])?.Elements.Select(PdfObj.Text).OfType<string>().ToHashSet() ?? [];
+        bool Listed(string name) => names.Any(n => name == n || name.StartsWith(n + ".", StringComparison.Ordinal));
+        var action = PdfObj.NameOf(lockDict, "/Action");
+        var all = new List<FormEditor.Field>();
+        FormEditor.Collect(doc, acro, all);
+        foreach (var f in all)
+        {
+            if (f.Name == signatureField) continue;
+            var locked = action switch { "/Include" => Listed(f.Name), "/Exclude" => !Listed(f.Name), _ => true };
+            if (locked) f.Dict.Elements["/Ff"] = new PdfInteger((PdfObj.Int(f.Dict.Elements["/Ff"]) ?? 0) | 1);
+        }
     }
 
     private static string NewFieldName(PdfDocument doc, PdfDictionary acro)
