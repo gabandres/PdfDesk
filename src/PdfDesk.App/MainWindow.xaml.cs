@@ -528,6 +528,7 @@ public partial class MainWindow : Window
             if (ActiveTab == tab) UpdateUi();
         };
         tab.Toast += (_, t) => ShowToast(t);
+        tab.SignRequested += (_, field) => { if (ActiveTab == tab && !tab.IsBusy) _ = SignDigitallyAsync(tab, field); };
         DocsHost.Children.Add(tab);
         _tabs.Add(model);
         TabStrip.SelectedItem = model;
@@ -867,14 +868,14 @@ public partial class MainWindow : Window
         return choice;
     }
 
-    private async Task<bool> SaveAsDialogAsync(DocumentTab tab)
+    private async Task<bool> SaveAsDialogAsync(DocumentTab tab, string? suggestedName = null)
     {
         var s = tab.Session;
         var ext = s.IsPdf ? ".pdf" : Path.GetExtension(s.DisplayName);
         var dlg = new SaveFileDialog
         {
             Title = "Save As",
-            FileName = Path.GetFileNameWithoutExtension(s.DisplayName) + ext,
+            FileName = suggestedName ?? Path.GetFileNameWithoutExtension(s.DisplayName) + ext,
             Filter = s.IsPdf ? PdfFiles.PdfFilter : $"{ext.TrimStart('.').ToUpperInvariant()} files (*{ext})|*{ext}",
             DefaultExt = ext,
             AddExtension = true,
@@ -1197,6 +1198,8 @@ public partial class MainWindow : Window
         Bind(Cmd.ToolAddText, t => ToggleTool(t, ViewerTool.AddText), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.ToolCheck, t => ToggleTool(t, ViewerTool.AddCheck), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.ToolCross, t => ToggleTool(t, ViewerTool.AddCross), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.AddSignature, t => ShowSignatureMenu(t), t => t.Session.IsPdf && t.PageView.PageCount > 0);
+        Bind(Cmd.Sign, t => _ = SignDigitallyAsync(t, null), t => t.Session.IsPdf && t.PageView.PageCount > 0 && !_signing);
         Bind(Cmd.HighlightFields, t => t.PageView.HighlightFields = !t.PageView.HighlightFields, t => t.PageView.HasFormFields);
 
         Bind(Cmd.ZoomIn, t => t.PageView.ZoomStep(1), t => !t.IsOrganizing);
@@ -1556,6 +1559,7 @@ public partial class MainWindow : Window
         AddTextButton.IsChecked = AddTextMenu.IsChecked = v?.Tool == ViewerTool.AddText;
         CheckButton.IsChecked = CheckMenu.IsChecked = v?.Tool == ViewerTool.AddCheck;
         CrossButton.IsChecked = CrossMenu.IsChecked = v?.Tool == ViewerTool.AddCross;
+        AddSignatureButton.IsChecked = v?.Tool is ViewerTool.AddSignature or ViewerTool.PlaceSignature;
         NoteButton.IsChecked = NoteMenu.IsChecked = v?.Tool == ViewerTool.AddNote;
         RedactButton.IsChecked = RedactMenu.IsChecked = v?.Tool == ViewerTool.Redact;
         var pdf = t is { IsBusy: false, IsOrganizing: false, Session.IsPdf: true };

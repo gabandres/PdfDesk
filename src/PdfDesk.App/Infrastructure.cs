@@ -310,6 +310,18 @@ public sealed class AppSettings
     public double OrganizerThumbSize { get; set; } = 170;
     /// <summary>Author name on new comments; empty = the Windows user name.</summary>
     public string AuthorName { get; set; } = "";
+    /// <summary>Digital signing: the last digital ID used (certificate thumbprint) and the dialog's last choices.</summary>
+    public string SignThumbprint { get; set; } = "";
+    public string SignReason { get; set; } = "";
+    public string SignLocation { get; set; } = "";
+    public bool SignVisible { get; set; } = true;
+    public bool SignShowDate { get; set; } = true;
+    public bool SignShowReason { get; set; } = true;
+    public bool SignShowDn { get; set; }
+    public string SignImage { get; set; } = "";
+    /// <summary>Add an RFC 3161 timestamp (sends only a hash of the signature to <see cref="TimestampUrl"/>).</summary>
+    public bool SignTimestamp { get; set; }
+    public string TimestampUrl { get; set; } = "http://timestamp.digicert.com";
     /// <summary>Per-file view state, keyed by full path (most recent 300 kept).</summary>
     public Dictionary<string, FileState> Files { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 

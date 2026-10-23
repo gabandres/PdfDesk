@@ -9,7 +9,7 @@ namespace PdfDesk.App.Viewer;
 
 public enum ViewLayout { SinglePage, Continuous, Facing, FacingCover }
 public enum ZoomMode { Custom, FitWidth, FitPage }
-public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact }
+public enum ViewerTool { Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact, PlaceSignature, AddSignature }
 
 public sealed record SearchHit(int Page, int Start, int End, IReadOnlyList<RectD> Rects, string Excerpt)
 {
@@ -904,6 +904,7 @@ public sealed partial class PageViewer : ScrollViewer
 
             PaintForms(dc, i);
             PaintReview(dc, i);
+            PaintSigning(dc, i);
 
             if (_hitsByPage.TryGetValue(i, out var hits))
                 foreach (var hit in hits)
@@ -996,6 +997,7 @@ public sealed partial class PageViewer : ScrollViewer
         ClearFocusLink();
         if (e.ChangedButton == MouseButton.Left && HandleFormMouseDown(e, page, sp)) return;
         CommitEditor();
+        if (HandleSigningDown(e, page, sp)) return;
         if (HandleReviewDown(e, page, sp)) return;
 
         switch (_tool)
@@ -1060,6 +1062,7 @@ public sealed partial class PageViewer : ScrollViewer
             }
 
             AutoScroll(vpPos);
+            if (MoveSigningDrag(sp)) return;
             if (_selecting && _dragged)
             {
                 var p = HitPage(sp);
@@ -1114,6 +1117,12 @@ public sealed partial class PageViewer : ScrollViewer
             _surface.Cursor = formCursor;
             return;
         }
+        if (SigningCursor(page, sp) is { } signCursor)
+        {
+            HideLinkTip();
+            _surface.Cursor = signCursor;
+            return;
+        }
         if (page >= 0 && LinkAt(page, ToPagePoint(page, sp)) is { } link)
         {
             ShowLinkTip(page, link, keyboard: false);
@@ -1135,6 +1144,12 @@ public sealed partial class PageViewer : ScrollViewer
     private void OnSurfaceUp(object sender, MouseButtonEventArgs e)
     {
         var sp = e.GetPosition(_surface);
+        if (EndSigningDrag())
+        {
+            EndDrag();
+            UpdateCursor(sp);
+            return;
+        }
         var wasSnap = _snapPage;
         var wasMark = _markPage;
         var link = _pressLink;
@@ -1165,6 +1180,7 @@ public sealed partial class PageViewer : ScrollViewer
     private void EndDrag()
     {
         _panning = _selecting = false;
+        CancelSigningDrag();
         if (_markPage >= 0)
         {
             _markPage = -1;
@@ -1262,7 +1278,7 @@ public sealed partial class PageViewer : ScrollViewer
         // Keys typed into a field or Fill & Sign editor bubble up here. Leave them alone: handling KeyDown makes WPF
         // drop the character, so viewer shortcuts (H, A, T, Space…) would eat letters from the user's text.
         if (IsEditorKey(e)) return;
-        if (_engine is not null && (HandleFormKey(e) || HandleCaretKey(e)))
+        if (_engine is not null && (HandleFormKey(e) || HandleSigningKey(e) || HandleCaretKey(e)))
         {
             e.Handled = true;
             return;

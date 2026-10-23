@@ -16,6 +16,9 @@ public enum FormFieldKind { Text, CheckBox, Radio, Choice, PushButton, Signature
 /// <param name="Password">Text field whose value should be masked.</param>
 /// <param name="DisplayValue">The value as the field's format script shows it ("$1,234.50"), or null when it has none.</param>
 /// <param name="Calculated">The field's value is computed from other fields (filled in by <see cref="FormEditor.SetValues"/>).</param>
+/// <param name="Signed">Signature field whose /V holds a signature dictionary.</param>
+/// <param name="Triggers">Which actions the widget (or its field) carries: mouse, focus and keystroke triggers.</param>
+/// <param name="AnnotIndex">Position of the widget in its page's /Annots (identifies it for <see cref="FormEditor.RunAction"/>).</param>
 public sealed record FormWidget(
     string FieldName,
     FormFieldKind Kind,
@@ -34,7 +37,10 @@ public sealed record FormWidget(
     bool NoToggleToOff = false,
     bool Password = false,
     string? DisplayValue = null,
-    bool Calculated = false);
+    bool Calculated = false,
+    bool Signed = false,
+    FormTriggers Triggers = FormTriggers.None,
+    int AnnotIndex = -1);
 
 /// <summary>A value a field's keystroke or validate script refused, and the message it gave (or a generic one).</summary>
 public sealed record FieldRejection(string FieldName, string Message);
@@ -43,7 +49,8 @@ public sealed record FieldRejection(string FieldName, string Message);
 /// What <see cref="FormEditor.Fill"/> did: the new document, the values the form's scripts refused (those fields kept
 /// their old value), app.alert messages raised by the scripts, and script log lines (console.println, errors).
 /// </summary>
-public sealed record FormFillResult(byte[] Data, IReadOnlyList<FieldRejection> Rejected, IReadOnlyList<string> Alerts, IReadOnlyList<string> Log);
+/// <param name="FocusField">A script asked to move the focus to this field (field.setFocus).</param>
+public sealed record FormFillResult(byte[] Data, IReadOnlyList<FieldRejection> Rejected, IReadOnlyList<string> Alerts, IReadOnlyList<string> Log, string? FocusField = null);
 
 /// <summary>
 /// Reads and fills AcroForm fields (text, check boxes, radio buttons, combo/list boxes). Values are written in place,
@@ -101,14 +108,22 @@ public static partial class FormEditor
     /// every value was rejected and nothing else changed, <see cref="FormFillResult.Data"/> is <paramref name="data"/>
     /// itself.
     /// </summary>
-    public static FormFillResult Fill(byte[] data, string? password, IReadOnlyDictionary<string, string> values)
+    public static FormFillResult Fill(byte[] data, string? password, IReadOnlyDictionary<string, string> values) => Fill(data, password, values, null);
+
+    /// <summary>
+    /// <see cref="Fill(byte[], string?, IReadOnlyDictionary{string, string})"/> with a UI host: app.alert and app.response
+    /// become modal dialogs (rate-limited), and outward actions the scripts take (submitForm, launchURL, mailDoc...) go
+    /// through <paramref name="host"/>, which asks the user first.
+    /// </summary>
+    public static FormFillResult Fill(byte[] data, string? password, IReadOnlyDictionary<string, string> values, IFormActionHost? host)
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
         var acro = PdfObj.Dict(doc.Internals.Catalog.Elements["/AcroForm"]);
         var fields = new List<Field>();
         Collect(doc, acro, fields);
         if (fields.Count == 0) throw new InvalidOperationException("This PDF has no fillable form.");
-        var js = new JsFormHost(doc, fields);
+        var runner = new FormActionRunner(doc, acro, fields, host, data);
+        var js = runner.Js;
         var rejected = new List<FieldRejection>();
         var alerts = new List<string>();
 
@@ -146,8 +161,11 @@ public static partial class FormEditor
                     break;
             }
         }
-        if (!changed && rejected.Count > 0 && js.Touched.Count == 0)
-            return new FormFillResult(data, rejected, alerts, js.Log);
+        if (!changed && rejected.Count > 0 && js.Touched.Count == 0 && !runner.Changed)
+        {
+            runner.RunDeferred(data);
+            return new FormFillResult(data, rejected, alerts, js.Log, runner.FocusField);
+        }
 
         // A hybrid form's XFA would keep showing the old values in Acrobat; the AcroForm is now the truth.
         acro?.Elements.Remove("/XFA");
@@ -164,7 +182,9 @@ public static partial class FormEditor
             acro.Elements["/NeedAppearances"] = new PdfBoolean(true);
             EnsureDefaultFonts(doc, acro);
         }
-        return new FormFillResult(PdfObj.Save(doc), rejected, alerts, js.Log);
+        var saved = PdfObj.Save(doc);
+        runner.RunDeferred(saved);
+        return new FormFillResult(saved, rejected, alerts, js.Log, runner.FocusField);
     }
 
     /// <summary>
@@ -180,7 +200,8 @@ public static partial class FormEditor
             ran = true;
             if (!r.Rc)
             {
-                var why = r.Alerts.Count > 0 ? string.Join("\n", r.Alerts) : $"The value entered for {f.Name} isn't valid.";
+                // A message the user already saw in a dialog isn't repeated (empty reason).
+                var why = r.Alerts.Count > 0 ? string.Join("\n", r.Alerts) : r.Shown > 0 ? "" : $"The value entered for {f.Name} isn't valid.";
                 return (value, why);
             }
             alerts.AddRange(r.Alerts);
@@ -448,6 +469,7 @@ public static partial class FormEditor
                 if (rect.IsEmpty) continue;
                 var annotFlags = PdfObj.Int(w.Elements["/F"]) ?? 0;
                 if ((annotFlags & (AnnotHidden | AnnotNoView)) != 0) continue;
+                var signed = kind == FormFieldKind.Signature && PdfObj.Dict(Inherited(f.Dict, "/V")) is not null;
                 result.Add((new FormWidget(f.Name, kind.Value, page, rect, OnStateOf(w),
                     (f.Flags & FfMultiline) != 0, (f.Flags & FfReadOnly) != 0 || (annotFlags & AnnotReadOnly) != 0,
                     kind == FormFieldKind.Choice && (f.Flags & FfCombo) != 0 && (f.Flags & FfEdit) != 0,
@@ -455,7 +477,7 @@ public static partial class FormEditor
                     labels.SequenceEqual(options) ? null : labels, multi,
                     kind == FormFieldKind.Radio && (f.Flags & FfNoToggleToOff) != 0,
                     kind == FormFieldKind.Text && (f.Flags & FfPassword) != 0,
-                    display, calculated.Contains(f)), w));
+                    display, calculated.Contains(f), signed, TriggersOf(f, w), annotOrder.GetValueOrDefault(w, -1)), w));
             }
         }
 

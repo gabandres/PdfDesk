@@ -306,6 +306,8 @@
                                                          AutomationProperties.Name="Signature details" />
                                                 <Button Style="{StaticResource TextButton}" Content="Go to signature" HorizontalAlignment="Left" Margin="-8,2,0,0"
                                                         Tag="{Binding}" Click="OnGoToSignature" Visibility="{Binding GoVisibility}" />
+                                                <Button Style="{StaticResource TextButton}" Content="Sign this field…" HorizontalAlignment="Left" Margin="-8,0,0,0"
+                                                        Tag="{Binding}" Click="OnSignField" Visibility="{Binding SignVisibility}" />
                                             </StackPanel>
                                         </DockPanel>
                                     </Border>

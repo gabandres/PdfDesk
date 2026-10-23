@@ -174,6 +174,7 @@ public partial class DocumentTab : UserControl, IDisposable
             _ = FlushFormQueue();
         };
         Viewer.StampEdited += (_, e) => _ = SaveStamp(e);
+        InitFormActions();
         FormBarClose.Click += (_, _) =>
         {
             _formBarDismissed = true;
@@ -536,7 +537,8 @@ public partial class DocumentTab : UserControl, IDisposable
                 _formQueue.Clear();
                 var label = batch.Count == 1 ? "Fill form field" : $"Fill {batch.Count} form fields";
                 FormFillResult? fill = null;
-                var outcome = await TryEdit(label, (d, pw) => (fill = FormEditor.Fill(d, pw, batch)).Data, quiet: true, contentOnly: true);
+                var host = FormHost;
+                var outcome = await TryEdit(label, (d, pw) => (fill = FormEditor.Fill(d, pw, batch, host)).Data, quiet: true, contentOnly: true);
                 if (fill is not null && outcome is EditOutcome.Done or EditOutcome.NoChange) ReportFormScripts(batch, fill);
                 if (outcome == EditOutcome.Busy)
                 {
@@ -573,9 +575,11 @@ public partial class DocumentTab : UserControl, IDisposable
         if (fill.Rejected.Count > 0)
         {
             Viewer.RevertPendingValues(fill.Rejected.Where(r => batch.ContainsKey(r.FieldName)).ToDictionary(r => r.FieldName, r => batch[r.FieldName]));
-            foreach (var r in fill.Rejected) Notify(r.Message, error: true);
+            // An empty message: the script already told the user in a dialog.
+            foreach (var r in fill.Rejected.Where(r => r.Message.Length > 0)) Notify(r.Message, error: true);
         }
         foreach (var alert in fill.Alerts.Distinct().Take(3)) Notify(alert);
+        if (fill.FocusField is { } focus && !Viewer.IsEditing) Viewer.FocusField(focus);
     }
 
     private async Task SaveStamp(StampEdit e)

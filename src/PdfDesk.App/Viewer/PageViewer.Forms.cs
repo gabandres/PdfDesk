@@ -13,6 +13,21 @@ public sealed record FieldEdit(string FieldName, string Value);
 /// <summary>Text or a mark to put on a page (new, or replacing <see cref="ReplaceId"/>); empty text with an id deletes it.</summary>
 public sealed record StampEdit(int PageIndex, RectD Rect, StampKind Kind, string Text, double FontSize, string? ReplaceId);
 
+/// <summary>A user event on a form widget whose actions should run (see <see cref="FormEditor.RunAction"/>).</summary>
+public sealed record FormWidgetAction(FormWidget Widget, FormTrigger Trigger);
+
+/// <summary>
+/// Live keystroke checks for the inline text editor: <see cref="Prepare"/> when it opens on a field with a keystroke
+/// script (load off the UI thread), <see cref="Filter"/> per edit (null = not ready or no verdict: let it through),
+/// <see cref="Release"/> when it closes.
+/// </summary>
+public interface IFieldKeystrokes
+{
+    void Prepare(FormWidget widget);
+    KeystrokeResult? Filter(FormWidget widget, string value, string change, int selStart, int selEnd);
+    void Release();
+}
+
 /// <summary>Form filling and Fill &amp; Sign on top of the page view.</summary>
 public sealed partial class PageViewer
 {
@@ -35,8 +50,24 @@ public sealed partial class PageViewer
     private bool _committing;
     private IReadOnlyList<int>? _pageRotations;
 
+    // Push buttons and widget actions.
+    private FormWidget? _pressedWidget;
+    private bool _formMouseHooked;
+    private ToolTip? _widgetTip;
+    private FormWidget? _tipWidget;
+
     public event EventHandler<FieldEdit>? FieldEdited;
     public event EventHandler<StampEdit>? StampEdited;
+
+    /// <summary>A widget's actions should run: a push button pressed or released, a field clicked, entered or left,
+    /// or its editor opened or closed. Raised only when the widget has actions for that trigger.</summary>
+    public event EventHandler<FormWidgetAction>? WidgetAction;
+
+    /// <summary>The user clicked a signature field, or pressed Enter/Space on it.</summary>
+    public event EventHandler<FormWidget>? SignatureFieldActivated;
+
+    /// <summary>Live keystroke scripts for the inline text editor (null = none).</summary>
+    public IFieldKeystrokes? Keystrokes { get; set; }
 
     public bool HasFormFields => _fillOrder.Count > 0;
 
@@ -60,7 +91,20 @@ public sealed partial class PageViewer
                 _pendingValues.Remove(name);
         if (_focusWidget is not null)
             _focusWidget = widgets.FirstOrDefault(w => w.FieldName == _focusWidget.FieldName && w.Rect == _focusWidget.Rect);
+        if (_hoverWidget is not null)
+            _hoverWidget = widgets.FirstOrDefault(w => w.FieldName == _hoverWidget.FieldName && w.Rect == _hoverWidget.Rect);
+        if (_pressedWidget is not null)
+            _pressedWidget = widgets.FirstOrDefault(w => w.FieldName == _pressedWidget.FieldName && w.Rect == _pressedWidget.Rect);
+        HookFormMouse();
         _surface.InvalidateVisual();
+    }
+
+    /// <summary>Moves the focus to a field (a script's field.setFocus): its editor opens for text and lists.</summary>
+    public void FocusField(string name)
+    {
+        if (_fillOrder.FirstOrDefault(w => w.FieldName == name) is not { } w) return;
+        CommitEditor();
+        FocusStop(new TabStop(w.PageIndex, w.Rect, w, null));
     }
 
     /// <summary>
@@ -98,8 +142,77 @@ public sealed partial class PageViewer
         _surface.InvalidateVisual();
     }
 
+    /// <summary>A widget the user can act on (and Tab to): fields to fill, push buttons, and signature fields.</summary>
     private static bool IsFillable(FormWidget w) =>
-        !w.ReadOnly && w.Kind is FormFieldKind.Text or FormFieldKind.CheckBox or FormFieldKind.Radio or FormFieldKind.Choice;
+        w.Kind == FormFieldKind.Signature
+        || (!w.ReadOnly && w.Kind is FormFieldKind.Text or FormFieldKind.CheckBox or FormFieldKind.Radio or FormFieldKind.Choice or FormFieldKind.PushButton);
+
+    private void RaiseAction(FormWidget w, FormTrigger trigger)
+    {
+        var needed = trigger switch
+        {
+            FormTrigger.Down => FormTriggers.Down,
+            FormTrigger.Up => FormTriggers.Up,
+            FormTrigger.Click => FormTriggers.Down | FormTriggers.Up,
+            FormTrigger.Enter => FormTriggers.Enter,
+            FormTrigger.Exit => FormTriggers.Exit,
+            FormTrigger.Focus => FormTriggers.Focus,
+            _ => FormTriggers.Blur,
+        };
+        if ((w.Triggers & needed) != 0) WidgetAction?.Invoke(this, new FormWidgetAction(w, trigger));
+    }
+
+    /// <summary>Mouse release (push buttons fire on release inside) and leaving the page view (hover ends).</summary>
+    private void HookFormMouse()
+    {
+        if (_formMouseHooked) return;
+        _formMouseHooked = true;
+        _surface.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(OnFormMouseUp), handledEventsToo: true);
+        _surface.MouseLeave += (_, _) => SetHoverWidget(null);
+    }
+
+    private void OnFormMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_pressedWidget is not { } w) return;
+        _pressedWidget = null;
+        if (_surface.IsMouseCaptured) _surface.ReleaseMouseCapture();
+        var sp = e.GetPosition(_surface);
+        var page = HitPage(sp);
+        if (page == w.PageIndex && ToPagePoint(page, sp) is var pt && w.Rect.Inflate(1).Contains(pt.X, pt.Y)) RaiseAction(w, FormTrigger.Up);
+        _surface.InvalidateVisual();
+    }
+
+    private void SetHoverWidget(FormWidget? w)
+    {
+        if (ReferenceEquals(w, _hoverWidget)) return;
+        var old = _hoverWidget;
+        _hoverWidget = w;
+        if (old is not null) RaiseAction(old, FormTrigger.Exit);
+        if (w is not null) RaiseAction(w, FormTrigger.Enter);
+        ShowWidgetTip(w);
+        _surface.InvalidateVisual();
+    }
+
+    /// <summary>"Click to sign" over an unsigned signature field.</summary>
+    private void ShowWidgetTip(FormWidget? w)
+    {
+        var tip = w is { Kind: FormFieldKind.Signature, Signed: false } ? "Click to sign" : null;
+        if (tip is null)
+        {
+            _tipWidget = null;
+            if (_widgetTip is { IsOpen: true }) _widgetTip.IsOpen = false;
+            return;
+        }
+        if (_widgetTip is { IsOpen: true } && ReferenceEquals(_tipWidget, w)) return;
+        _widgetTip ??= new ToolTip { Placement = System.Windows.Controls.Primitives.PlacementMode.Mouse };
+        _widgetTip.IsOpen = false;
+        _tipWidget = w;
+        _widgetTip.Content = tip;
+        _widgetTip.PlacementTarget = _surface;
+        _widgetTip.IsOpen = true;
+    }
+
+    internal string? DevWidgetTip => _widgetTip is { IsOpen: true } t ? t.Content as string : null;
 
     private string ValueOf(FormWidget w) => _pendingValues.TryGetValue(w.FieldName, out var v) ? v : w.Value;
 
@@ -117,6 +230,7 @@ public sealed partial class PageViewer
 
     private static readonly Brush PendingOnBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x10, 0x10, 0x10)));
     private static readonly Brush WhiteBrush = Frozen(Brushes.White);
+    private static readonly Brush PressedBrush = Frozen(new SolidColorBrush(Color.FromArgb(0x48, 0x00, 0x00, 0x00)));
 
     private void PaintForms(DrawingContext dc, int page)
     {
@@ -128,7 +242,8 @@ public sealed partial class PageViewer
             {
                 if (!IsFillable(w)) continue;
                 var r = ToSurfaceRect(page, w.Rect);
-                if (_highlightFields && !EffectiveInvert) dc.DrawRectangle(pal.Field, pal.FieldPen, r);
+                if (_highlightFields && !EffectiveInvert && !w.Signed) dc.DrawRectangle(pal.Field, pal.FieldPen, r);
+                if (ReferenceEquals(w, _pressedWidget)) dc.DrawRectangle(PressedBrush, null, r);
 
                 // Optimistic check boxes / radios: show the new state until the re-rendered page arrives.
                 if (w.Kind is FormFieldKind.CheckBox or FormFieldKind.Radio && _pendingValues.TryGetValue(w.FieldName, out var pending))
@@ -182,6 +297,22 @@ public sealed partial class PageViewer
     private bool HandleFormMouseDown(MouseButtonEventArgs e, int page, Point sp)
     {
         if (page < 0) return false;
+        if (WidgetAt(page, ToPagePoint(page, sp)) is { Kind: FormFieldKind.PushButton } button)
+        {
+            // Pressed until released: the down action runs now, the up action (and /A) on release inside the button.
+            CommitEditor();
+            Focus();
+            _focusWidget = button;
+            _focusLink = null;
+            _pressLink = null;
+            _pressedWidget = button;
+            HookFormMouse();
+            _surface.CaptureMouse();
+            RaiseAction(button, FormTrigger.Down);
+            _surface.InvalidateVisual();
+            e.Handled = true;
+            return true;
+        }
         if (!HandleFormClick(page, ToPagePoint(page, sp), e.ClickCount)) return false;
         e.Handled = true;
         return true;
@@ -251,14 +382,14 @@ public sealed partial class PageViewer
 
     private Cursor? FormCursor(int page, Point sp)
     {
-        if (page < 0) return null;
+        if (page < 0)
+        {
+            SetHoverWidget(null);
+            return null;
+        }
         var pt = ToPagePoint(page, sp);
         var w = WidgetAt(page, pt);
-        if (!ReferenceEquals(w, _hoverWidget))
-        {
-            _hoverWidget = w;
-            _surface.InvalidateVisual();
-        }
+        SetHoverWidget(w);
         if (w is not null) return w.Kind == FormFieldKind.Text ? Cursors.IBeam : Cursors.Hand;
         if (_tool is ViewerTool.AddText or ViewerTool.AddCheck or ViewerTool.AddCross)
             return StampAt(page, pt) is not null ? Cursors.Hand : _tool == ViewerTool.AddText ? Cursors.IBeam : Cursors.Cross;
@@ -288,7 +419,18 @@ public sealed partial class PageViewer
             case FormFieldKind.Choice:
                 OpenFieldEditor(w);
                 break;
+            case FormFieldKind.PushButton:
+                // Keyboard, touch or a scripted click: press and release at once.
+                RaiseAction(w, FormTrigger.Click);
+                _surface.InvalidateVisual();
+                return;
+            case FormFieldKind.Signature:
+                SignatureFieldActivated?.Invoke(this, w);
+                _surface.InvalidateVisual();
+                return;
         }
+        // Fields can carry mouse actions too (a check box showing or hiding other fields): they run after the change.
+        RaiseAction(w, FormTrigger.Click);
         _surface.InvalidateVisual();
     }
 
@@ -448,8 +590,17 @@ public sealed partial class PageViewer
         _editorStamp = stamp;
         editor.PreviewKeyDown += OnEditorKey;
         editor.LostKeyboardFocus += OnEditorLostFocus;
+        if (widget is not null && editor is TextBox box && (widget.Triggers & FormTriggers.Keystroke) != 0 && Keystrokes is { } keys)
+        {
+            keys.Prepare(widget);
+            _editorKeystrokes = true;
+            box.PreviewTextInput += OnEditorTextInput;
+            box.PreviewKeyDown += OnEditorEditKey;
+            DataObject.AddPastingHandler(box, OnEditorPaste);
+        }
         _overlay.Children.Add(editor);
         PositionEditor();
+        if (widget is not null) RaiseAction(widget, FormTrigger.Focus);
         editor.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
         {
             if (!ReferenceEquals(_editor, editor)) return;
@@ -593,13 +744,105 @@ public sealed partial class PageViewer
     private void CloseEditor()
     {
         if (_editor is null) return;
+        var closed = _editorWidget;
         _editor.PreviewKeyDown -= OnEditorKey;
         _editor.LostKeyboardFocus -= OnEditorLostFocus;
+        if (_editor is TextBox box && _editorKeystrokes)
+        {
+            box.PreviewTextInput -= OnEditorTextInput;
+            box.PreviewKeyDown -= OnEditorEditKey;
+            DataObject.RemovePastingHandler(box, OnEditorPaste);
+            Keystrokes?.Release();
+        }
+        _editorKeystrokes = false;
         _overlay.Children.Remove(_editor);
         _editor = null;
         _editorWidget = null;
         _editorStamp = null;
         _surface.InvalidateVisual();
+        if (closed is not null) RaiseAction(closed, FormTrigger.Blur);
+    }
+
+    // ───────────────────────────── Live keystrokes ─────────────────────────────
+
+    private bool _editorKeystrokes;
+
+    private void OnEditorTextInput(object sender, TextCompositionEventArgs e)
+    {
+        if (sender is TextBox box && e.Text.Length > 0 && !FilterEdit(box, e.Text, deleteBack: null)) e.Handled = true;
+    }
+
+    private void OnEditorEditKey(object sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox box || (Keyboard.Modifiers & ~ModifierKeys.Shift) != 0) return;
+        // Space never reaches PreviewTextInput in a TextBox; Backspace and Delete are edits too.
+        var ok = e.Key switch
+        {
+            Key.Space => FilterEdit(box, " ", deleteBack: null),
+            Key.Back => FilterEdit(box, "", deleteBack: true),
+            Key.Delete when Keyboard.Modifiers == ModifierKeys.None => FilterEdit(box, "", deleteBack: false),
+            _ => true,
+        };
+        if (!ok) e.Handled = true;
+    }
+
+    private void OnEditorPaste(object sender, DataObjectPastingEventArgs e)
+    {
+        if (sender is not TextBox box || e.DataObject.GetData(DataFormats.UnicodeText) is not string text) return;
+        if (!box.AcceptsReturn) text = text.Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ');
+        e.CancelCommand();
+        if (FilterEdit(box, text, deleteBack: null)) Replace(box, box.SelectionStart, box.SelectionStart + box.SelectionLength, text);
+    }
+
+    /// <summary>
+    /// Runs the field's keystroke script on an edit about to happen. True = let it happen as is; false = it was
+    /// refused, or the script rewrote it and the rewritten edit was applied here.
+    /// </summary>
+    private bool FilterEdit(TextBox box, string change, bool? deleteBack)
+    {
+        if (_editorWidget is not { } w || Keystrokes is not { } keys) return true;
+        var value = box.Text;
+        var start = box.SelectionStart;
+        var end = start + box.SelectionLength;
+        if (deleteBack is { } back && start == end)
+        {
+            if (back)
+            {
+                if (start == 0) return true;
+                start--;
+            }
+            else
+            {
+                if (end >= value.Length) return true;
+                end++;
+            }
+        }
+        KeystrokeResult? r;
+        try
+        {
+            r = keys.Filter(w, value, change, start, end);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return true;
+        }
+        if (r is null) return true;
+        foreach (var alert in r.Alerts.Take(2)) StatusMessage?.Invoke(this, alert);
+        if (!r.Accepted) return false;
+        if (r.Change == change && r.SelStart == start && r.SelEnd == end) return true;
+        Replace(box, r.SelStart, r.SelEnd, r.Change);
+        return false;
+    }
+
+    private static void Replace(TextBox box, int start, int end, string text)
+    {
+        var value = box.Text;
+        start = Math.Clamp(start, 0, value.Length);
+        end = Math.Clamp(end, start, value.Length);
+        var updated = value[..start] + text + value[end..];
+        if (box.MaxLength > 0 && updated.Length > box.MaxLength) return;
+        box.Text = updated;
+        box.CaretIndex = start + text.Length;
     }
 
     /// <summary>The page-space box for typed text (Arial metrics match the PDF's Helvetica closely).</summary>

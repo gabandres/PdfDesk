@@ -3,8 +3,9 @@ namespace PdfDesk.Core;
 /// <summary>
 /// The Acrobat object model form scripts see, written in JavaScript over a private host object (h). Evaluates to a
 /// function taking h and returning { begin, end } for the host's event plumbing; h itself never becomes global.
-/// Only what is defined here exists: no launchURL, submitForm, mailDoc, importDataObject, exportDataObject, print,
-/// getURL, SOAP or Net.
+/// Only what is defined here exists. Outward calls (app.launchURL, submitForm, mailDoc/mailForm, print, importAnFDF)
+/// only reach the host, which asks the user before anything leaves the document; there is no importDataObject,
+/// exportDataObject, SOAP, Net or file access.
 /// </summary>
 internal static class JsPrelude
 {
@@ -55,9 +56,20 @@ internal static class JsPrelude
     else if (ev.length > (i | 0)) this.value = ev[i | 0];
   };
   var noop = function () {};
-  ['setItems', 'clearItems', 'insertItemAt', 'deleteItemAt', 'setFocus', 'setAction', 'setLock', 'buttonSetCaption',
-   'buttonSetIcon', 'buttonImportIcon', 'signatureSetSeedValue'].forEach(function (n) { fp[n] = noop; });
+  ['setAction', 'setLock', 'buttonSetCaption', 'buttonSetIcon', 'buttonImportIcon', 'signatureSetSeedValue'
+  ].forEach(function (n) { fp[n] = noop; });
   fp.buttonGetCaption = function () { return ''; };
+  fp.setFocus = function () { h.focus(this.name); };
+  fp.setItems = function (items) { h.items('set', this.name, items ? Array.prototype.slice.call(items) : []); };
+  fp.insertItemAt = function (cName, cExport, nIdx) {
+    if (cName !== null && typeof cName === 'object') { cExport = cName.cExport; nIdx = cName.nIdx; cName = cName.cName; }
+    h.items('insert', this.name, cName === undefined ? '' : String(cName), cExport, nIdx);
+  };
+  fp.deleteItemAt = function (nIdx) {
+    if (nIdx !== null && typeof nIdx === 'object') nIdx = nIdx.nIdx;
+    h.items('delete', this.name, nIdx);
+  };
+  fp.clearItems = function () { h.items('clear', this.name); };
 
   G.getField = function (name) {
     if (name === undefined || name === null) return null;
@@ -69,17 +81,75 @@ internal static class JsPrelude
   G.calculateNow = noop;
   G.dirty = false;
   G.calculate = true;
+  G.documentFileName = '';
+  Object.defineProperty(G, 'pageNum', { get: function () { return h.pageNum(); }, set: function (n) { h.setPageNum(n); }, configurable: true });
+  Object.defineProperty(G, 'numPages', { get: function () { return h.numPages(); }, configurable: true });
+  Object.defineProperty(G, 'title', { get: function () { return h.info('Title') || ''; }, configurable: true });
+  var info = {};
+  ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer'].forEach(function (k) {
+    var get = function () { return h.info(k) || ''; };
+    Object.defineProperty(info, k, { get: get, enumerable: true });
+    Object.defineProperty(info, k.toLowerCase(), { get: get });
+  });
+  G.info = info;
+
+  function str(v) { return v === undefined || v === null ? '' : String(v); }
+  function names(v) {
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'string') return [v];
+    return Array.prototype.slice.call(v).map(String);
+  }
+  G.submitForm = function (cURL, bFDF, bEmpty, aFields, bGet, bAnnotations, bXML, bIncrChanges, bPDF, bCanonical,
+    bExclNonUserAnnots, bExclFKey, cPassword, bEmbedForm, oJavaScript, cSubmitAs, bInclNMKey, aPackets, cCharset,
+    oXML, cPermID, cInstID, cUsageRights) {
+    var o = cURL !== null && typeof cURL === 'object' ? cURL : {
+      cURL: cURL, bFDF: bFDF, bEmpty: bEmpty, aFields: aFields, bGet: bGet, bXML: bXML, bPDF: bPDF,
+      cSubmitAs: cSubmitAs, cCharset: cCharset
+    };
+    var as = o.cSubmitAs ? String(o.cSubmitAs).toUpperCase()
+      : o.bPDF ? 'PDF' : o.bXML ? 'XFDF' : o.bFDF === false ? 'HTML' : 'FDF';
+    h.submit(str(o.cURL), as, !!o.bEmpty, names(o.aFields), !!o.bGet, str(o.cCharset));
+  };
+  G.resetForm = function (aFields) {
+    if (aFields !== null && typeof aFields === 'object' && !Array.isArray(aFields) && 'aFields' in aFields) aFields = aFields.aFields;
+    h.reset(names(aFields));
+  };
+  G.print = function (bUI, nStart, nEnd) {
+    var o = bUI !== null && typeof bUI === 'object' ? bUI : { nStart: nStart, nEnd: nEnd };
+    h.print(o.nStart, o.nEnd);
+  };
+  function mailer(kind) {
+    return function (bUI, cTo, cCc, cBcc, cSubject, cMsg) {
+      var o = bUI !== null && typeof bUI === 'object' ? bUI : { cTo: cTo, cCc: cCc, cBcc: cBcc, cSubject: cSubject, cMsg: cMsg };
+      h.mail(kind, str(o.cTo), str(o.cCc), str(o.cBcc), str(o.cSubject), str(o.cMsg));
+    };
+  }
+  G.mailDoc = mailer('doc');
+  G.mailForm = mailer('form');
+  G.importAnFDF = function (cPath) { h.importData(str(cPath)); };
+  G.importAnXFDF = G.importAnFDF;
+  G.getURL = function (cURL) { h.launchURL(str(cURL)); };
 
   G.app = {
     viewerType: 'Reader', viewerVariation: 'Reader', viewerVersion: 11, formsVersion: 11, platform: 'WIN',
     language: 'ENU', calculate: true, runtimeHighlight: false, focusRect: true, fs: { isFullScreen: false },
-    alert: function (m) {
-      var msg = m !== null && typeof m === 'object' ? m.cMsg : m;
-      h.alert(msg === undefined || msg === null ? '' : String(msg));
-      return 1;
+    alert: function (cMsg, nIcon, nType, cTitle) {
+      if (cMsg !== null && typeof cMsg === 'object') { nIcon = cMsg.nIcon; nType = cMsg.nType; cTitle = cMsg.cTitle; cMsg = cMsg.cMsg; }
+      return h.alert(str(cMsg), nIcon === undefined ? 0 : nIcon, nType === undefined ? 0 : nType, str(cTitle));
     },
-    beep: noop,
-    response: function () { return null; },
+    beep: function (nType) { h.beep(nType === undefined ? 4 : nType); },
+    response: function (cQuestion, cTitle, cDefault, bPassword, cLabel) {
+      if (cQuestion !== null && typeof cQuestion === 'object') {
+        cTitle = cQuestion.cTitle; cDefault = cQuestion.cDefault; bPassword = cQuestion.bPassword; cLabel = cQuestion.cLabel;
+        cQuestion = cQuestion.cQuestion;
+      }
+      return h.response(str(cQuestion), str(cTitle), str(cDefault), !!bPassword, str(cLabel));
+    },
+    launchURL: function (cURL) {
+      if (cURL !== null && typeof cURL === 'object') cURL = cURL.cURL;
+      h.launchURL(str(cURL));
+    },
+    mailMsg: function (bUI, cTo, cCc, cBcc, cSubject, cMsg) { mailer('msg')(bUI, cTo, cCc, cBcc, cSubject, cMsg); },
     setTimeOut: function () { return {}; },
     setInterval: function () { return {}; },
     clearTimeOut: noop,
@@ -102,7 +172,27 @@ internal static class JsPrelude
       var p = h.parseDate(String(s), String(f));
       return p ? new Date(p[0], p[1] - 1, p[2], p[3], p[4], p[5]) : null;
     },
-    printx: function (f, s) { return String(s); }
+    printx: function (f, s) {
+      f = str(f); s = str(s);
+      var out = '', j = 0, cs = 0;
+      function conv(c) { return cs === 1 ? c.toUpperCase() : cs === 2 ? c.toLowerCase() : c; }
+      for (var i = 0; i < f.length; i++) {
+        var c = f.charAt(i);
+        if (c === '?') { if (j < s.length) out += conv(s.charAt(j++)); }
+        else if (c === 'X' || c === 'A' || c === '9') {
+          var re = c === 'X' ? /[A-Za-z0-9]/ : c === 'A' ? /[A-Za-z]/ : /[0-9]/;
+          while (j < s.length && !re.test(s.charAt(j))) j++;
+          if (j < s.length) out += conv(s.charAt(j++));
+        }
+        else if (c === '*') { while (j < s.length) out += conv(s.charAt(j++)); }
+        else if (c === '\\') { if (i + 1 < f.length) out += f.charAt(++i); }
+        else if (c === '>') cs = 1;
+        else if (c === '<') cs = 2;
+        else if (c === '=') cs = 0;
+        else out += c;
+      }
+      return out;
+    }
   };
 
   function AFMakeNumber(s) {
@@ -169,9 +259,89 @@ internal static class JsPrelude
     var e = G.event, v = String(e.value);
     if (v !== '') e.value = h.fmtSpecial(v, n);
   };
+  G.AFExactMatch = function (re, s) {
+    var list = re instanceof RegExp ? [re] : re || [];
+    s = str(s);
+    for (var i = 0; i < list.length; i++) {
+      var m = s.match(list[i]);
+      if (m && m[0] === s) return i + 1;
+    }
+    return 0;
+  };
+
+  // Live typing against a mask (9 digit, A letter, O letter or digit, X anything; other characters are literals):
+  // at the end of the text the mask's literals are filled in as you type; elsewhere characters only have to fit the mask.
+  var maskTest = { '9': /[0-9]/, 'A': /[A-Za-z]/, 'O': /[A-Za-z0-9]/, 'X': /[\s\S]/ };
+  function fits(v, mask) {
+    if (v.length !== mask.length) return false;
+    for (var i = 0; i < v.length; i++) {
+      var m = mask.charAt(i), t = maskTest[m];
+      if (t ? !t.test(v.charAt(i)) : v.charAt(i) !== m) return false;
+    }
+    return true;
+  }
+  function placeholders(mask) { return mask.replace(/[^9AOX]/g, ''); }
+  function applyMask(v, mask) {
+    var out = '', j = 0;
+    for (var i = 0; i < mask.length; i++) out += maskTest[mask.charAt(i)] ? v.charAt(j++) : mask.charAt(i);
+    return out;
+  }
+  function liveMask(e, mask) {
+    var v = String(e.value), start = e.selStart >= 0 ? e.selStart : v.length, end = e.selEnd >= 0 ? e.selEnd : v.length;
+    var head = v.substring(0, start), tail = v.substring(end), add = String(e.change), out = '', k, ch;
+    if (tail !== '') {
+      for (k = 0; k < add.length; k++) {
+        ch = add.charAt(k);
+        var ok = false;
+        for (var m = 0; m < mask.length && !ok; m++) ok = maskTest[mask.charAt(m)] ? maskTest[mask.charAt(m)].test(ch) : mask.charAt(m) === ch;
+        if (!ok) { e.rc = false; return; }
+      }
+      return;
+    }
+    for (k = 0; k < add.length; k++) {
+      ch = add.charAt(k);
+      var pos = head.length + out.length;
+      while (pos < mask.length && !maskTest[mask.charAt(pos)] && ch !== mask.charAt(pos)) { out += mask.charAt(pos); pos++; }
+      if (pos >= mask.length) { e.rc = false; return; }
+      var mc = mask.charAt(pos), t = maskTest[mc];
+      if (t ? !t.test(ch) : ch !== mc) { e.rc = false; return; }
+      out += ch;
+    }
+    e.change = out;
+  }
+  G.AFSpecial_KeystrokeEx = function (mask) {
+    var e = G.event;
+    mask = str(mask);
+    if (mask === '') return;
+    if (!e.willCommit) { if (e.name === 'Keystroke') liveMask(e, mask); return; }
+    var v = String(e.value);
+    if (v === '' || fits(v, mask)) return;
+    var p = placeholders(mask);
+    if (p !== mask && fits(v, p)) { e.value = applyMask(v, mask); return; }
+    reject('The value entered does not match the format of the field [ ' + fieldName() + ' ]: ' + mask);
+  };
+
+  // Zip, Zip+4, phone and social security numbers: digits only, the separators appear as you type.
+  function liveDigits(e, n) {
+    var v = String(e.value), start = e.selStart >= 0 ? e.selStart : v.length, end = e.selEnd >= 0 ? e.selEnd : v.length;
+    var change = String(e.change);
+    if (!/^[0-9\s\-().+]*$/.test(change)) { e.rc = false; return; }
+    if (end < v.length) return;
+    var typed = v.substring(0, start) + change, digits = typed.replace(/\D/g, '');
+    var mask = n === 0 ? '99999' : n === 1 ? '99999-9999' : n === 3 ? '999-99-9999'
+      : digits.length > 7 || /^\s*\(/.test(typed) ? '(999) 999-9999' : '999-9999';
+    if (digits.length > placeholders(mask).length) { e.rc = false; return; }
+    var out = '', j = 0;
+    for (var i = 0; i < mask.length && j < digits.length; i++) out += mask.charAt(i) === '9' ? digits.charAt(j++) : mask.charAt(i);
+    if (out === '' && mask.charAt(0) === '(' && /\(/.test(typed)) out = '(';
+    e.selStart = 0;
+    e.selEnd = v.length;
+    e.change = out;
+  }
+
   G.AFSpecial_Keystroke = function (n) {
     var e = G.event;
-    if (!e.willCommit) { if (!/^[0-9\s\-().+]*$/.test(String(e.change))) e.rc = false; return; }
+    if (!e.willCommit) { if (e.name === 'Keystroke') liveDigits(e, n | 0); return; }
     var v = String(e.value);
     if (v === '') return;
     var digits = v.replace(/\D/g, '').length;
@@ -219,18 +389,18 @@ internal static class JsPrelude
   };
 
   return {
-    begin: function (name, target, value, willCommit) {
+    begin: function (name, target, value, willCommit, change, selStart, selEnd) {
       var t = target ? new Field(target) : null;
       G.event = {
-        name: name, type: 'Field', value: value, change: '', changeEx: '', willCommit: !!willCommit, rc: true,
-        target: t, targetName: target, source: t, selStart: 0, selEnd: 0, modifier: false, shift: false,
-        commitKey: willCommit ? 2 : 0, fieldFull: false, keyDown: false
+        name: name, type: 'Field', value: value, change: change || '', changeEx: '', willCommit: !!willCommit, rc: true,
+        target: t, targetName: target, source: t, selStart: selStart | 0, selEnd: selEnd | 0, modifier: false, shift: false,
+        commitKey: willCommit ? 2 : 0, fieldFull: false, keyDown: name === 'Keystroke' && !willCommit
       };
     },
     end: function () {
       var e = G.event, v = e ? e.value : '';
       if (typeof v !== 'number' && typeof v !== 'string' && typeof v !== 'boolean') v = v === undefined || v === null ? '' : String(v);
-      return [v, !e || e.rc !== false];
+      return [v, !e || e.rc !== false, e ? str(e.change) : '', e ? Number(e.selStart) : 0, e ? Number(e.selEnd) : 0];
     }
   };
 })

@@ -145,6 +145,7 @@ public sealed class SignatureItem(SignatureInfo info, string? pageLabel, bool br
     public SignatureInfo Info { get; } = info;
     public string Title => Info.Status == SignatureStatus.Unsigned ? $"{Info.FieldName} (not signed)" : Info.SignerName ?? Info.FieldName;
     public Visibility GoVisibility => Info.PageIndex >= 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility SignVisibility => Info.Status == SignatureStatus.Unsigned ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>ok, warn, bad or none (drives the icon color).</summary>
     public string Severity => DocumentTab.SignatureSeverity(Info, brokenByEdits);
@@ -327,6 +328,7 @@ public partial class DocumentTab
             foreach (var item in new FrameworkElement[] { CtxHighlight, CtxUnderline, CtxStrikeOut, CtxRedactText, CtxMarkupSeparator })
                 item.Visibility = markup ? Visibility.Visible : Visibility.Collapsed;
         };
+        InitSigning();
         _ = LoadReviewAsync();
     }
 
@@ -351,7 +353,8 @@ public partial class DocumentTab
         IReadOnlyList<SignatureInfo>? Signatures,
         (bool HasXfa, bool XfaOnly)? Xfa,
         ViewerPrefs? Prefs,
-        string? Title);
+        string? Title,
+        IReadOnlyList<TextStamp> SignatureStamps);
 
     /// <summary>Reads labels, comments, attachments, layers and signatures off the UI thread (the latest request wins).</summary>
     private async Task LoadReviewAsync()
@@ -380,6 +383,7 @@ public partial class DocumentTab
         foreach (var t in _thumbs) t.SetLabel(PageLabel(t.Index), Viewer.PageCount);
 
         _annotations = info.Annotations;
+        Viewer.SetSignatureStamps(info.SignatureStamps);
         Viewer.SetAnnotations([.. _annotations.Where(a => !a.IsPdfDeskStamp)]);
         RefreshCommentList();
 
@@ -433,7 +437,8 @@ public partial class DocumentTab
         var xfa = first ? Try<(bool, bool)?>("XFA", () => FormEditor.HasXfa(data, pw), null) : null;
         var prefs = first ? Try<ViewerPrefs?>("opening settings", () => DocumentFeatures.ReadViewerPrefs(data, pw), null) : null;
         var title = wantTitle ? Try<string?>("title", () => PageEditor.ReadMetadata(data, pw).Title, null) : null;
-        return new ReviewInfo(labels, annots, files, layers, order, sigs, xfa, prefs, title);
+        var sigStamps = Try<IReadOnlyList<TextStamp>>("signature stamps", () => SignatureStamps.Read(data, pw), []);
+        return new ReviewInfo(labels, annots, files, layers, order, sigs, xfa, prefs, title, sigStamps);
     }
 
     /// <summary>Honors the document's opening settings (only for files without a remembered position).</summary>

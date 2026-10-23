@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using Acornima.Ast;
 using Jint;
 using Jint.Native;
 using Jint.Native.Object;
@@ -13,69 +14,101 @@ namespace PdfDesk.Core;
 public static partial class FormEditor
 {
     /// <summary>What a field script did with one event: the resulting event.value and event.rc, the app.alert texts it
-    /// raised, and the text color it set (format scripts drawing negatives red).</summary>
-    internal sealed record JsEventResult(string? Value, bool Rc, IReadOnlyList<string> Alerts, double[]? TextColor);
+    /// raised (when no UI host showed them), the text color it set (format scripts drawing negatives red), the keystroke
+    /// change and selection it left (live keystrokes), and how many dialogs the host showed for it.</summary>
+    internal sealed record JsEventResult(string? Value, bool Rc, IReadOnlyList<string> Alerts, double[]? TextColor,
+        string Change = "", int SelStart = 0, int SelEnd = 0, int Shown = 0);
 
     /// <summary>
-    /// Runs a form's Acrobat JavaScript (field /AA actions and document-level scripts) in a Jint sandbox: no CLR access,
-    /// a time, statement, recursion, array and memory budget per script, and only a small Acrobat object model
-    /// (event, getField, field objects, app.alert/console.println collected as messages, util.printf/printd/scand and the
-    /// AF* built-ins). Nothing reaches the network, the file system or the UI: anything else Acrobat offers (launchURL,
-    /// submitForm, mailDoc, importDataObject, ...) is absent. A script that fails, times out or exceeds a limit returns
-    /// null so callers fall back to the parsed fast paths in <see cref="FormScripts"/>; errors never escape.
+    /// Runs a form's Acrobat JavaScript (field /AA actions, button actions and document-level scripts) in a Jint sandbox:
+    /// no CLR access, a time, statement, recursion, array and memory budget per script, and only a small Acrobat object
+    /// model (event, getField, field objects, app/util/console and the AF* built-ins). Everything that leaves the
+    /// document (launchURL, submitForm, mailDoc, print, imports) goes through a <see cref="FormActionRunner"/> and its
+    /// <see cref="IFormActionHost"/>, which asks the user first; without a runner (reading a form, live keystrokes) those
+    /// calls do nothing, and document-level scripts can never reach them. Modal dialogs (app.alert, app.response) are
+    /// limited per event and per run, and the time they are open doesn't count against the script's budget. A script
+    /// that fails, times out or exceeds a limit returns null so callers fall back to the parsed fast paths in
+    /// <see cref="FormScripts"/>; errors never escape.
     /// </summary>
     internal sealed class JsFormHost
     {
         private static readonly TimeSpan ScriptTimeout = TimeSpan.FromMilliseconds(200);
         private const long TotalBudgetMs = 2000; // all scripts of one fill/read together: past it, scripting turns off
         private const int MaxScriptLength = 256 * 1024;
+        internal const int MaxDialogsPerEvent = 3;
+        private const int MaxDialogsPerRun = 10;
 
         private readonly PdfDocument _doc;
         private readonly List<Field> _fields;
         private readonly bool _readOnly;
+        private readonly FormActionRunner? _runner;
         private readonly Stopwatch _spent = new();
+        private readonly PausableTimeout _timeout = new(ScriptTimeout);
         private readonly Dictionary<string, Dictionary<string, JsValue>> _props = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Prepared<Script>> _prepared = new(StringComparer.Ordinal);
         private Engine? _engine;
         private ObjectInstance? _api;
         private bool _failed;
+        private bool _inDocumentScripts;
         private List<string>? _eventAlerts;
         private double[]? _eventColor;
         private string? _eventTarget;
+        private int _eventDialogs, _runDialogs, _prints;
 
         /// <param name="readOnly">Scripts may read fields but their writes are ignored (reading a form for display).</param>
-        public JsFormHost(PdfDocument doc, List<Field> fields, bool readOnly = false)
+        /// <param name="runner">Carries out document actions (reset, submit, navigation...); null = none reachable.</param>
+        public JsFormHost(PdfDocument doc, List<Field> fields, bool readOnly = false, FormActionRunner? runner = null)
         {
             _doc = doc;
             _fields = fields;
             _readOnly = readOnly;
+            _runner = runner;
         }
 
         /// <summary>console.println output and script errors, for the app log.</summary>
         public List<string> Log { get; } = [];
 
-        /// <summary>Fields whose value or visibility a script changed (they need saving and fresh appearances).</summary>
+        /// <summary>Fields whose value, look or visibility a script changed (they need saving and fresh appearances).</summary>
         public HashSet<Field> Touched { get; } = [];
 
+        /// <summary>Starts a fresh time budget (each live keystroke is its own short run).</summary>
+        public void ResetBudget()
+        {
+            _spent.Reset();
+            _runDialogs = 0;
+        }
+
         /// <summary>
-        /// Runs one field event: <paramref name="name"/> is Format, Keystroke, Validate or Calculate. Null when the script
-        /// couldn't run (error, limit, or scripting off), so the caller falls back.
+        /// Runs one field event: <paramref name="name"/> is Format, Keystroke, Validate, Calculate, or a button event
+        /// (Mouse Up, Mouse Down, Mouse Enter, Mouse Exit, Focus, Blur). Null when the script couldn't run (error, limit,
+        /// or scripting off), so the caller falls back.
         /// </summary>
-        public JsEventResult? Run(string name, Field target, string script, string value, bool willCommit = false)
+        public JsEventResult? Run(string name, Field target, string script, string value, bool willCommit = false,
+            string change = "", int selStart = 0, int selEnd = 0)
         {
             if (string.IsNullOrWhiteSpace(script) || script.Length > MaxScriptLength || Engine() is not { } engine) return null;
             _eventAlerts = [];
             _eventColor = null;
             _eventTarget = target.Name;
+            _eventDialogs = 0;
             try
             {
-                Guarded(() => engine.Invoke(_api!.Get("begin"), name, target.Name, value, willCommit));
-                Guarded(() => engine.Execute(script));
+                Guarded(() => engine.Invoke(_api!.Get("begin"), name, target.Name, value, willCommit, change, selStart, selEnd));
+                if (!_prepared.TryGetValue(script, out var prepared))
+                {
+                    prepared = Jint.Engine.PrepareScript(script);
+                    if (_prepared.Count < 256) _prepared[script] = prepared;
+                }
+                Guarded(() => engine.Execute(in prepared));
                 var end = Guarded(() => engine.Invoke(_api!.Get("end")));
                 if (end is not JsArray arr) return null;
                 var v = arr.Get(0);
                 string? text = v.IsNumber() ? (double.IsFinite(v.AsNumber()) ? FormScripts.NumberToValue(v.AsNumber()) : null)
                     : v.IsString() ? v.AsString() : v.IsBoolean() ? (v.AsBoolean() ? "true" : "false") : "";
-                return new JsEventResult(text, arr.Get(1).IsBoolean() && arr.Get(1).AsBoolean(), _eventAlerts, _eventColor);
+                var newChange = arr.Get(2) is var c && c.IsString() ? c.AsString() : change;
+                int Pos(JsValue p, int fallback) => p.IsNumber() && double.IsFinite(p.AsNumber()) ? (int)Math.Clamp(p.AsNumber(), -1, 1e7) : fallback;
+                return new JsEventResult(text, arr.Get(1).IsBoolean() && arr.Get(1).AsBoolean(), _eventAlerts, _eventColor,
+                    newChange, Pos(arr.Get(3), selStart), Pos(arr.Get(4), selEnd), _eventDialogs);
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
@@ -97,6 +130,7 @@ public static partial class FormEditor
                 throw new TimeoutException("form scripts used up their time budget");
             }
             _spent.Start();
+            _timeout.Arm();
             try
             {
                 return run();
@@ -106,6 +140,29 @@ public static partial class FormEditor
                 _spent.Stop();
             }
         }
+
+        /// <summary>Runs host work (a dialog, a request) without charging its time to the script.</summary>
+        private T Outside<T>(Func<T> run)
+        {
+            var running = _spent.IsRunning;
+            _spent.Stop();
+            _timeout.Pause();
+            try
+            {
+                return run();
+            }
+            finally
+            {
+                _timeout.Resume();
+                if (running) _spent.Start();
+            }
+        }
+
+        private void Outside(Action run) => Outside(() =>
+        {
+            run();
+            return 0;
+        });
 
         private static string Describe(Exception ex) => ex switch
         {
@@ -120,9 +177,10 @@ public static partial class FormEditor
             if (_engine is not null) return _engine;
             try
             {
+                var timeout = _timeout;
                 var engine = new Engine(o =>
                 {
-                    o.TimeoutInterval(ScriptTimeout);
+                    o.Constraint(timeout);
                     o.MaxStatements(1_000_000);
                     o.LimitRecursion(64);
                     o.LimitMemory(16 * 1024 * 1024);
@@ -154,7 +212,9 @@ public static partial class FormEditor
                 if (PdfObj.Dict(item) is not { } action || PdfObj.Text(action.Elements["/JS"]) is not { Length: > 0 and <= MaxScriptLength } js) continue;
                 try
                 {
-                    _eventAlerts = []; // alerts while the document opens aren't the user's doing: drop them
+                    // Alerts while the document opens aren't the user's doing: drop them; and nothing may leave the document.
+                    _eventAlerts = [];
+                    _inDocumentScripts = true;
                     Guarded(() => engine.Execute(js));
                 }
                 catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -165,8 +225,34 @@ public static partial class FormEditor
                 finally
                 {
                     _eventAlerts = null;
+                    _inDocumentScripts = false;
                 }
             }
+        }
+
+        /// <summary>The runner, when this script may act on the document or the world (not while document-level scripts run).</summary>
+        private FormActionRunner? Actor(string what)
+        {
+            if (_runner is null) return null;
+            if (_inDocumentScripts || _eventAlerts is null)
+            {
+                Log.Add($"Form script: {what} ignored (not allowed outside a user event)");
+                return null;
+            }
+            return _runner;
+        }
+
+        /// <summary>Whether another modal dialog may open for this event; counts it.</summary>
+        private bool TakeDialog(string what)
+        {
+            if (_eventDialogs >= MaxDialogsPerEvent || _runDialogs >= MaxDialogsPerRun)
+            {
+                Log.Add($"Form script: {what} suppressed (too many dialogs)");
+                return false;
+            }
+            _eventDialogs++;
+            _runDialogs++;
+            return true;
         }
 
         // ---------------- Host functions (reachable only through the prelude's closure) ----------------
@@ -178,8 +264,12 @@ public static partial class FormEditor
                 h.Set(name, new ClrFunction(engine, name, (_, args) => body(args)));
             static JsValue Arg(JsValue[] a, int i) => i < a.Length ? a[i] : JsValue.Undefined;
             static string S(JsValue[] a, int i) => i < a.Length && !a[i].IsUndefined() && !a[i].IsNull() ? TypeConverter.ToString(a[i]) : "";
-            static int I(JsValue[] a, int i, int def = 0) => i < a.Length && !a[i].IsUndefined() && TypeConverter.ToNumber(a[i]) is var d && double.IsFinite(d) ? (int)Math.Clamp(d, -1e6, 1e6) : def;
+            static int I(JsValue[] a, int i, int def = 0) => i < a.Length && !a[i].IsUndefined() && !a[i].IsNull() && TypeConverter.ToNumber(a[i]) is var d && double.IsFinite(d) ? (int)Math.Clamp(d, -1e6, 1e6) : def;
+            static bool B(JsValue[] a, int i) => i < a.Length && TypeConverter.ToBoolean(a[i]);
             static JsValue Str(string? s) => s is null ? JsValue.Null : JsString.Create(s);
+            static List<string>? Names(JsValue v) => v is JsArray arr
+                ? [.. Enumerable.Range(0, (int)Math.Min(arr.Length, 10_000)).Select(i => arr.Get(i)).Where(x => !x.IsNull() && !x.IsUndefined()).Select(TypeConverter.ToString)]
+                : null;
 
             Fn("exists", a => Terminals(S(a, 0)).Any() ? JsBoolean.True : JsBoolean.False);
             Fn("kids", a => new JsArray(engine, [.. Terminals(S(a, 0)).Select(f => (JsValue)JsString.Create(f.Name)).Distinct()]));
@@ -199,15 +289,148 @@ public static partial class FormEditor
                 if (i < 0 || i >= exports.Count) return JsValue.Null;
                 return JsString.Create(TypeConverter.ToBoolean(Arg(a, 2)) ? exports[i] : labels[i]);
             });
+            Fn("items", a =>
+            {
+                // setItems / insertItemAt / deleteItemAt / clearItems: op, field, then the op's arguments.
+                if (_readOnly || Find(S(a, 1)) is not { Type: "/Ch" } f) return JsValue.Undefined;
+                var (exports, labels) = ReadOptions(Inherited(f.Dict, "/Opt"));
+                switch (S(a, 0))
+                {
+                    case "set":
+                        exports.Clear();
+                        labels.Clear();
+                        if (Arg(a, 2) is JsArray list)
+                            for (var i = 0; i < Math.Min(list.Length, 10_000); i++)
+                            {
+                                var item = list.Get(i);
+                                if (item is JsArray pair && pair.Length > 0)
+                                {
+                                    var label = TypeConverter.ToString(pair.Get(0));
+                                    labels.Add(label);
+                                    exports.Add(pair.Length > 1 ? TypeConverter.ToString(pair.Get(1)) : label);
+                                }
+                                else if (!item.IsNull() && !item.IsUndefined())
+                                {
+                                    labels.Add(TypeConverter.ToString(item));
+                                    exports.Add(TypeConverter.ToString(item));
+                                }
+                            }
+                        break;
+                    case "insert":
+                    {
+                        var label = S(a, 2);
+                        var export = Arg(a, 3).IsUndefined() || Arg(a, 3).IsNull() ? label : S(a, 3);
+                        var at = I(a, 4, 0);
+                        at = at < 0 || at > exports.Count ? exports.Count : at;
+                        labels.Insert(at, label);
+                        exports.Insert(at, export);
+                        break;
+                    }
+                    case "delete":
+                    {
+                        var at = Arg(a, 2).IsUndefined() ? exports.IndexOf(ValueOf(f.Dict, f.Type)) : I(a, 2, -1);
+                        if (at < 0 || at >= exports.Count) return JsValue.Undefined;
+                        labels.RemoveAt(at);
+                        exports.RemoveAt(at);
+                        break;
+                    }
+                    case "clear":
+                        exports.Clear();
+                        labels.Clear();
+                        break;
+                    default:
+                        return JsValue.Undefined;
+                }
+                WriteOptions(f, exports, labels);
+                Touched.Add(f);
+                return JsValue.Undefined;
+            });
             Fn("alert", a =>
             {
                 var text = S(a, 0);
-                if (_eventAlerts is { Count: < 20 } list && text.Length > 0) list.Add(text.Length > 2000 ? text[..2000] + "…" : text);
-                return JsValue.Undefined;
+                var type = Math.Clamp(I(a, 2), 0, 3);
+                // Without a dialog the answer is the cautious one: OK for a notice, Cancel / No for a question.
+                var fallback = type switch { 1 => 2, 2 or 3 => 3, _ => 1 };
+                if (_runner?.Host is { } host && !_inDocumentScripts && _eventAlerts is not null)
+                {
+                    if (text.Length == 0 || !TakeDialog("app.alert")) return fallback;
+                    var alert = new FormAlert(Clip(text, 4000), Clip(S(a, 3), 200), Math.Clamp(I(a, 1), 0, 3), type);
+                    return Outside(() => host.Alert(alert)) is var r and >= 1 and <= 4 ? r : fallback;
+                }
+                if (_eventAlerts is { Count: < 20 } list && text.Length > 0) list.Add(Clip(text, 2000));
+                return fallback;
+            });
+            Fn("response", a =>
+            {
+                if (_runner?.Host is not { } host || _inDocumentScripts || _eventAlerts is null || !TakeDialog("app.response")) return JsValue.Null;
+                var prompt = new FormPrompt(Clip(S(a, 0), 4000), Clip(S(a, 1), 200), Clip(S(a, 2), 10_000), B(a, 3), Clip(S(a, 4), 200));
+                return Str(Outside(() => host.Response(prompt)));
             });
             Fn("log", a =>
             {
                 if (Log.Count < 200) Log.Add("console: " + S(a, 0));
+                return JsValue.Undefined;
+            });
+            Fn("launchURL", a =>
+            {
+                if (Actor("app.launchURL") is { } r) Outside(() => r.OpenUrl(S(a, 0)));
+                return JsValue.Undefined;
+            });
+            Fn("submit", a =>
+            {
+                // url, format (FDF, XFDF, HTML, PDF...), include empty fields, field names, GET, charset
+                if (Actor("submitForm") is { } r && !_readOnly)
+                    Outside(() => r.Submit(S(a, 0), S(a, 1), B(a, 2), Names(Arg(a, 3)), exclude: false, B(a, 4), S(a, 5)));
+                return JsValue.Undefined;
+            });
+            Fn("reset", a =>
+            {
+                if (_readOnly || _runner is null || _inDocumentScripts) return JsValue.Undefined;
+                _runner.Reset(Names(Arg(a, 0)), exclude: false);
+                return JsValue.Undefined;
+            });
+            Fn("print", a =>
+            {
+                if (Actor("print") is { } r && _prints++ == 0) Outside(() => r.Print(I(a, 0, -1), I(a, 1, -1)));
+                return JsValue.Undefined;
+            });
+            Fn("mail", a =>
+            {
+                // kind (doc, form, msg), to, cc, bcc, subject, message
+                if (Actor("mail") is { } r)
+                    Outside(() => r.Mail(S(a, 0), Clip(S(a, 1), 2000), Clip(S(a, 2), 2000), Clip(S(a, 3), 2000), Clip(S(a, 4), 500), Clip(S(a, 5), 10_000)));
+                return JsValue.Undefined;
+            });
+            Fn("importData", a =>
+            {
+                if (Actor("importAnFDF") is { } r && !_readOnly) Outside(() => r.Import(S(a, 0)));
+                return JsValue.Undefined;
+            });
+            Fn("beep", a =>
+            {
+                if (Actor("app.beep") is { } r) r.Host?.Beep(Math.Clamp(I(a, 0, 4), 0, 4));
+                return JsValue.Undefined;
+            });
+            Fn("pageNum", _ => _runner?.Host is { } host ? Outside(() => host.CurrentPage) : 0);
+            Fn("setPageNum", a =>
+            {
+                if (Actor("pageNum") is { } r) Outside(() => r.GoToPage(I(a, 0, -1)));
+                return JsValue.Undefined;
+            });
+            Fn("numPages", _ => _doc.PageCount);
+            Fn("info", a => Str(_doc.Info.Elements[S(a, 0) switch
+            {
+                "Title" or "title" => "/Title",
+                "Author" or "author" => "/Author",
+                "Subject" or "subject" => "/Subject",
+                "Keywords" or "keywords" => "/Keywords",
+                "Creator" or "creator" => "/Creator",
+                "Producer" or "producer" => "/Producer",
+                _ => "/None",
+            }] is { } item ? PdfObj.Text(item) : null));
+            Fn("focus", a =>
+            {
+                if (_runner is not null && !_inDocumentScripts && Find(S(a, 0)) is not null) _runner.FocusField = S(a, 0);
                 return JsValue.Undefined;
             });
             Fn("makeNumber", a => FormScripts.ToNumber(S(a, 0)) is { } d ? d : JsValue.Null);
@@ -241,17 +464,27 @@ public static partial class FormEditor
             return h;
         }
 
+        private static string Clip(string s, int max) => s.Length > max ? s[..max] + "…" : s;
+
         private IEnumerable<Field> Terminals(string name) =>
             name.Length == 0 ? [] : _fields.Where(f => f.Name == name || f.Name.StartsWith(name + ".", StringComparison.Ordinal));
 
         private Field? Find(string name) => _fields.FirstOrDefault(f => f.Name == name);
 
+        private static int LiveFlags(Field f) => PdfObj.Int(Inherited(f.Dict, "/Ff")) ?? 0;
+
         private JsValue Get(Engine engine, string name, string prop)
         {
             var f = Find(name);
-            if (_props.TryGetValue(name, out var stored) && stored.TryGetValue(prop, out var v) && prop is not ("value" or "valueAsString" or "display" or "hidden"))
+            if (_props.TryGetValue(name, out var stored) && stored.TryGetValue(prop, out var v)
+                && prop is not ("value" or "valueAsString" or "display" or "hidden" or "readonly" or "required" or "numItems"))
                 return v;
-            if (f is null) return prop == "value" || prop == "valueAsString" ? JsString.Empty : JsValue.Undefined;
+            if (f is null)
+            {
+                // A parent name (getField("group")) reads the first of its terminal fields.
+                if (Terminals(name).FirstOrDefault() is { } first && prop is not ("value" or "valueAsString")) return Get(engine, first.Name, prop);
+                return prop == "value" || prop == "valueAsString" ? JsString.Empty : JsValue.Undefined;
+            }
             switch (prop)
             {
                 case "value":
@@ -273,8 +506,8 @@ public static partial class FormEditor
                         "/Btn" when (f.Flags & FfRadio) != 0 => "radiobutton",
                         _ => "checkbox",
                     });
-                case "readonly": return (f.Flags & FfReadOnly) != 0;
-                case "required": return (f.Flags & FfRequired) != 0;
+                case "readonly": return (LiveFlags(f) & FfReadOnly) != 0;
+                case "required": return (LiveFlags(f) & FfRequired) != 0;
                 case "multiline": return (f.Flags & FfMultiline) != 0;
                 case "password": return (f.Flags & FfPassword) != 0;
                 case "charLimit": return PdfObj.Int(Inherited(f.Dict, "/MaxLen")) ?? 0;
@@ -291,9 +524,28 @@ public static partial class FormEditor
                 }
                 case "numItems": return f.Type == "/Ch" ? ReadOptions(Inherited(f.Dict, "/Opt")).Exports.Count : 0;
                 case "defaultValue": return JsString.Create(PdfObj.Resolve(Inherited(f.Dict, "/DV")) switch { PdfString s => s.Value, PdfName n => n.Value.TrimStart('/'), _ => "" });
+                case "fillColor" or "borderColor" or "strokeColor":
+                {
+                    var mk = f.Widgets.Count > 0 ? PdfObj.Dict(f.Widgets[0].Elements["/MK"]) : null;
+                    return ColorArray(engine, PdfObj.Array(mk?.Elements[prop == "fillColor" ? "/BG" : "/BC"]) is { } a
+                        ? [.. Enumerable.Range(0, a.Elements.Count).Select(i => PdfObj.Num(a, i))] : []);
+                }
+                case "textColor":
+                {
+                    var da = f.Widgets.Count > 0 ? PdfObj.Str(f.Widgets[0].Elements["/DA"]) : null;
+                    return ColorArray(engine, DefaultAppearance.Parse(da ?? PdfObj.Str(Inherited(f.Dict, "/DA"))).Color.C);
+                }
                 default: return JsValue.Undefined;
             }
         }
+
+        private static JsArray ColorArray(Engine engine, double[] c) => c.Length switch
+        {
+            1 => new JsArray(engine, [JsString.Create("G"), c[0]]),
+            3 => new JsArray(engine, [JsString.Create("RGB"), c[0], c[1], c[2]]),
+            4 => new JsArray(engine, [JsString.Create("CMYK"), c[0], c[1], c[2], c[3]]),
+            _ => new JsArray(engine, [JsString.Create("T")]),
+        };
 
         private void Set(string name, string prop, JsValue v)
         {
@@ -347,13 +599,65 @@ public static partial class FormEditor
                     }
                     return;
                 }
+                case "readonly" or "required":
+                {
+                    if (_readOnly) return;
+                    var bit = prop == "readonly" ? FfReadOnly : FfRequired;
+                    foreach (var f in Terminals(name))
+                    {
+                        var flags = LiveFlags(f);
+                        var updated = TypeConverter.ToBoolean(v) ? flags | bit : flags & ~bit;
+                        if (updated == flags) continue;
+                        f.Dict.Elements["/Ff"] = new PdfInteger(updated);
+                        Touched.Add(f);
+                    }
+                    return;
+                }
+                case "textColor" or "fillColor" or "borderColor" or "strokeColor":
+                    if (prop == "textColor" && name == _eventTarget) _eventColor = ColorOf(v);
+                    if (_readOnly) return; // (a format script's red negatives still apply through the event color)
+                    foreach (var f in Terminals(name))
+                        if (ApplyColor(f, prop, v)) Touched.Add(f);
+                    return;
                 default:
-                    // Colors, fonts, readonly/required toggles...: remembered for the script's own reads only.
+                    // Fonts, alignment, ...: remembered for the script's own reads only.
                     if (!_props.TryGetValue(name, out var stored)) _props[name] = stored = new(StringComparer.Ordinal);
                     if (stored.Count < 64) stored[prop] = v;
-                    if (prop == "textColor" && name == _eventTarget) _eventColor = ColorOf(v);
                     return;
             }
+        }
+
+        /// <summary>Writes a field color into its widgets: text color into /DA, fill and border into /MK /BG and /BC.</summary>
+        private bool ApplyColor(Field f, string prop, JsValue v)
+        {
+            var transparent = v is JsArray { Length: >= 1 } t && TypeConverter.ToString(t.Get(0)) == "T";
+            var c = ColorOf(v);
+            if (c is null && !transparent) return false;
+            var changed = false;
+            foreach (var w in f.Widgets)
+            {
+                if (prop == "textColor")
+                {
+                    if (c is null) continue;
+                    var da = DefaultAppearance.Parse(PdfObj.Str(w.Elements["/DA"]) ?? PdfObj.Str(Inherited(f.Dict, "/DA")) ?? "/Helv 0 Tf 0 g");
+                    var op = c.Length switch { 1 => "g", 3 => "rg", _ => "k" };
+                    var text = $"{da.FontName} {PdfObj.F(da.Size)} Tf {string.Join(' ', c.Select(PdfObj.F))} {op}";
+                    w.Elements["/DA"] = new PdfString(text);
+                    changed = true;
+                    continue;
+                }
+                if (PdfObj.Dict(w.Elements["/MK"]) is not { } mk)
+                {
+                    if (transparent) continue;
+                    mk = new PdfDictionary(_doc);
+                    w.Elements["/MK"] = mk;
+                }
+                var key = prop == "fillColor" ? "/BG" : "/BC";
+                if (c is null) mk.Elements.Remove(key);
+                else mk.Elements[key] = PdfObj.Reals(_doc, c);
+                changed = true;
+            }
+            return changed;
         }
 
         /// <summary>An Acrobat color array (["RGB", 1, 0, 0], ["G", 0], ["CMYK", ...]) as PDF color components.</summary>
@@ -453,6 +757,41 @@ public static partial class FormEditor
                 i = j;
             }
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// The per-script time limit, measured only while script code runs: the clock stops while the host shows a dialog
+        /// or sends a request (see <see cref="Outside{T}"/>), so waiting for the user never times a script out.
+        /// </summary>
+        private sealed class PausableTimeout(TimeSpan limit) : Constraint
+        {
+            private readonly Stopwatch _clock = new();
+            private int _paused;
+
+            public override bool IsAmortizable => true;
+
+            public override void Check()
+            {
+                if (_clock.Elapsed > limit) throw new TimeoutException("form script took too long");
+            }
+
+            public override void Reset() => Arm();
+
+            public void Arm()
+            {
+                _paused = 0;
+                _clock.Restart();
+            }
+
+            public void Pause()
+            {
+                if (_paused++ == 0) _clock.Stop();
+            }
+
+            public void Resume()
+            {
+                if (_paused > 0 && --_paused == 0) _clock.Start();
+            }
         }
     }
 }

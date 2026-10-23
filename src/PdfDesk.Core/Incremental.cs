@@ -49,10 +49,17 @@ internal static class Incremental
     /// <summary>Signed-looking files carry a /ByteRange; signature dictionaries are never compressed into object streams.</summary>
     public static bool LooksSigned(byte[] data) => data.AsSpan().IndexOf("/ByteRange"u8) >= 0;
 
-    /// <summary>Remembers how <paramref name="doc"/> (just opened in Modify mode) maps onto <paramref name="data"/>, when it is signed.</summary>
-    public static void Track(PdfDocument doc, byte[] data, string? password)
+    /// <summary>True when <see cref="TrySave"/> can write <paramref name="doc"/> as an incremental update.</summary>
+    public static bool IsTracked(PdfDocument doc) => Tracked.TryGetValue(doc, out _);
+
+    /// <summary>
+    /// Remembers how <paramref name="doc"/> (just opened in Modify mode) maps onto <paramref name="data"/>, when it is
+    /// signed (or always, with <paramref name="force"/>: signing appends even to an unsigned file, so later signatures
+    /// never break earlier ones).
+    /// </summary>
+    public static void Track(PdfDocument doc, byte[] data, string? password, bool force = false)
     {
-        if (!LooksSigned(data) || data.AsSpan().IndexOf("/Encrypt"u8) >= 0) return;
+        if ((!force && !LooksSigned(data)) || data.AsSpan().IndexOf("/Encrypt"u8) >= 0) return;
         try
         {
             if (Tail(data) is not { } tail) return;

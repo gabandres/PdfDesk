@@ -17,7 +17,9 @@ namespace PdfDesk.App;
 /// highlight · underline · strikeout · note p x y text · editcomment i text · deletecomment i · selectcomment i ·
 /// commentfilter text · pane comments|attachments|layers|signatures · redact p x y w h · redact-text · redact-search ·
 /// apply-redactions [confirm] · attachments · attach path · extract i path · open-attachment i · remove-attachment i ·
-/// layers · layer name on|off · sigs · bars · labels · gotopage label · title · open path · pane-state</c>.
+/// layers · layer name on|off · sigs · bars · labels · gotopage label · title · open path · pane-state</c>. Signing:
+/// <c>makepfx path password name · sign pfx password [box p x y w h | field name | invisible] [ts url] · addsig p x y ·
+/// movesig i p x y w h · delsig i</c>.
 /// Mouse (page points, top-left origin): <c>mouse move|down|up|click|dbl|right p x y · drag p x1 y1 x2 y2 · tip</c> (the
 /// hover tip's text) <c>· menu Header</c> (click an item of the open context menu) <c>· mouselog</c>. Prompts and file
 /// pickers: <c>prompt Button · answer Button</c> (for the prompt the next step opens) <c>· windows · dialogok Cmd …
@@ -203,6 +205,55 @@ internal static class DevScript
                 log.Add($"signatures: {tab!.SignatureResults.Count}, bar: {BarText(tab, "SigBar", "SigBarText")}");
                 foreach (var s in tab.SignatureResults) log.Add($"  {s.FieldName}: {s.Status} signer={s.SignerName} trusted={s.CertificateTrusted} brokenByEdits={tab.BrokenByEdits(s)}: {DocumentTab.SignatureSummary(s, tab.BrokenByEdits(s))}");
                 break;
+            case "makepfx":
+            {
+                // makepfx <path> <password> <name>: a self-signed personal ID as a file (never touches the certificate store).
+                var a = arg.Split(' ', 3);
+                await File.WriteAllBytesAsync(a[0], Core.DigitalIds.CreatePersonalPfx(a[2], null, null, a[1]));
+                break;
+            }
+            case "sign":
+            {
+                // sign <pfx> <password> [box p x y w h | field name | invisible] [ts url]: Sign Digitally with a file ID
+                // (the dialog's choices given here); queue the Save As path with "savepath" first.
+                var a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var cert = Core.DigitalIds.LoadPfx(await File.ReadAllBytesAsync(a[0]), a[1]);
+                string? field = null;
+                Viewer.SignaturePlacement? box = null;
+                var visible = true;
+                var ts = Array.IndexOf(a, "ts");
+                if (a.Length > 2 && a[2] == "box") box = new Viewer.SignaturePlacement(int.Parse(a[3]) - 1, new Core.RectD(Num(a[4]), Num(a[5]), Num(a[6]), Num(a[7])));
+                else if (a.Length > 2 && a[2] == "field") field = a[3];
+                else visible = false;
+                var choice = new SignChoice(cert, "I approve this document", "Dev script", visible, new Core.SignatureLook(), ts > 0, ts > 0 ? a[ts + 1] : "", Core.CertificationLevel.None);
+                await window.SignDigitallyAsync(tab!, field, choice, box);
+                log.Add($"signed: dirty={tab!.Session.IsDirty} file={tab.Session.DisplayName}");
+                break;
+            }
+            case "addsig":
+            {
+                // addsig p x y: draw a handwritten signature (saved in the data folder) and place it centered there.
+                var a = arg.Split(' ');
+                var dlg = new SignatureCaptureDialog(window, false, "Dev");
+                dlg.Loaded += (_, _) => dlg.DevDrawAndAccept();
+                dlg.ShowDialog();
+                var saved = SignatureLibrary.Save(dlg.Result!, false) ?? SignatureLibrary.List().First(s => !s.Initials);
+                tab!.BeginPlaceSignature(saved);
+                v!.DevPlaceSignature(int.Parse(a[0]) - 1, Num(a[1]), Num(a[2]));
+                await Task.Delay(800);
+                log.Add($"signature stamps: {string.Join("; ", tab.DevSignatureStamps.Select(s => $"p{s.PageIndex + 1} {s.Rect.X:0},{s.Rect.Y:0} {s.Rect.Width:0}x{s.Rect.Height:0}"))}");
+                break;
+            }
+            case "movesig" or "delsig":
+            {
+                // movesig i p x y w h · delsig i
+                var a = arg.Split(' ');
+                var s = tab!.DevSignatureStamps[int.Parse(a[0])];
+                v!.DevChangeSignature(s.Id, cmd == "delsig" ? s.PageIndex : int.Parse(a[1]) - 1, cmd == "delsig" ? null : new Core.RectD(Num(a[2]), Num(a[3]), Num(a[4]), Num(a[5])));
+                await Task.Delay(800);
+                log.Add($"signature stamps: {string.Join("; ", tab.DevSignatureStamps.Select(x => $"p{x.PageIndex + 1} {x.Rect.X:0},{x.Rect.Y:0} {x.Rect.Width:0}x{x.Rect.Height:0}"))}");
+                break;
+            }
             case "bars":
                 foreach (var bar in new[] { "DiskBar", "FormBar", "XfaBar", "SigBar", "RedactBar" })
                     if (tab!.FindName(bar) is FrameworkElement { Visibility: Visibility.Visible }) log.Add($"bar {bar} visible");
@@ -226,6 +277,10 @@ internal static class DevScript
                     _ = window.Dispatcher.BeginInvoke(new Action(() => throw new InvalidOperationException("Dev script test exception")));
                 break;
             case "prompt": log.Add(ClickButton(window, arg) ?? $"prompt: no window with a '{arg}' button"); break;
+            case "shotwin":
+                // shotwin out.png: snapshot of the topmost open dialog.
+                Shot(Application.Current.Windows.OfType<Window>().Last(w => w != window && w.IsVisible), arg);
+                break;
             case "windows":
                 // windows: the open secondary windows (prompts, dialogs, menus), with their heading and buttons.
                 foreach (var w in Application.Current.Windows.OfType<Window>().Where(w => w != window))

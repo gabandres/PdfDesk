@@ -39,6 +39,7 @@ public static class Cmd
     public static readonly RoutedUICommand ToolAddText = Make("Add Te_xt (Fill and Sign)", nameof(ToolAddText));
     public static readonly RoutedUICommand ToolCheck = Make("Add Chec_k Mark", nameof(ToolCheck));
     public static readonly RoutedUICommand ToolCross = Make("Add C_ross", nameof(ToolCross));
+    public static readonly RoutedUICommand AddSignature = Make("Add _Signature or Initials…", nameof(AddSignature));
     public static readonly RoutedUICommand HighlightFields = Make("_Highlight Form Fields", nameof(HighlightFields));
 
     // View
@@ -89,7 +90,8 @@ public static class Cmd
     public static readonly RoutedUICommand ShowAttachments = Make("_Attachments", nameof(ShowAttachments));
     public static readonly RoutedUICommand ShowLayers = Make("_Layers", nameof(ShowLayers));
     public static readonly RoutedUICommand ShowSignatures = Make("_Signatures", nameof(ShowSignatures));
-    public static readonly RoutedUICommand Highlight = Make("_Highlight Text", nameof(Highlight), K(Key.H, ModifierKeys.Control | ModifierKeys.Shift));
+    public static readonly RoutedUICommand Sign = Make("Sign _Digitally…", nameof(Sign));
+    public static readonly RoutedUICommand Highlight =Make("_Highlight Text", nameof(Highlight), K(Key.H, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand Underline = Make("_Underline Text", nameof(Underline));
     public static readonly RoutedUICommand StrikeOut = Make("_Strike Out Text", nameof(StrikeOut));
     public static readonly RoutedUICommand AddNote = Make("Add _Note", nameof(AddNote));

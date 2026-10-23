@@ -126,6 +126,8 @@
                                     <MenuItem x:Name="AddTextMenu" Command="app:Cmd.ToolAddText" InputGestureText="A" />
                                     <MenuItem x:Name="CheckMenu" Command="app:Cmd.ToolCheck" InputGestureText="K" />
                                     <MenuItem x:Name="CrossMenu" Command="app:Cmd.ToolCross" InputGestureText="X" />
+                                    <MenuItem Command="app:Cmd.AddSignature" />
+                                    <MenuItem Command="app:Cmd.Sign" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.CommandPalette" />
                                 </MenuItem>
@@ -188,6 +190,7 @@
                                     <MenuItem Command="app:Cmd.ShowAttachments" />
                                     <MenuItem Command="app:Cmd.ShowLayers" />
                                     <MenuItem Command="app:Cmd.ShowSignatures" />
+                                    <MenuItem x:Name="SignMenu" Command="app:Cmd.Sign" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Highlight" />
                                     <MenuItem Command="app:Cmd.Underline" />
@@ -230,6 +233,13 @@
                                 </ToggleButton>
                                 <ToggleButton x:Name="CheckButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCheck" Content="&#xE73E;" ToolTip="Add a check mark: click where it goes (K)" />
                                 <ToggleButton x:Name="CrossButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCross" Content="&#xE711;" ToolTip="Add a cross: click where it goes (X)" />
+                                <ToggleButton x:Name="AddSignatureButton" Style="{StaticResource CommandButton}" Command="app:Cmd.AddSignature"
+                                              ToolTip="Sign: place your handwritten signature or initials, or sign digitally with a certificate" AutomationProperties.Name="Sign">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE76D;" FontSize="15" />
+                                        <TextBlock Text="Sign" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </ToggleButton>
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text (Ctrl+Shift+H)" AutomationProperties.Name="Highlight" />
                                 <ToggleButton x:Name="NoteButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE90A;" ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />

@@ -167,9 +167,9 @@ public class JsFormTests
     }
 
     [Theory]
-    [InlineData("app.launchURL('http://x'); event.value = 'ran';")]
-    [InlineData("this.submitForm('http://x'); event.value = 'ran';")]
-    [InlineData("this.mailDoc(true); event.value = 'ran';")]
+    [InlineData("app.openDoc('C:/x.pdf'); event.value = 'ran';")]
+    [InlineData("SOAP.request({ cURL: 'http://x' }); event.value = 'ran';")]
+    [InlineData("app.execMenuItem('Quit'); event.value = 'ran';")]
     [InlineData("this.exportDataObject({ cName: 'a' }); event.value = 'ran';")]
     [InlineData("while (true) {}")]
     [InlineData("for (;;) { event.value = 'ran'; }")]
@@ -196,11 +196,12 @@ public class JsFormTests
     public void OnlyTheAcrobatModelIsReachable()
     {
         const string probe = "event.value = [typeof System, typeof importNamespace, typeof require, typeof clr, typeof host, typeof h, typeof fetch, typeof XMLHttpRequest, typeof Net, typeof SOAP, " +
-            "typeof app.launchURL, typeof this.submitForm, typeof this.mailDoc, typeof this.importDataObject, typeof this.exportDataObject, typeof this.getURL, typeof this.print, typeof app.openDoc, typeof util.readFileIntoStream, " +
-            "typeof getField, typeof app.alert, typeof AFNumber_Format].join(',');";
+            "typeof this.importDataObject, typeof this.exportDataObject, typeof app.openDoc, typeof util.readFileIntoStream, typeof this.saveAs, typeof app.execMenuItem, " +
+            "typeof getField, typeof app.alert, typeof AFNumber_Format, typeof app.launchURL, typeof this.submitForm, typeof this.mailDoc, typeof this.print].join(',');";
         var form = Form([new("a", Rect(0)), new("b", Rect(1), new() { ["C"] = probe })]);
         var r = Fill(form, ("a", "1"));
-        Assert.Equal(string.Join(',', Enumerable.Repeat("undefined", 19)) + ",function,function,function", ValueOf(r.Data, "b"));
+        // Outward calls exist now, but only reach the app's host (which asks the user); without one they do nothing.
+        Assert.Equal(string.Join(',', Enumerable.Repeat("undefined", 16)) + ",function,function,function,function,function,function,function", ValueOf(r.Data, "b"));
     }
 
     [Fact]
