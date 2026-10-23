@@ -4,6 +4,10 @@
                               text lines, and a "PDF" label (same visual family as PrintDesk's blue tile).
   assets/PdfDocument.ico      file-type icon for .pdf in Explorer: a white page with a red "PDF" band.
 
+  packaging/Assets/*.png     MSIX images (tiles, Start/taskbar icons per target size, store logo, splash screen, file-type
+                              logo), named with MRT qualifiers (scale-N, targetsize-N, altform-unplated) that makepri
+                              indexes into resources.pri (packaging/pack-msix.ps1).
+
 Every size is drawn at 8x and downsampled, so edges stay clean at each size; tiny sizes drop detail.
 Run:  python -I assets/make-icon.py   (needs Pillow)
 """
@@ -128,7 +132,54 @@ def save(draw, name):
     draw(512).save(os.path.join(HERE, f"{name}-512.png"))
 
 
+# MSIX images. Base sizes are the scale-100 sizes; each is written at these scales.
+SCALES = [100, 125, 150, 200, 400]
+TARGET_SIZES = [16, 20, 24, 32, 40, 48, 64, 256]
+# name: (width, height, icon size as a fraction of the shorter side)
+TILES = {
+    "Square44x44Logo": (44, 44, 1.0),
+    "Square71x71Logo": (71, 71, 0.7),
+    "Square150x150Logo": (150, 150, 0.6),
+    "Wide310x150Logo": (310, 150, 0.6),
+    "Square310x310Logo": (310, 310, 0.5),
+    "StoreLogo": (50, 50, 1.0),
+    "SplashScreen": (620, 300, 0.5),
+}
+
+
+def centered(draw, w, h, frac):
+    """The icon drawn at frac of the shorter side, centered on a transparent w x h canvas."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    icon = draw(max(16, round(min(w, h) * frac)))
+    img.paste(icon, ((w - icon.width) // 2, (h - icon.height) // 2), icon)
+    return img
+
+
+def save_msix(folder):
+    os.makedirs(folder, exist_ok=True)
+    for old in os.listdir(folder):
+        if old.lower().endswith(".png"):
+            os.remove(os.path.join(folder, old))
+    count = 0
+    for name, (w, h, frac) in TILES.items():
+        for scale in SCALES:
+            centered(draw_app, round(w * scale / 100), round(h * scale / 100), frac).save(os.path.join(folder, f"{name}.scale-{scale}.png"))
+            count += 1
+    # Taskbar, Start list and title bar pick an exact pixel size; the app tile has its own background, so plated and
+    # unplated (light and dark taskbar) look the same. File-type logo: the document icon.
+    for size in TARGET_SIZES:
+        app, doc = draw_app(size), draw_doc(size)
+        for suffix in ("", "_altform-unplated", "_altform-lightunplated"):
+            app.save(os.path.join(folder, f"Square44x44Logo.targetsize-{size}{suffix}.png"))
+            count += 1
+        for suffix in ("", "_altform-unplated"):
+            doc.save(os.path.join(folder, f"FileLogo.targetsize-{size}{suffix}.png"))
+            count += 1
+    return count
+
+
 if __name__ == "__main__":
     save(draw_app, "PdfDesk")
     save(draw_doc, "PdfDocument")
-    print("wrote PdfDesk.ico, PdfDocument.ico and previews")
+    n = save_msix(os.path.join(HERE, "..", "packaging", "Assets"))
+    print(f"wrote PdfDesk.ico, PdfDocument.ico, previews and {n} MSIX images in packaging/Assets")

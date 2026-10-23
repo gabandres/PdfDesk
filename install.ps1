@@ -1,7 +1,8 @@
 # Installs (or removes) PdfDesk for the current user. No admin rights needed.
-#   pwsh -File install.ps1              build ARM64 exe, copy it, add Start Menu + Desktop shortcuts and "Open with" entries
-#   pwsh -File install.ps1 -NoBuild     install the existing publish\win-arm64\PdfDesk.exe
+#   pwsh -File install.ps1              build the exe for this PC (ARM64 or x64), copy it, add Start Menu + Desktop shortcuts and "Open with" entries
+#   pwsh -File install.ps1 -NoBuild     install the existing publish\win-<arch>\PdfDesk.exe
 #   pwsh -File install.ps1 -Uninstall   remove all of the above
+# (Microsoft Store / MSIX builds: packaging/pack-msix.ps1. Their file associations come from the package manifest.)
 param([switch]$Uninstall, [switch]$NoBuild)
 $ErrorActionPreference = 'Stop'
 
@@ -12,7 +13,7 @@ $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'PdfDesk.lnk'
 $desktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'PdfDesk.lnk'
 $classes = 'HKCU:\Software\Classes'
 $progId = 'PdfDesk.Document'
-$types = '.pdf', '.xps', '.oxps', '.epub', '.cbz'
+$types = '.pdf', '.xps', '.oxps', '.epub', '.cbz', '.fb2' # same list as packaging/AppxManifest.template.xml
 
 if (Get-Process PdfDesk -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) {
     throw 'PdfDesk is running. Close it (save your work first), then run this again.'
@@ -30,12 +31,13 @@ if ($Uninstall) {
     return
 }
 
-$publish = Join-Path $PSScriptRoot 'publish\win-arm64'
+$rid = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'win-arm64' } else { 'win-x64' }
+$publish = Join-Path $PSScriptRoot "publish\$rid"
 $src = Join-Path $publish 'PdfDesk.exe'
 if (-not $NoBuild) {
     # Start clean, so nothing left over from an older build ends up installed.
     Remove-Item $publish -Recurse -Force -ErrorAction SilentlyContinue
-    dotnet publish (Join-Path $PSScriptRoot 'src\PdfDesk.App') -p:PublishProfile=win-arm64
+    dotnet publish (Join-Path $PSScriptRoot 'src\PdfDesk.App') -p:PublishProfile=$rid
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 }
 if (-not (Test-Path $src)) { throw "Not found: $src (run without -NoBuild)" }

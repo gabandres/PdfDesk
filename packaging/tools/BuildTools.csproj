@@ -1,0 +1,22 @@
+<Project>
+  <!-- Restore-only project: downloads the Windows SDK build tools (makeappx, makepri, signtool) into the NuGet cache, so
+       packaging/pack-msix.ps1 needs no Windows SDK install. Not part of PdfDesk.slnx; never built.
+         dotnet restore packaging/tools/BuildTools.csproj -->
+  <PropertyGroup>
+    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
+    <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <WindowsSdkBuildToolsVersion>10.0.28000.2705</WindowsSdkBuildToolsVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageDownload Include="Microsoft.Windows.SDK.BuildTools" Version="[$(WindowsSdkBuildToolsVersion)]" />
+  </ItemGroup>
+  <!-- pack-msix.ps1 reads the version and the package folder from here, so they are kept in one place -->
+  <Target Name="PrintBuildToolsPath">
+    <Message Importance="high" Text="$([MSBuild]::EnsureTrailingSlash('$(NuGetPackageRoot)'))microsoft.windows.sdk.buildtools\$(WindowsSdkBuildToolsVersion)" />
+  </Target>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>
