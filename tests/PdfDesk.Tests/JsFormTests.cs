@@ -218,4 +218,74 @@ public class JsFormTests
         Assert.Equal("5", t.Value);
         Assert.Equal("$5.00", t.DisplayValue);
     }
+
+    [Theory]
+    [InlineData("'a'.repeat(Math.pow(2, 26)).length")]
+    [InlineData("'a'.padStart(Math.pow(2, 26), 'b').length")]
+    [InlineData("'a'.padEnd(Math.pow(2, 26)).length")]
+    [InlineData("var s = 'x'.repeat(1000000); [s, s, s].join('').length")]
+    [InlineData("var s = 'x'.repeat(1000000); String([s, s]).length")]
+    [InlineData("var s = 'x'.repeat(600000); s.concat(s).length")]
+    [InlineData("var s = 'x'.repeat(100000); s.replace(/x/g, 'yyyyyyyyyyyy').length")]
+    [InlineData("var s = 'x'.repeat(1000); s.replaceAll('x', '$&'.repeat(2000)).length")]
+    [InlineData("var s = 'x'.repeat(1000); s.replace(/x/g, function () { return 'y'.repeat(5000); }).length")]
+    [InlineData("new Array(Math.pow(2, 26)).fill(1).length")]
+    [InlineData("Array(Math.pow(2, 26)).join('a').length")]
+    public void HugeStringsAreRefusedBeforeTheyAreAllocated(string expression)
+    {
+        var form = Form([new("a", Rect(0)), new("b", Rect(1), new() { ["C"] = $"event.value = {expression};" })], co: ["b"]);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var sw = Stopwatch.StartNew();
+        var r = Fill(form, ("a", "1"));
+        Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 * 1024 * 1024, "allocated too much");
+        Assert.Equal("", ValueOf(r.Data, "b"));
+        Assert.Contains(r.Log, l => l.Contains("failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void OrdinaryStringBuildingStillWorks()
+    {
+        var form = Form([
+            new("a", Rect(0)),
+            new("b", Rect(1), new() { ["C"] = "var p = [1, [2, 3]]; p.push(p); event.value = ['x'.repeat(3), '7'.padStart(3, '0'), [1, 2].join('-'), String(p), " +
+                "'a-b'.replace('-', '$&$&'), 'aXbX'.replace(/X/g, function (m) { return m.toLowerCase(); }), 'q'.concat(1, 2), 'ab'.replaceAll('b', 'c')].join('|');" }),
+        ], co: ["b"]);
+        Assert.Equal("xxx|007|1-2|1,2,3,|a--b|axbx|q12|ac", ValueOf(Fill(form, ("a", "1")).Data, "b"));
+    }
+
+    [Theory]
+    [InlineData("3/04/2025", "dd/mm/yyyy", 2025, 4, 3)]
+    [InlineData("03/4/2025", "dd/mm/yyyy", 2025, 4, 3)]
+    [InlineData("3.4.25", "dd.mm.yyyy", 2025, 4, 3)]
+    [InlineData("3.04.2025", "dd.mm.yyyy", 2025, 4, 3)]
+    [InlineData("3-4-2025", "dd/mm/yyyy", 2025, 4, 3)]
+    [InlineData("4/3/2025", "mm/dd/yyyy", 2025, 4, 3)]
+    [InlineData("2025-04-03", "dd/mm/yyyy", 2025, 4, 3)]
+    [InlineData("3 April 2025", "dd/mm/yyyy", 2025, 4, 3)]
+    [InlineData("April 3, 2025", "mm/dd/yyyy", 2025, 4, 3)]
+    [InlineData("3 apr 25", "d-mmm-yy", 2025, 4, 3)]
+    [InlineData("2025/4/3", "yyyy/mm/dd", 2025, 4, 3)]
+    [InlineData("12/1999", "mm/yyyy", 1999, 12, 1)]
+    [InlineData("3/4/99", "dd/mm/yy", 1999, 4, 3)]
+    public void DatesFollowTheFieldsDayAndMonthOrder(string typed, string pattern, int year, int month, int day)
+    {
+        Assert.Equal(new DateTime(year, month, day), FormScripts.ParseDate(typed, pattern));
+    }
+
+    [Theory]
+    [InlineData("13/13/2025", "dd/mm/yyyy")]
+    [InlineData("31/02/2025", "dd/mm/yyyy")]
+    [InlineData("3", "dd/mm/yyyy")]
+    [InlineData("1/2/3/4", "dd/mm/yyyy")]
+    public void ImpossibleDatesAreRefused(string typed, string pattern) => Assert.Null(FormScripts.ParseDate(typed, pattern));
+
+    [Fact]
+    public void DateKeystrokeAcceptsShortFormsInTheFieldsOrder()
+    {
+        var form = Form([new("d", Rect(0), new() { ["K"] = "AFDate_KeystrokeEx(\"dd/mm/yyyy\");", ["F"] = "AFDate_FormatEx(\"dd/mm/yyyy\");" })]);
+        var r = Fill(form, ("d", "3/4/2025"));
+        Assert.Empty(r.Rejected);
+        Assert.Equal("03/04/2025", FormEditor.Read(r.Data, null).First(w => w.FieldName == "d").DisplayValue);
+    }
 }

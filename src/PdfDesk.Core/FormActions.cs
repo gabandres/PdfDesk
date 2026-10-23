@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -43,11 +45,49 @@ public enum SubmitFormat { Html, Fdf, Xfdf, Pdf }
 /// <summary>Form data a SubmitForm action (or this.submitForm) wants to send.</summary>
 /// <param name="Method">"POST" or "GET" (for GET the data is in <paramref name="Url"/> and <paramref name="Body"/> is empty).</param>
 /// <param name="FieldCount">How many fields' values the data carries.</param>
-public sealed record FormSubmission(string Url, string Method, string ContentType, byte[] Body, SubmitFormat Format, int FieldCount);
+/// <param name="Fields">The names of the fields whose values the data carries.</param>
+public sealed record FormSubmission(string Url, string Method, string ContentType, byte[] Body, SubmitFormat Format, int FieldCount,
+    IReadOnlyList<string>? Fields = null);
 
 /// <summary>An email the form wants to send (mailDoc, mailForm, app.mailMsg, or a mailto: submit).</summary>
 /// <param name="Attachment">The document or its form data; null for a plain message.</param>
-public sealed record FormMail(string To, string Cc, string Bcc, string Subject, string Message, byte[]? Attachment, string? AttachmentName);
+/// <param name="Fields">For form data: the names of the fields it carries.</param>
+public sealed record FormMail(string To, string Cc, string Bcc, string Subject, string Message, byte[]? Attachment, string? AttachmentName,
+    IReadOnlyList<string>? Fields = null);
+
+/// <summary>
+/// What an "Always allow" answer covers: the destination together with what goes there, so allowing one kind of data
+/// (or one set of fields) to an address doesn't silently allow another: the whole PDF, form data with another field
+/// list, or an email to other recipients each ask again.
+/// </summary>
+public static class FormConsent
+{
+    /// <summary>The key for a submission: method, address (without the query), format and the fields it sends.</summary>
+    public static string SubmitKey(FormSubmission s)
+    {
+        var address = Uri.TryCreate(s.Url, UriKind.Absolute, out var u) ? u.GetLeftPart(UriPartial.Path) : s.Url;
+        var payload = s.Format == SubmitFormat.Pdf ? "pdf" : $"{s.Format.ToString().ToLowerInvariant()}:{FieldsHash(s.Fields)}";
+        return $"submit\n{s.Method} {address}\n{payload}";
+    }
+
+    /// <summary>The key for an email: the recipients and what is attached (nothing, the whole PDF, or form data and its fields).</summary>
+    public static string MailKey(FormMail m)
+    {
+        static string List(string s) => string.Join(',', s.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => x.ToLowerInvariant()).Order(StringComparer.Ordinal));
+        var payload = m.Attachment is null ? "message"
+            : m.AttachmentName?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true ? "pdf"
+            : $"data{Path.GetExtension(m.AttachmentName ?? "").ToLowerInvariant()}:{FieldsHash(m.Fields)}";
+        return $"mail\nto={List(m.To)};cc={List(m.Cc)};bcc={List(m.Bcc)}\n{payload}";
+    }
+
+    private static string FieldsHash(IReadOnlyList<string>? fields)
+    {
+        if (fields is null) return "?";
+        var joined = string.Join('\n', fields.Distinct().Order(StringComparer.Ordinal));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(joined)))[..16];
+    }
+}
 
 /// <summary>app.alert: <paramref name="Icon"/> 0 error, 1 warning, 2 question, 3 status; <paramref name="Buttons"/>
 /// 0 OK, 1 OK/Cancel, 2 Yes/No, 3 Yes/No/Cancel.</summary>
@@ -59,7 +99,8 @@ public sealed record FormPrompt(string Question, string Title, string Default, b
 /// <summary>
 /// What a form's actions may do outside the document. The app implements it: every outward step (open a URL, send
 /// data, open or launch a file, write an email, import data) must ask the user first, naming the destination. Calls
-/// come from a background thread; modal ones block the script (its time limit is paused meanwhile).
+/// come from a background thread; modal ones block the script (its time limit is paused meanwhile). An outward step
+/// that reports it didn't happen (refused, or the user said no) stops the script that asked for it.
 /// </summary>
 public interface IFormActionHost
 {
@@ -68,13 +109,15 @@ public interface IFormActionHost
 
     void GoToPage(int page, double? y);
 
-    /// <summary>app.launchURL and URI actions.</summary>
-    void OpenUrl(string url);
+    /// <summary>app.launchURL and URI actions; false when nothing was opened (refused, or the user declined).</summary>
+    bool OpenUrl(string url);
 
-    /// <summary>Asks, then sends (http/https only); the task gives the HTTP status, 0 when nothing was sent.</summary>
-    Task<int> Submit(FormSubmission submission);
+    /// <summary>Asks, then sends (http/https only): null when nothing is sent (refused, or the user declined), else a
+    /// task giving the HTTP status (0 when sending failed).</summary>
+    Task<int>? Submit(FormSubmission submission);
 
-    void Mail(FormMail mail);
+    /// <summary>Asks, then starts the email; false when it didn't (refused, or the user declined).</summary>
+    bool Mail(FormMail mail);
 
     /// <summary>Opens the print dialog (pages 0-based, null = the user picks).</summary>
     void Print(int? fromPage, int? toPage);
@@ -85,11 +128,11 @@ public interface IFormActionHost
     /// <summary>The text entered, or null when cancelled.</summary>
     string? Response(FormPrompt prompt);
 
-    /// <summary>A GoToR action: ask, then open that PDF (relative paths are from this document's folder).</summary>
-    void OpenRemote(string path, int page);
+    /// <summary>A GoToR action: ask, then open that PDF (relative paths are from this document's folder); false when not opened.</summary>
+    bool OpenRemote(string path, int page);
 
-    /// <summary>A Launch action: never runs programs; asks, then opens a document file.</summary>
-    void Launch(string path);
+    /// <summary>A Launch action: never runs programs; asks, then opens a document file; false when not opened.</summary>
+    bool Launch(string path);
 
     /// <summary>Named actions the app carries out: Print, GoBack, GoForward, Find, FullScreen.</summary>
     void Named(string name);
@@ -145,7 +188,8 @@ public static partial class FormEditor
                 && field.Widgets.Any(w => ReferenceEquals(w, a)))
                 widget = a;
 
-            var runner = new FormActionRunner(doc, acro, fields, host, data, readOnly);
+            // Hovering isn't a decision: pointer enter/exit only runs scripts and harmless actions (no dialogs, nothing outward).
+            var runner = new FormActionRunner(doc, acro, fields, host, data, readOnly) { Hover = trigger is FormTrigger.Enter or FormTrigger.Exit };
             PdfItem? Additional(string key) => PdfObj.Dict(widget.Elements["/AA"])?.Elements[key] ?? PdfObj.Dict(field.Dict.Elements["/AA"])?.Elements[key];
             void Step(string key, string name)
             {
@@ -216,6 +260,15 @@ public static partial class FormEditor
     {
         private const int MaxActions = 64, MaxDepth = 32;
 
+        /// <summary>Outward steps (open a link, send, mail, open a file, import) one run may take: past it the run stops.</summary>
+        internal const int MaxOutwardPerRun = 3;
+
+        /// <summary>Outward steps one document (one host) may take per minute, across runs.</summary>
+        internal const int MaxOutwardPerMinute = 6;
+
+        /// <summary>When each host's recent outward steps happened (Environment.TickCount64), for the per-minute cap.</summary>
+        private static readonly ConditionalWeakTable<IFormActionHost, Queue<long>> RecentOutward = new();
+
         private readonly PdfDocument _doc;
         private readonly PdfDictionary? _acro;
         private readonly List<Field> _fields;
@@ -223,7 +276,7 @@ public static partial class FormEditor
         private readonly List<Action<byte[]>> _deferred = [];
         private readonly HashSet<PdfDictionary> _ran = new(ReferenceEqualityComparer.Instance);
         private readonly List<string> _alerts = [];
-        private int _actions;
+        private int _actions, _outward;
 
         public FormActionRunner(PdfDocument doc, PdfDictionary? acro, List<Field> fields, IFormActionHost? host, byte[] source, bool readOnly = false)
         {
@@ -251,10 +304,23 @@ public static partial class FormEditor
 
         public List<string> Log => Js.Log;
 
+        /// <summary>The run comes from the pointer entering or leaving a widget: scripts run without dialogs, and only
+        /// harmless actions (show/hide fields, go to a page) are carried out; nothing outward, no printing.</summary>
+        public bool Hover { get; init; }
+
+        /// <summary>
+        /// An outward step was declined, refused, or went over the caps: the running script is stopped and the rest of
+        /// this run's actions are skipped.
+        /// </summary>
+        public bool Stopped { get; private set; }
+
+        /// <summary>Messages for the user about this run (shown as toasts), e.g. that it was stopped.</summary>
+        public List<string> Notices { get; } = [];
+
         /// <summary>Runs an action (dictionary or array of them) and its /Next chain; each action runs once per run.</summary>
         public void Execute(PdfItem? item, Field target, string eventName, int depth = 0)
         {
-            if (depth > MaxDepth) return;
+            if (depth > MaxDepth || Stopped) return;
             switch (PdfObj.Resolve(item))
             {
                 case PdfArray arr:
@@ -283,11 +349,16 @@ public static partial class FormEditor
         private void Perform(PdfDictionary a, Field target, string eventName)
         {
             var type = PdfObj.Name(a.Elements["/S"]) ?? "";
+            if (Hover && type is not ("JavaScript" or "Hide" or "GoTo" or "Named"))
+            {
+                Log.Add($"Form action {type} ignored (not run when the pointer only passes over a field)");
+                return;
+            }
             switch (type)
             {
                 case "JavaScript":
                     if (PdfObj.Text(a.Elements["/JS"]) is { Length: > 0 } script
-                        && Js.Run(eventName, target, script, ValueOf(target.Dict, target.Type)) is { } r)
+                        && Js.Run(eventName, target, script, ExportValueOf(target)) is { } r)
                         _alerts.AddRange(r.Alerts);
                     break;
                 case "ResetForm":
@@ -306,7 +377,7 @@ public static partial class FormEditor
                 case "Launch":
                 {
                     var path = FileSpec(a.Elements["/F"]) ?? FileSpec(PdfObj.Dict(a.Elements["/Win"])?.Elements["/F"]);
-                    if (path is { Length: > 0 }) Host?.Launch(path);
+                    if (path is { Length: > 0 } && Host is { } host && Outward("open a file")) Went(host.Launch(path));
                     break;
                 }
                 case "GoTo":
@@ -320,7 +391,7 @@ public static partial class FormEditor
                         PdfArray d when d.Elements.Count > 0 => PdfObj.Int(d.Elements[0]) ?? 0,
                         var d => PdfObj.Int(d) ?? 0,
                     };
-                    Host?.OpenRemote(file, Math.Max(0, page));
+                    if (Host is { } host && Outward("open another PDF")) Went(host.OpenRemote(file, Math.Max(0, page)));
                     break;
                 }
                 case "Named":
@@ -349,6 +420,11 @@ public static partial class FormEditor
         private void Named(string name)
         {
             if (Host is null) return;
+            if (Hover && name is not ("NextPage" or "PrevPage" or "FirstPage" or "LastPage" or "GoBack" or "GoForward"))
+            {
+                Log.Add($"Named action {name} ignored (not run when the pointer only passes over a field)");
+                return;
+            }
             switch (name)
             {
                 case "NextPage": GoToPage(Host.CurrentPage + 1); break;
@@ -360,74 +436,122 @@ public static partial class FormEditor
             }
         }
 
-        public void OpenUrl(string url)
+        /// <summary>
+        /// Whether one more outward step may go ahead: not while hovering, not after the run was stopped, at most
+        /// <see cref="MaxOutwardPerRun"/> per run and <see cref="MaxOutwardPerMinute"/> per document per minute (counted
+        /// whether or not the user then agrees, so a script can't keep a consent dialog coming back). Going over a cap
+        /// stops the run, with one notice.
+        /// </summary>
+        private bool Outward(string what)
+        {
+            if (Host is not { } host || Stopped) return false;
+            if (Hover)
+            {
+                Log.Add($"Form action: {what} ignored (not run when the pointer only passes over a field)");
+                return false;
+            }
+            var recent = RecentOutward.GetValue(host, _ => new Queue<long>());
+            lock (recent)
+            {
+                var now = Environment.TickCount64;
+                while (recent.Count > 0 && now - recent.Peek() > 60_000) recent.Dequeue();
+                if (_outward < MaxOutwardPerRun && recent.Count < MaxOutwardPerMinute)
+                {
+                    _outward++;
+                    recent.Enqueue(now);
+                    return true;
+                }
+            }
+            Log.Add($"Form action: {what} stopped (too many outward actions)");
+            if (!Stopped) Notices.Add("This form kept trying to open, send or email things, so PdfDesk stopped its script.");
+            Stopped = true;
+            return false;
+        }
+
+        /// <summary>Notes the host's answer to an outward step: when it didn't happen, the run stops.</summary>
+        private bool Went(bool done)
+        {
+            if (!done)
+            {
+                Stopped = true;
+                Log.Add("Form action: not allowed, so the rest of the form's actions were skipped");
+            }
+            return done;
+        }
+
+        public bool OpenUrl(string url)
         {
             url = url.Trim();
-            if (url.Length == 0 || Host is null) return;
+            if (url.Length == 0 || Host is not { } host || !Outward("open a link")) return false;
             // Relative URIs resolve against the document's /URI /Base.
             if (!Uri.TryCreate(url, UriKind.Absolute, out _) && PdfObj.Str(PdfObj.Dict(_doc.Internals.Catalog.Elements["/URI"])?.Elements["/Base"]) is { } b
                 && Uri.TryCreate(b, UriKind.Absolute, out var baseUri) && Uri.TryCreate(baseUri, url, out var full))
                 url = full.ToString();
-            Host.OpenUrl(url);
+            return Went(host.OpenUrl(url));
         }
 
-        public void Print(int from, int to) => Host?.Print(from >= 0 ? from : null, to >= 0 ? to : null);
-
-        public void Mail(string kind, string to, string cc, string bcc, string subject, string message)
+        public void Print(int from, int to)
         {
-            if (Host is not { } host) return;
+            if (Hover) return;
+            Host?.Print(from >= 0 ? from : null, to >= 0 ? to : null);
+        }
+
+        public bool Mail(string kind, string to, string cc, string bcc, string subject, string message)
+        {
+            if (Host is not { } host || !Outward("email")) return false;
             switch (kind)
             {
                 case "doc":
                     _deferred.Add(bytes => host.Mail(new FormMail(to, cc, bcc, subject, message, bytes, "form.pdf")));
-                    break;
+                    return true;
                 case "form":
                 {
                     var entries = Entries(null, exclude: false, includeEmpty: false);
-                    host.Mail(new FormMail(to, cc, bcc, subject, message, FormData.Fdf(entries, null), "form.fdf"));
-                    break;
+                    return Went(host.Mail(new FormMail(to, cc, bcc, subject, message, FormData.Fdf(entries, null), "form.fdf", [.. entries.Select(e => e.Name)])));
                 }
                 default:
-                    host.Mail(new FormMail(to, cc, bcc, subject, message, null, null));
-                    break;
+                    return Went(host.Mail(new FormMail(to, cc, bcc, subject, message, null, null)));
             }
         }
 
         /// <summary>Builds the data a submit sends and hands it to the host (which asks the user first).</summary>
-        public void Submit(string url, string format, bool includeEmpty, IReadOnlyList<string>? names, bool exclude, bool get, string charset)
+        public bool Submit(string url, string format, bool includeEmpty, IReadOnlyList<string>? names, bool exclude, bool get, string charset)
         {
             if (Host is not { } host)
             {
                 Log.Add("submitForm: nothing to send it with");
-                return;
+                return false;
             }
+            if (!Outward("send the form")) return false;
             url = url.Trim();
             if (!Uri.TryCreate(url, UriKind.Absolute, out _) && PdfObj.Str(PdfObj.Dict(_doc.Internals.Catalog.Elements["/URI"])?.Elements["/Base"]) is { } b
                 && Uri.TryCreate(b, UriKind.Absolute, out var baseUri) && Uri.TryCreate(baseUri, url, out var full))
                 url = full.ToString();
             var kind = format switch { "HTML" => SubmitFormat.Html, "XFDF" or "XML" or "XDP" => SubmitFormat.Xfdf, "PDF" => SubmitFormat.Pdf, _ => SubmitFormat.Fdf };
             var entries = Entries(names, exclude, includeEmpty);
+            IReadOnlyList<string> fields = [.. entries.Select(e => e.Name)];
 
             if (url.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
             {
                 // An emailed submission: the data goes along as an attachment the user adds.
                 var address = Uri.UnescapeDataString(url[7..].Split('?')[0]);
-                if (kind == SubmitFormat.Pdf) _deferred.Add(bytes => host.Mail(new FormMail(address, "", "", "Form", "", bytes, "form.pdf")));
-                else
+                if (kind == SubmitFormat.Pdf)
                 {
-                    var (data, name) = kind == SubmitFormat.Xfdf ? (FormData.Xfdf(entries, null), "form.xfdf")
-                        : kind == SubmitFormat.Html ? (Encoding.UTF8.GetBytes(FormData.Html(entries, Encoding.UTF8)), "form.txt")
-                        : (FormData.Fdf(entries, null), "form.fdf");
-                    host.Mail(new FormMail(address, "", "", "Form", "", data, name));
+                    _deferred.Add(bytes => host.Mail(new FormMail(address, "", "", "Form", "", bytes, "form.pdf")));
+                    return true;
                 }
-                return;
+                var (data, name) = kind == SubmitFormat.Xfdf ? (FormData.Xfdf(entries, null), "form.xfdf")
+                    : kind == SubmitFormat.Html ? (Encoding.UTF8.GetBytes(FormData.Html(entries, Encoding.UTF8)), "form.txt")
+                    : (FormData.Fdf(entries, null), "form.fdf");
+                return Went(host.Mail(new FormMail(address, "", "", "Form", "", data, name, fields)));
             }
 
+            Task<int>? sent;
             switch (kind)
             {
                 case SubmitFormat.Pdf:
-                    _deferred.Add(bytes => Observe(host.Submit(new FormSubmission(url, "POST", "application/pdf", bytes, SubmitFormat.Pdf, entries.Count))));
-                    break;
+                    _deferred.Add(bytes => Observe(host.Submit(new FormSubmission(url, "POST", "application/pdf", bytes, SubmitFormat.Pdf, entries.Count, fields))));
+                    return true;
                 case SubmitFormat.Html:
                 {
                     Encoding enc;
@@ -443,21 +567,23 @@ public static partial class FormEditor
                     if (get)
                     {
                         var target = url.Contains('?') ? url + "&" + query : url + "?" + query;
-                        Observe(host.Submit(new FormSubmission(target, "GET", "application/x-www-form-urlencoded", [], SubmitFormat.Html, entries.Count)));
+                        sent = host.Submit(new FormSubmission(target, "GET", "application/x-www-form-urlencoded", [], SubmitFormat.Html, entries.Count, fields));
                     }
-                    else Observe(host.Submit(new FormSubmission(url, "POST", "application/x-www-form-urlencoded", Encoding.ASCII.GetBytes(query), SubmitFormat.Html, entries.Count)));
+                    else sent = host.Submit(new FormSubmission(url, "POST", "application/x-www-form-urlencoded", Encoding.ASCII.GetBytes(query), SubmitFormat.Html, entries.Count, fields));
                     break;
                 }
                 case SubmitFormat.Xfdf:
-                    Observe(host.Submit(new FormSubmission(url, "POST", "application/vnd.adobe.xfdf", FormData.Xfdf(entries, null), SubmitFormat.Xfdf, entries.Count)));
+                    sent = host.Submit(new FormSubmission(url, "POST", "application/vnd.adobe.xfdf", FormData.Xfdf(entries, null), SubmitFormat.Xfdf, entries.Count, fields));
                     break;
                 default:
-                    Observe(host.Submit(new FormSubmission(url, "POST", "application/vnd.fdf", FormData.Fdf(entries, null), SubmitFormat.Fdf, entries.Count)));
+                    sent = host.Submit(new FormSubmission(url, "POST", "application/vnd.fdf", FormData.Fdf(entries, null), SubmitFormat.Fdf, entries.Count, fields));
                     break;
             }
+            Observe(sent);
+            return Went(sent is not null);
         }
 
-        private static void Observe(Task task) => task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        private static void Observe(Task? task) => task?.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
         /// <summary>The fields a submit sends: exportable ones (no push buttons, signatures or NoExport), listed or not.</summary>
         private List<FormData.Entry> Entries(IReadOnlyList<string>? names, bool exclude, bool includeEmpty)
@@ -470,7 +596,7 @@ public static partial class FormEditor
                 if (((PdfObj.Int(Inherited(f.Dict, "/Ff")) ?? 0) & FfNoExport) != 0) continue;
                 if (!seen.Add(f.Name)) continue;
                 var hasValue = PdfObj.Resolve(Inherited(f.Dict, "/V")) is not null;
-                var value = ValueOf(f.Dict, f.Type);
+                var value = ExportValueOf(f); // check boxes and radios with /Opt send their export value, not "0" / "1"
                 if (!hasValue || (f.Type != "/Btn" && value.Length == 0))
                 {
                     if (includeEmpty) list.Add(new FormData.Entry(f.Name, null, false));
@@ -604,19 +730,20 @@ public static partial class FormEditor
         }
 
         /// <summary>ImportData and this.importAnFDF: the user picks an FDF/XFDF file (the host asks first); its values fill the form.</summary>
-        public void Import(string suggested)
+        public bool Import(string suggested)
         {
-            if (Host is null) return;
+            if (Host is not { } host) return false;
             if (ReadOnly)
             {
                 WantedChange = true;
-                return;
+                return true;
             }
-            if (Host.ImportData(suggested.Length == 0 ? null : suggested) is not { } bytes) return;
+            if (!Outward("import form data")) return false;
+            if (host.ImportData(suggested.Length == 0 ? null : suggested) is not { } bytes) return Went(false);
             if (FormData.Parse(bytes) is not { } values)
             {
                 Log.Add("Import: the file isn't FDF or XFDF form data");
-                return;
+                return true;
             }
             Label = "Import form data";
             foreach (var f in _fields)
@@ -640,6 +767,7 @@ public static partial class FormEditor
                 Js.Touched.Add(f);
                 Changed = true;
             }
+            return true;
         }
 
         // ---------------- Finishing ----------------
@@ -670,7 +798,7 @@ public static partial class FormEditor
             }
             RunDeferred(saved ?? _source);
             var label = Label == "Form action" && Js.Touched.Count > 0 ? "Form script" : Label;
-            return new FormActionResult(saved, label, _alerts, Log, FocusField, WantedChange || (ReadOnly && Js.Touched.Count > 0));
+            return new FormActionResult(saved, label, [.. Notices, .. _alerts], Log, FocusField, WantedChange || (ReadOnly && Js.Touched.Count > 0));
         }
 
         /// <summary>Sends what waited for the finished document (PDF submits, mailDoc).</summary>

@@ -22,10 +22,45 @@ public sealed class FieldKeystrokes : IDisposable
     private readonly Func<string, string, int, int, KeystrokeResult?> _run;
     private readonly Lock _lock = new();
 
-    internal FieldKeystrokes(IDisposable doc, Func<string, string, int, int, KeystrokeResult?> run)
+    internal FieldKeystrokes(IDisposable doc, bool warm, Func<string, string, int, int, KeystrokeResult?> run)
     {
         _doc = doc;
+        Warm = warm;
         _run = run;
+    }
+
+    /// <summary>The script engine was started when this was opened (so the first keystroke doesn't wait for it).</summary>
+    internal bool Warm { get; }
+
+    /// <summary>
+    /// The smallest edit that turns <paramref name="before"/> into <paramref name="after"/>: replace [Start, End) of
+    /// <paramref name="before"/> with <paramref name="Change"/> (surrogate pairs are never split).
+    /// </summary>
+    public static (int Start, int End, string Change) Diff(string before, string after)
+    {
+        var max = Math.Min(before.Length, after.Length);
+        var prefix = 0;
+        while (prefix < max && before[prefix] == after[prefix]) prefix++;
+        if (prefix > 0 && prefix < before.Length && char.IsHighSurrogate(before[prefix - 1])) prefix--;
+        var suffix = 0;
+        while (suffix < max - prefix && before[^(suffix + 1)] == after[^(suffix + 1)]) suffix++;
+        if (suffix > 0 && suffix < before.Length - prefix && char.IsLowSurrogate(before[^suffix])) suffix--;
+        return (prefix, before.Length - suffix, after[prefix..(after.Length - suffix)]);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> cut so that replacing [<paramref name="start"/>, <paramref name="end"/>) of
+    /// <paramref name="value"/> with it stays within <paramref name="maxLength"/> characters (0 = no limit), without
+    /// splitting a surrogate pair: a paste longer than the field's limit keeps what fits.
+    /// </summary>
+    public static string Fit(string value, int start, int end, string text, int maxLength)
+    {
+        if (maxLength <= 0) return text;
+        var room = maxLength - (value.Length - Math.Max(0, end - start));
+        if (text.Length <= room) return text;
+        if (room <= 0) return "";
+        if (char.IsHighSurrogate(text[room - 1])) room--;
+        return text[..room];
     }
 
     /// <summary>The field's keystroke check, or null when it has no keystroke script.</summary>
@@ -72,7 +107,8 @@ public static partial class FormEditor
                 return null;
             }
             var js = new JsFormHost(doc, fields, readOnly: true);
-            return new FieldKeystrokes(doc, (value, change, selStart, selEnd) =>
+            js.Prewarm(script); // engine, document scripts and the parsed script now, off the UI thread
+            return new FieldKeystrokes(doc, js.Started, (value, change, selStart, selEnd) =>
             {
                 selStart = Math.Clamp(selStart, 0, value.Length);
                 selEnd = Math.Clamp(selEnd, selStart, value.Length);

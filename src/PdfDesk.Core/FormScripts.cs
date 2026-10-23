@@ -644,29 +644,115 @@ public static class FormScripts
         return sb.ToString();
     }
 
-    /// <summary>Reads a typed date: first in the field's own pattern, then common invariant/US/ISO forms.</summary>
+    /// <summary>
+    /// Reads a typed date the way Acrobat's AFParseDateEx does: in the field's own pattern, then leniently in the same
+    /// order (single-digit days and months, two-digit years, any separators: "3/4/25" for dd/mm/yyyy is 3 April), then
+    /// ISO and spelled-out month forms. Only a pattern without a day/month order falls back to US and culture parsing.
+    /// </summary>
     public static DateTime? ParseDate(string raw, string pattern)
     {
         raw = raw.Trim();
+        var parts = SplitPattern(pattern);
+        var styles = DateTimeStyles.AllowWhiteSpaces;
+        // Exact first, then with every number allowed one or two digits (dd → d, mm → m, HH → H...), same order.
+        foreach (var lenient in new[] { false, true })
+            if (DateTime.TryParseExact(raw, NetPattern(parts, lenient), Inv, styles, out var exact)) return exact;
+        if (DateTime.TryParseExact(raw, ["yyyy-MM-dd", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyyMMdd"], Inv, styles, out var d)) return d;
+        if (ParseInOrder(raw, parts) is { } ordered) return ordered;
+        string[] named = ["d-MMM-yyyy", "d MMM yyyy", "d MMMM yyyy", "MMM d, yyyy", "MMMM d, yyyy"];
+        if (DateTime.TryParseExact(raw, named, Inv, styles, out d)) return d;
+        // A pattern that doesn't say whether the day or the month comes first: the usual US and culture forms.
+        if (parts.Any(p => p.Token && p.Text is "d" or "dd" or "m" or "mm")) return null;
+        string[] common = ["M/d/yyyy", "M/d/yy", "MM/dd/yyyy"];
+        if (DateTime.TryParseExact(raw, common, Inv, styles, out d)) return d;
+        if (DateTime.TryParse(raw, Inv, styles, out d)) return d;
+        return DateTime.TryParse(raw, CultureInfo.CurrentCulture, styles, out d) ? d : null;
+    }
+
+    /// <summary>An Acrobat date pattern as a .NET one; <paramref name="lenient"/> lets every number have one or two digits.</summary>
+    private static string NetPattern(List<(bool Token, string Text)> parts, bool lenient)
+    {
         var net = new StringBuilder();
-        foreach (var (isToken, text) in SplitPattern(pattern))
+        foreach (var (isToken, text) in parts)
         {
             if (!isToken)
             {
-                net.Append(char.IsLetterOrDigit(text[0]) || text[0] is '\'' or '"' or '%' or '\\' ? "'" + text + "'" : text);
+                net.Append(char.IsLetterOrDigit(text[0]) || text[0] is '\'' or '"' or '%' or '\\' or '/' or ':' ? "'" + text + "'" : text);
                 continue;
             }
             net.Append(text switch
             {
-                "mmmm" => "MMMM", "mmm" => "MMM", "mm" => "MM", "m" => "M",
-                "MM" => "mm", "M" => "m", "t" => "tt", _ => text,
+                "mmmm" => "MMMM", "mmm" => "MMM",
+                "mm" => lenient ? "M" : "MM", "m" => "M",
+                "dd" when lenient => "d",
+                "HH" when lenient => "H", "hh" when lenient => "h",
+                "MM" => lenient ? "m" : "mm", "M" => "m",
+                "ss" when lenient => "s",
+                "t" => "tt", _ => text,
             });
         }
-        var styles = DateTimeStyles.AllowWhiteSpaces;
-        if (DateTime.TryParseExact(raw, net.ToString(), Inv, styles, out var d)) return d;
-        string[] common = ["yyyy-MM-dd", "yyyy-MM-ddTHH:mm:ss", "M/d/yyyy", "M/d/yy", "MM/dd/yyyy", "d-MMM-yyyy", "MMM d, yyyy", "MMMM d, yyyy", "yyyyMMdd"];
-        if (DateTime.TryParseExact(raw, common, Inv, styles, out d)) return d;
-        if (DateTime.TryParse(raw, Inv, styles, out d)) return d;
-        return DateTime.TryParse(raw, CultureInfo.CurrentCulture, styles, out d) ? d : null;
+        return net.ToString();
+    }
+
+    private static readonly string[] MonthNames = CultureInfo.InvariantCulture.DateTimeFormat.MonthNames;
+
+    /// <summary>
+    /// AFParseDateEx's fallback: the numbers in the text, taken in the order the pattern puts day, month and year (and
+    /// then hours, minutes, seconds), a spelled-out month wherever it is; a missing year is this year, a missing day the
+    /// 1st; two-digit years are 19xx from 50 up, else 20xx.
+    /// </summary>
+    private static DateTime? ParseInOrder(string raw, List<(bool Token, string Text)> parts)
+    {
+        var order = new List<char>();
+        foreach (var (isToken, text) in parts)
+        {
+            if (!isToken) continue;
+            var slot = text switch
+            {
+                "d" or "dd" => 'd',
+                "m" or "mm" or "mmm" or "mmmm" => 'm',
+                "yy" or "yyyy" => 'y',
+                "H" or "HH" or "h" or "hh" => 'H',
+                "M" or "MM" => 'M',
+                "s" or "ss" => 's',
+                _ => '\0',
+            };
+            if (slot != '\0' && !order.Contains(slot)) order.Add(slot);
+        }
+        if (!order.Contains('d') && !order.Contains('m')) return null;
+
+        // A month name (or its first three letters) anywhere fills the month.
+        int? month = null;
+        foreach (System.Text.RegularExpressions.Match word in System.Text.RegularExpressions.Regex.Matches(raw, @"\p{L}+"))
+        {
+            if (word.Length < 3) continue;
+            var i = Array.FindIndex(MonthNames, n => n.Length > 0 && n.StartsWith(word.Value, StringComparison.OrdinalIgnoreCase)
+                && (word.Length == n.Length || word.Length == 3));
+            if (i >= 0)
+            {
+                month = i + 1;
+                break;
+            }
+        }
+        var numbers = System.Text.RegularExpressions.Regex.Matches(raw, @"\d+").Select(m => m.Value).ToList();
+        var slots = order.Where(c => c != 'm' || month is null).ToList();
+        if (numbers.Count == 0 || numbers.Count > slots.Count || numbers.Any(n => n.Length > 4)) return null;
+        var values = new Dictionary<char, int>();
+        for (var i = 0; i < numbers.Count; i++) values[slots[i]] = int.Parse(numbers[i], Inv);
+        if (month is { } named) values['m'] = named;
+        // A date part left out (other than the year) means the text is too short to read safely.
+        if ((order.Contains('d') && !values.ContainsKey('d')) || !values.ContainsKey('m')) return null;
+        var year = values.TryGetValue('y', out var y) ? y < 100 && numbers[slots.IndexOf('y')].Length <= 2 ? (y >= 50 ? 1900 + y : 2000 + y) : y : DateTime.Today.Year;
+        var hour = values.GetValueOrDefault('H');
+        if (parts.Any(p => p.Token && p.Text is "tt" or "t") && hour < 12 && System.Text.RegularExpressions.Regex.IsMatch(raw, @"\bp", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            hour += 12;
+        try
+        {
+            return new DateTime(year, values['m'], values.GetValueOrDefault('d', 1), hour, values.GetValueOrDefault('M'), values.GetValueOrDefault('s'));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 }

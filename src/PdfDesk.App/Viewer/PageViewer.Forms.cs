@@ -594,8 +594,11 @@ public sealed partial class PageViewer
         {
             keys.Prepare(widget);
             _editorKeystrokes = true;
+            _checkedText = box.Text;
+            _approvedText = null;
             box.PreviewTextInput += OnEditorTextInput;
             box.PreviewKeyDown += OnEditorEditKey;
+            box.TextChanged += OnEditorTextChanged;
             DataObject.AddPastingHandler(box, OnEditorPaste);
         }
         _overlay.Children.Add(editor);
@@ -751,10 +754,12 @@ public sealed partial class PageViewer
         {
             box.PreviewTextInput -= OnEditorTextInput;
             box.PreviewKeyDown -= OnEditorEditKey;
+            box.TextChanged -= OnEditorTextChanged;
             DataObject.RemovePastingHandler(box, OnEditorPaste);
             Keystrokes?.Release();
         }
         _editorKeystrokes = false;
+        _checkedText = _approvedText = null;
         _overlay.Children.Remove(_editor);
         _editor = null;
         _editorWidget = null;
@@ -766,10 +771,39 @@ public sealed partial class PageViewer
     // ───────────────────────────── Live keystrokes ─────────────────────────────
 
     private bool _editorKeystrokes;
+    private string? _checkedText;  // the editor's text as the keystroke checks last saw it
+    private string? _approvedText; // the text an edit the checks just let through will produce
+    private bool _applyingEdit;    // the editor's text is being changed here (a rewritten or reverted edit)
 
     private void OnEditorTextInput(object sender, TextCompositionEventArgs e)
     {
         if (sender is TextBox box && e.Text.Length > 0 && !FilterEdit(box, e.Text, deleteBack: null)) e.Handled = true;
+    }
+
+    /// <summary>
+    /// The catch-all for edits the key handlers don't see (cut, Ctrl+Backspace/Delete, drag and drop, Enter in a
+    /// multiline field, IME): the change is worked out from the text before and after and checked like a keystroke;
+    /// a refused one is taken back (as an edit, so undo keeps working). Undo and redo themselves aren't checked.
+    /// </summary>
+    private void OnEditorTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is not TextBox box) return;
+        var before = _checkedText ?? box.Text;
+        var after = box.Text;
+        var approved = _approvedText;
+        _checkedText = after;
+        _approvedText = null;
+        if (_applyingEdit || after == before || after == approved || e.UndoAction is UndoAction.Undo or UndoAction.Redo) return;
+        var (start, end, change) = FieldKeystrokes.Diff(before, after);
+        if (Check(before, change, start, end) is not { } r || (r.Accepted && r.Change == change && r.SelStart == start && r.SelEnd == end)) return;
+        // Changing the text from inside TextChanged isn't safe: take it back right after.
+        box.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Send, () =>
+        {
+            if (!ReferenceEquals(_editor, box) || box.Text != after) return;
+            Replace(box, start, start + change.Length, before[start..end]);
+            if (r.Accepted) Replace(box, r.SelStart, r.SelEnd, r.Change);
+            else box.CaretIndex = end;
+        });
     }
 
     private void OnEditorEditKey(object sender, KeyEventArgs e)
@@ -791,7 +825,29 @@ public sealed partial class PageViewer
         if (sender is not TextBox box || e.DataObject.GetData(DataFormats.UnicodeText) is not string text) return;
         if (!box.AcceptsReturn) text = text.Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ');
         e.CancelCommand();
-        if (FilterEdit(box, text, deleteBack: null)) Replace(box, box.SelectionStart, box.SelectionStart + box.SelectionLength, text);
+        // A paste longer than the field allows keeps what fits (as a plain paste would).
+        var (start, end) = (box.SelectionStart, box.SelectionStart + box.SelectionLength);
+        text = FieldKeystrokes.Fit(box.Text, start, end, text, box.MaxLength);
+        if (text.Length == 0 && start == end) return;
+        if (FilterEdit(box, text, deleteBack: null)) Replace(box, start, end, text);
+    }
+
+    /// <summary>The keystroke script's verdict on replacing [start, end) of value with change (alerts shown); null = no verdict.</summary>
+    private KeystrokeResult? Check(string value, string change, int start, int end)
+    {
+        if (_editorWidget is not { } w || Keystrokes is not { } keys) return null;
+        KeystrokeResult? r;
+        try
+        {
+            r = keys.Filter(w, value, change, start, end);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;
+        }
+        if (r is not null)
+            foreach (var alert in r.Alerts.Take(2)) StatusMessage?.Invoke(this, alert);
+        return r;
     }
 
     /// <summary>
@@ -800,7 +856,7 @@ public sealed partial class PageViewer
     /// </summary>
     private bool FilterEdit(TextBox box, string change, bool? deleteBack)
     {
-        if (_editorWidget is not { } w || Keystrokes is not { } keys) return true;
+        if (_editorWidget is null || Keystrokes is null) return true;
         var value = box.Text;
         var start = box.SelectionStart;
         var end = start + box.SelectionLength;
@@ -817,32 +873,47 @@ public sealed partial class PageViewer
                 end++;
             }
         }
-        KeystrokeResult? r;
-        try
+        var approved = value[..start] + change + value[end..];
+        if (Check(value, change, start, end) is not { } r)
         {
-            r = keys.Filter(w, value, change, start, end);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
+            _approvedText = approved;
             return true;
         }
-        if (r is null) return true;
-        foreach (var alert in r.Alerts.Take(2)) StatusMessage?.Invoke(this, alert);
         if (!r.Accepted) return false;
-        if (r.Change == change && r.SelStart == start && r.SelEnd == end) return true;
+        if (r.Change == change && r.SelStart == start && r.SelEnd == end)
+        {
+            _approvedText = approved;
+            return true;
+        }
         Replace(box, r.SelStart, r.SelEnd, r.Change);
         return false;
     }
 
-    private static void Replace(TextBox box, int start, int end, string text)
+    /// <summary>
+    /// Replaces [start, end) of the editor's text, through the selection so undo keeps working (setting Text would
+    /// clear it), changing only the characters that differ; text past the field's length limit is cut off.
+    /// </summary>
+    private void Replace(TextBox box, int start, int end, string text)
     {
         var value = box.Text;
         start = Math.Clamp(start, 0, value.Length);
         end = Math.Clamp(end, start, value.Length);
-        var updated = value[..start] + text + value[end..];
-        if (box.MaxLength > 0 && updated.Length > box.MaxLength) return;
-        box.Text = updated;
-        box.CaretIndex = start + text.Length;
+        text = FieldKeystrokes.Fit(value, start, end, text, box.MaxLength);
+        var (from, to, change) = FieldKeystrokes.Diff(value, value[..start] + text + value[end..]);
+        if (from != to || change.Length > 0)
+        {
+            _applyingEdit = true;
+            try
+            {
+                box.Select(from, to - from);
+                box.SelectedText = change;
+            }
+            finally
+            {
+                _applyingEdit = false;
+            }
+        }
+        box.Select(Math.Min(start + text.Length, box.Text.Length), 0);
     }
 
     /// <summary>The page-space box for typed text (Arial metrics match the PDF's Helvetica closely).</summary>

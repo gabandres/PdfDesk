@@ -25,7 +25,11 @@ public static partial class FormEditor
     /// model (event, getField, field objects, app/util/console and the AF* built-ins). Everything that leaves the
     /// document (launchURL, submitForm, mailDoc, print, imports) goes through a <see cref="FormActionRunner"/> and its
     /// <see cref="IFormActionHost"/>, which asks the user first; without a runner (reading a form, live keystrokes) those
-    /// calls do nothing, and document-level scripts can never reach them. Modal dialogs (app.alert, app.response) are
+    /// calls do nothing, and document-level scripts can never reach them; outward calls are capped per run and per
+    /// document per minute, and one the user declines ends the script. Hovering (Mouse Enter/Exit) runs scripts without
+    /// dialogs, printing or outward calls, and setFocus is ignored while focus moves (Focus/Blur), so scripts can't bounce
+    /// it between fields. Built-ins that build huge strings in one call are refused before they allocate (see the
+    /// prelude). Modal dialogs (app.alert, app.response) are
     /// limited per event and per run, and the time they are open doesn't count against the script's budget. A script
     /// that fails, times out or exceeds a limit returns null so callers fall back to the parsed fast paths in
     /// <see cref="FormScripts"/>; errors never escape.
@@ -53,6 +57,7 @@ public static partial class FormEditor
         private List<string>? _eventAlerts;
         private double[]? _eventColor;
         private string? _eventTarget;
+        private string? _eventName;
         private int _eventDialogs, _runDialogs, _prints;
 
         /// <param name="readOnly">Scripts may read fields but their writes are ignored (reading a form for display).</param>
@@ -64,6 +69,9 @@ public static partial class FormEditor
             _readOnly = readOnly;
             _runner = runner;
         }
+
+        /// <summary>The engine is running (prelude and document scripts done).</summary>
+        internal bool Started => _engine is not null;
 
         /// <summary>console.println output and script errors, for the app log.</summary>
         public List<string> Log { get; } = [];
@@ -90,6 +98,7 @@ public static partial class FormEditor
             _eventAlerts = [];
             _eventColor = null;
             _eventTarget = target.Name;
+            _eventName = name;
             _eventDialogs = 0;
             try
             {
@@ -112,14 +121,42 @@ public static partial class FormEditor
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                Log.Add($"Form script ({name} of {target.Name}) failed: {Describe(ex)}");
+                Log.Add($"Form script ({name} of {target.Name}) {(ex is ScriptStoppedException ? "stopped" : "failed")}: {Describe(ex)}");
                 return null;
             }
             finally
             {
                 _eventAlerts = null;
                 _eventTarget = null;
+                _eventName = null;
             }
+        }
+
+        /// <summary>
+        /// Starts the engine now (prelude and document-level scripts) and compiles <paramref name="script"/>, so the first
+        /// event doesn't pay for them: call it off the UI thread before live keystrokes start.
+        /// </summary>
+        public void Prewarm(string? script = null)
+        {
+            if (Engine() is null || string.IsNullOrWhiteSpace(script) || script.Length > MaxScriptLength || _prepared.ContainsKey(script)) return;
+            try
+            {
+                _prepared[script] = Jint.Engine.PrepareScript(script);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // A script that doesn't parse fails (and is logged) when it runs.
+            }
+        }
+
+        /// <summary>Thrown into a running script to end it at once (script code can't catch it): an outward step was
+        /// declined or went over the caps.</summary>
+        private sealed class ScriptStoppedException(string message) : Exception(message);
+
+        /// <summary>Ends the running script when the runner was stopped (see <see cref="FormActionRunner.Stopped"/>).</summary>
+        private void StopIfStopped(FormActionRunner r)
+        {
+            if (r.Stopped) throw new ScriptStoppedException("an outward action was declined or the form tried too many");
         }
 
         private T Guarded<T>(Func<T> run)
@@ -168,6 +205,7 @@ public static partial class FormEditor
         {
             JavaScriptException js => js.Message,
             TimeoutException => "took too long",
+            ScriptStoppedException => ex.Message,
             _ => ex.GetType().Name + ": " + ex.Message,
         };
 
@@ -185,6 +223,7 @@ public static partial class FormEditor
                     o.LimitRecursion(64);
                     o.LimitMemory(16 * 1024 * 1024);
                     o.Constraints.MaxArraySize = 100_000;
+                    o.Constraints.RegexTimeout = TimeSpan.FromMilliseconds(200);
                     o.Culture = CultureInfo.InvariantCulture;
                     o.Interop.Enabled = false; // no CLR types, namespaces or reflection from scripts
                 });
@@ -230,8 +269,11 @@ public static partial class FormEditor
             }
         }
 
-        /// <summary>The runner, when this script may act on the document or the world (not while document-level scripts run).</summary>
-        private FormActionRunner? Actor(string what)
+        /// <summary>
+        /// The runner, when this script may act on the document or the world: not while document-level scripts run, and
+        /// on hover (pointer enter/exit) only for <paramref name="navigation"/>.
+        /// </summary>
+        private FormActionRunner? Actor(string what, bool navigation = false)
         {
             if (_runner is null) return null;
             if (_inDocumentScripts || _eventAlerts is null)
@@ -239,8 +281,16 @@ public static partial class FormEditor
                 Log.Add($"Form script: {what} ignored (not allowed outside a user event)");
                 return null;
             }
+            if (_runner.Hover && !navigation)
+            {
+                Log.Add($"Form script: {what} ignored (not run when the pointer only passes over a field)");
+                return null;
+            }
             return _runner;
         }
+
+        /// <summary>Whether this event may open dialogs (not document-level scripts, not hover).</summary>
+        private IFormActionHost? DialogHost => _runner is { Host: { } host, Hover: false } && !_inDocumentScripts && _eventAlerts is not null ? host : null;
 
         /// <summary>Whether another modal dialog may open for this event; counts it.</summary>
         private bool TakeDialog(string what)
@@ -351,7 +401,12 @@ public static partial class FormEditor
                 var type = Math.Clamp(I(a, 2), 0, 3);
                 // Without a dialog the answer is the cautious one: OK for a notice, Cancel / No for a question.
                 var fallback = type switch { 1 => 2, 2 or 3 => 3, _ => 1 };
-                if (_runner?.Host is { } host && !_inDocumentScripts && _eventAlerts is not null)
+                if (_runner?.Hover == true)
+                {
+                    Log.Add("Form script: app.alert suppressed (the pointer only passed over a field)");
+                    return fallback;
+                }
+                if (DialogHost is { } host)
                 {
                     if (text.Length == 0 || !TakeDialog("app.alert")) return fallback;
                     var alert = new FormAlert(Clip(text, 4000), Clip(S(a, 3), 200), Math.Clamp(I(a, 1), 0, 3), type);
@@ -362,7 +417,7 @@ public static partial class FormEditor
             });
             Fn("response", a =>
             {
-                if (_runner?.Host is not { } host || _inDocumentScripts || _eventAlerts is null || !TakeDialog("app.response")) return JsValue.Null;
+                if (DialogHost is not { } host || !TakeDialog("app.response")) return JsValue.Null;
                 var prompt = new FormPrompt(Clip(S(a, 0), 4000), Clip(S(a, 1), 200), Clip(S(a, 2), 10_000), B(a, 3), Clip(S(a, 4), 200));
                 return Str(Outside(() => host.Response(prompt)));
             });
@@ -371,22 +426,30 @@ public static partial class FormEditor
                 if (Log.Count < 200) Log.Add("console: " + S(a, 0));
                 return JsValue.Undefined;
             });
+            // Outward calls: each counts against the run's caps; when one is declined or capped the script ends here.
             Fn("launchURL", a =>
             {
-                if (Actor("app.launchURL") is { } r) Outside(() => r.OpenUrl(S(a, 0)));
+                if (Actor("app.launchURL") is { } r)
+                {
+                    Outside(() => r.OpenUrl(S(a, 0)));
+                    StopIfStopped(r);
+                }
                 return JsValue.Undefined;
             });
             Fn("submit", a =>
             {
                 // url, format (FDF, XFDF, HTML, PDF...), include empty fields, field names, GET, charset
                 if (Actor("submitForm") is { } r && !_readOnly)
+                {
                     Outside(() => r.Submit(S(a, 0), S(a, 1), B(a, 2), Names(Arg(a, 3)), exclude: false, B(a, 4), S(a, 5)));
+                    StopIfStopped(r);
+                }
                 return JsValue.Undefined;
             });
             Fn("reset", a =>
             {
-                if (_readOnly || _runner is null || _inDocumentScripts) return JsValue.Undefined;
-                _runner.Reset(Names(Arg(a, 0)), exclude: false);
+                if (_readOnly || _inDocumentScripts || Actor("resetForm") is not { } r) return JsValue.Undefined;
+                r.Reset(Names(Arg(a, 0)), exclude: false);
                 return JsValue.Undefined;
             });
             Fn("print", a =>
@@ -398,12 +461,19 @@ public static partial class FormEditor
             {
                 // kind (doc, form, msg), to, cc, bcc, subject, message
                 if (Actor("mail") is { } r)
+                {
                     Outside(() => r.Mail(S(a, 0), Clip(S(a, 1), 2000), Clip(S(a, 2), 2000), Clip(S(a, 3), 2000), Clip(S(a, 4), 500), Clip(S(a, 5), 10_000)));
+                    StopIfStopped(r);
+                }
                 return JsValue.Undefined;
             });
             Fn("importData", a =>
             {
-                if (Actor("importAnFDF") is { } r && !_readOnly) Outside(() => r.Import(S(a, 0)));
+                if (Actor("importAnFDF") is { } r && !_readOnly)
+                {
+                    Outside(() => r.Import(S(a, 0)));
+                    StopIfStopped(r);
+                }
                 return JsValue.Undefined;
             });
             Fn("beep", a =>
@@ -414,7 +484,7 @@ public static partial class FormEditor
             Fn("pageNum", _ => _runner?.Host is { } host ? Outside(() => host.CurrentPage) : 0);
             Fn("setPageNum", a =>
             {
-                if (Actor("pageNum") is { } r) Outside(() => r.GoToPage(I(a, 0, -1)));
+                if (Actor("pageNum", navigation: true) is { } r) Outside(() => r.GoToPage(I(a, 0, -1)));
                 return JsValue.Undefined;
             });
             Fn("numPages", _ => _doc.PageCount);
@@ -430,7 +500,37 @@ public static partial class FormEditor
             }] is { } item ? PdfObj.Text(item) : null));
             Fn("focus", a =>
             {
+                // Moving the focus fires Focus and Blur again: a setFocus from those (or from hovering) would bounce the
+                // focus between fields forever, so only other events may move it.
+                if (_eventName is "Focus" or "Blur" or "Mouse Enter" or "Mouse Exit")
+                {
+                    Log.Add($"Form script: setFocus ignored during {_eventName}");
+                    return JsValue.Undefined;
+                }
                 if (_runner is not null && !_inDocumentScripts && Find(S(a, 0)) is not null) _runner.FocusField = S(a, 0);
+                return JsValue.Undefined;
+            });
+            Fn("boxChecked", a =>
+            {
+                if (Find(S(a, 0)) is not { Type: "/Btn" } f) return JsBoolean.False;
+                var current = ValueOf(f.Dict, f.Type);
+                if (current is "Off" or "") return JsBoolean.False;
+                var i = I(a, 1, -1);
+                var states = f.Widgets.Select(OnStateOf).ToList();
+                if (states.All(s => s is null)) return JsBoolean.True; // no on looks to tell the widgets apart
+                return i >= 0 && i < states.Count && (states[i] ?? i.ToString(CultureInfo.InvariantCulture)) == current ? JsBoolean.True : JsBoolean.False;
+            });
+            Fn("checkBox", a =>
+            {
+                // checkThisBox(widget, on): the widget's own state, so widgets sharing an export value stay apart.
+                if (_readOnly || Find(S(a, 0)) is not { Type: "/Btn" } f || (f.Flags & FfPushButton) != 0) return JsValue.Undefined;
+                var i = I(a, 1, -1);
+                if (i < 0 || i >= f.Widgets.Count) return JsValue.Undefined;
+                var state = OnStateOf(f.Widgets[i]) ?? i.ToString(CultureInfo.InvariantCulture);
+                var current = ValueOf(f.Dict, f.Type);
+                if (B(a, 2)) SetButton(f, state);
+                else if (current == state) SetButton(f, "Off");
+                if (ValueOf(f.Dict, f.Type) != current) Touched.Add(f);
                 return JsValue.Undefined;
             });
             Fn("makeNumber", a => FormScripts.ToNumber(S(a, 0)) is { } d ? d : JsValue.Null);
@@ -489,13 +589,13 @@ public static partial class FormEditor
             {
                 case "value":
                 {
-                    var raw = ValueOf(f.Dict, f.Type);
+                    var raw = ExportValueOf(f);
                     if (f.Type is "/Tx" or "/Ch" && raw.Length > 0 && raw.Trim() == raw
                         && double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var num) && double.IsFinite(num))
                         return num;
                     return JsString.Create(raw);
                 }
-                case "valueAsString": return JsString.Create(ValueOf(f.Dict, f.Type));
+                case "valueAsString": return JsString.Create(ExportValueOf(f));
                 case "type":
                     return JsString.Create(f.Type switch
                     {
@@ -519,11 +619,16 @@ public static partial class FormEditor
                 }
                 case "exportValues":
                 {
-                    IEnumerable<string> values = f.Type == "/Ch" ? ReadOptions(Inherited(f.Dict, "/Opt")).Exports : f.Widgets.Select(OnStateOf).OfType<string>();
+                    IEnumerable<string> values = f.Type == "/Ch" ? ReadOptions(Inherited(f.Dict, "/Opt")).Exports
+                        : ButtonOptions(f) ?? f.Widgets.Select(OnStateOf).OfType<string>();
                     return new JsArray(engine, [.. values.Select(s => (JsValue)JsString.Create(s))]);
                 }
                 case "numItems": return f.Type == "/Ch" ? ReadOptions(Inherited(f.Dict, "/Opt")).Exports.Count : 0;
-                case "defaultValue": return JsString.Create(PdfObj.Resolve(Inherited(f.Dict, "/DV")) switch { PdfString s => s.Value, PdfName n => n.Value.TrimStart('/'), _ => "" });
+                case "defaultValue":
+                {
+                    var dv = PdfObj.Resolve(Inherited(f.Dict, "/DV")) switch { PdfString s => s.Value, PdfName n => n.Value.TrimStart('/'), _ => "" };
+                    return JsString.Create(f.Type == "/Btn" ? ButtonExport(f, dv) : dv);
+                }
                 case "fillColor" or "borderColor" or "strokeColor":
                 {
                     var mk = f.Widgets.Count > 0 ? PdfObj.Dict(f.Widgets[0].Elements["/MK"]) : null;
