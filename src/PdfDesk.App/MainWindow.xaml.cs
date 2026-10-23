@@ -1881,6 +1881,9 @@ public partial class MainWindow : Window
         Shell.Open(Path.GetDirectoryName(Log.FilePath)!);
     }
 
+    /// <summary>Where this version's source is published (the AGPL requires offering it with every copy).</summary>
+    private const string SourceUrl = "https://github.com/gabandres/PdfDesk";
+
     private void OnAbout(object sender, RoutedEventArgs e)
     {
         var version = typeof(MainWindow).Assembly.GetName().Version;
@@ -1888,10 +1891,12 @@ public partial class MainWindow : Window
         dlg.Add(null, new Image { Source = new BitmapImage(new Uri("pack://application:,,,/PdfDeskLogo.png")), Width = 56, Height = 56, HorizontalAlignment = HorizontalAlignment.Left });
         dlg.Add(null, new TextBlock { Text = $"PdfDesk {version?.ToString(3)}", FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 10, 0, 0) });
         dlg.AddNote($"Read, search, print and organize PDFs. Native {RuntimeInformation.ProcessArchitecture} build.");
-        dlg.AddNote("Rendering, text and search: MuPDF (AGPL-3.0) via MuPDFCore. Page editing: PDFsharp (MIT). Personal use. Nothing you open leaves this computer.");
+        dlg.AddNote("Copyright © 2026 Bermudez Systems LLC. Free software under the GNU Affero General Public License v3: you may use, share and change it; it comes with no warranty. Rendering, text and search: MuPDF (AGPL-3.0). Page editing: PDFsharp (MIT). Nothing you open leaves this computer.");
         if (AppEnvironment.IsPackaged) dlg.AddNote("Installed as an app package; Windows keeps it up to date.");
         var notices = dlg.Add(null, new Button { Content = "Third-party notices…", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) });
         notices.Click += (_, _) => ShowThirdPartyNotices(dlg);
+        var source = dlg.Add(null, new Button { Content = "Source code (GitHub)", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) });
+        source.Click += (_, _) => Shell.Open(SourceUrl);
         dlg.ShowModal();
     }
 
