@@ -297,6 +297,10 @@ public sealed partial class PageViewer
     private bool HandleFormMouseDown(MouseButtonEventArgs e, int page, Point sp)
     {
         if (page < 0) return false;
+        // Tools that mark up the page (drawing, notes, redaction, snapshots, signatures) work over form fields too, as in
+        // Acrobat: a stroke that starts on a field draws instead of focusing it.
+        if (DrawTools.IsDrawTool(_tool) || _tool is ViewerTool.AddNote or ViewerTool.Redact or ViewerTool.Snapshot or ViewerTool.PlaceSignature or ViewerTool.AddSignature)
+            return false;
         if (WidgetAt(page, ToPagePoint(page, sp)) is { Kind: FormFieldKind.PushButton } button)
         {
             // Pressed until released: the down action runs now, the up action (and /A) on release inside the button.
