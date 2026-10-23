@@ -63,27 +63,22 @@ public static class PdfSecurity
     /// <exception cref="ArgumentException">Neither password was given.</exception>
     /// <exception cref="OwnerPasswordRequiredException">The document is encrypted and <paramref name="password"/> isn't its owner password.</exception>
     /// <exception cref="SignaturesWouldBreakException">The document is signed and the rewrite wasn't allowed.</exception>
-    public static byte[] Protect(byte[] data, string? password, string? userPassword, string? ownerPassword, PdfPermissions? permissions = null)
+    /// <param name="method">AES-256 (default) or AES-128 (for readers older than Acrobat 9).</param>
+    public static byte[] Protect(byte[] data, string? password, string? userPassword, string? ownerPassword, PdfPermissions? permissions = null,
+        EncryptionMethod method = EncryptionMethod.Aes256)
     {
         permissions ??= PdfPermissions.All;
         if (string.IsNullOrEmpty(userPassword) && string.IsNullOrEmpty(ownerPassword))
             throw new ArgumentException("Protecting a PDF needs an open password or a permissions password.", nameof(ownerPassword));
+        if (method is not (EncryptionMethod.Aes256 or EncryptionMethod.Aes128))
+            throw new ArgumentException("PdfDesk encrypts with AES-256 or AES-128.", nameof(method));
         if (string.IsNullOrEmpty(ownerPassword))
             ownerPassword = permissions.IsUnrestricted ? userPassword! : Convert.ToBase64String(RandomNumberGenerator.GetBytes(24));
 
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
+        KeptProtection.Forget(doc);
         SignedEdits.RequireRewrite(data, doc, "encrypting rewrites the whole file");
-        var s = doc.SecuritySettings;
-        doc.SecurityHandler.SetEncryptionToV5(true);
-        s.UserPassword = userPassword ?? "";
-        s.OwnerPassword = ownerPassword;
-        s.PermitPrint = permissions.Print != PrintPermission.None;
-        s.PermitFullQualityPrint = permissions.Print == PrintPermission.HighResolution;
-        s.PermitExtractContent = permissions.Copy;
-        s.PermitModifyDocument = permissions.Modify;
-        s.PermitAnnotations = permissions.Annotate;
-        s.PermitFormsFill = permissions.FillForms;
-        s.PermitAssembleDocument = permissions.Assemble;
+        KeptProtection.Apply(doc, method, userPassword ?? "", ownerPassword, permissions);
         doc.Info.ModificationDate = DateTime.Now;
         return PdfObj.Save(doc, rewrite: true);
     }
@@ -96,6 +91,7 @@ public static class PdfSecurity
     {
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         if (!IsEncrypted(doc)) return data;
+        KeptProtection.Forget(doc);
         SignedEdits.RequireRewrite(data, doc, "removing the encryption rewrites the whole file");
         doc.SecurityHandler.SetEncryptionToNoneAndResetPasswords();
         doc.Info.ModificationDate = DateTime.Now;
@@ -137,6 +133,10 @@ public static class PdfSecurity
         }
     }
 
+    /// <summary>True when <paramref name="password"/> is the encrypted document's open (user) password, not just its owner password.</summary>
+    public static bool IsOpenPassword(byte[] data, string? password) =>
+        !string.IsNullOrEmpty(password) && NeedsOpenPassword(data) && KeptProtection.OpensAsUser(data, password);
+
     /// <summary>The permissions a /P value grants under security handler revision <paramref name="revision"/>.</summary>
     internal static PdfPermissions Permissions(double p, int revision)
     {
@@ -168,7 +168,7 @@ public static class PdfSecurity
         doc.SecurityHandler.Elements.ContainsKey("/Filter");
 
     /// <summary>MuPDF tells cheaply whether the empty user password opens the document.</summary>
-    private static bool NeedsOpenPassword(byte[] data)
+    internal static bool NeedsOpenPassword(byte[] data)
     {
         try
         {

@@ -87,8 +87,6 @@ public partial class DocumentTab : UserControl, IDisposable
     private readonly ObservableCollection<SearchHit> _results = [];
     private int _thumbGeneration;
     private bool _syncingSelection;
-    private bool _protectionWarned;
-    private bool _outlineJustNavigated;
     private readonly LinkedList<ThumbItem> _thumbsWithImages = new();
     private const int MaxThumbImages = 300;
 
@@ -270,25 +268,7 @@ public partial class DocumentTab : UserControl, IDisposable
             }
         };
 
-        // A click that changes the selection navigates once; clicking the already-selected bookmark navigates again.
-        Outline.SelectedItemChanged += (_, e) =>
-        {
-            if (e.NewValue is not OutlineNode n) return;
-            _outlineJustNavigated = Mouse.LeftButton == MouseButtonState.Pressed;
-            NavigateTo(n);
-        };
-        Outline.PreviewMouseLeftButtonUp += (_, e) =>
-        {
-            var again = !_outlineJustNavigated;
-            _outlineJustNavigated = false;
-            // Only a click on the selected bookmark's own header re-navigates (not the expander, the scroll bar or blank space).
-            if (again && Outline.SelectedItem is OutlineNode n && HeaderItemUnder(e.OriginalSource) is { IsSelected: true } item && ReferenceEquals(item.DataContext, n))
-                NavigateTo(n);
-        };
-        // Screen readers name each bookmark by its title (not the record's ToString()); nested items inherit the style.
-        var treeItemStyle = new Style(typeof(TreeViewItem), Outline.TryFindResource(typeof(TreeViewItem)) as Style);
-        treeItemStyle.Setters.Add(new Setter(System.Windows.Automation.AutomationProperties.NameProperty, new System.Windows.Data.Binding(nameof(OutlineNode.Title))));
-        Outline.ItemContainerStyle = treeItemStyle;
+        InitBookmarks(); // the Bookmarks pane: navigation and editing (DocumentTab.Bookmarks.cs)
 
         DiskBarClose.Click += (_, _) =>
         {
@@ -750,9 +730,10 @@ public partial class DocumentTab : UserControl, IDisposable
     // ───────────────────────────── Editing ─────────────────────────────
 
     /// <summary>Runs a page edit off the UI thread and commits it as one undo step. True when it was committed.</summary>
+    /// <param name="newPasswords">The edit changes the protection (protect, unprotect): the passwords that open the result.</param>
     public async Task<bool> RunEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false,
-        bool signaturesWarned = false) =>
-        await TryEdit(label, edit, goToPage, quiet, contentOnly, signaturesWarned) is EditOutcome.Done or EditOutcome.NoChange;
+        bool signaturesWarned = false, (string? Password, string? OpenPassword)? newPasswords = null) =>
+        await TryEdit(label, edit, goToPage, quiet, contentOnly, signaturesWarned, newPasswords) is EditOutcome.Done or EditOutcome.NoChange;
 
     /// <summary>
     /// <see cref="RunEdit"/> that says why nothing was committed: <see cref="EditOutcome.NoChange"/> (the edit returned the
@@ -761,8 +742,9 @@ public partial class DocumentTab : UserControl, IDisposable
     /// password/signature warning) or <see cref="EditOutcome.Failed"/> (the edit threw, or the file isn't a PDF).
     /// </summary>
     /// <param name="signaturesWarned">The caller already said the edit breaks signatures (redaction): don't ask again.</param>
+    /// <param name="newPasswords">The edit changes the protection (protect, unprotect): the passwords that open the result.</param>
     public async Task<EditOutcome> TryEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false,
-        bool signaturesWarned = false)
+        bool signaturesWarned = false, (string? Password, string? OpenPassword)? newPasswords = null)
     {
         if (!Session.IsPdf)
         {
@@ -772,7 +754,7 @@ public partial class DocumentTab : UserControl, IDisposable
         if (_disposed) return EditOutcome.Failed;
         if (IsBusy) return EditOutcome.Busy;
         BusyLease? hold = null;
-        if ((Session.Engine.IsEncrypted && !_protectionWarned) || NeedsSignedWarning)
+        if (NeedsSignedWarning)
         {
             // Hold the tab while the warning is open, so an edit started meanwhile waits (Busy) instead of slipping in
             // or opening a second prompt. No veil: the prompt is the only thing on screen.
@@ -780,7 +762,7 @@ public partial class DocumentTab : UserControl, IDisposable
             var go = false;
             try
             {
-                go = ConfirmProtectedEdit() && ConfirmSignedEdit();
+                go = ConfirmSignedEdit();
             }
             finally
             {
@@ -804,13 +786,32 @@ public partial class DocumentTab : UserControl, IDisposable
             byte[] result;
             SignedEditReport report;
             var rewrite = _signatureWarned; // already accepted that edits break the signatures (encrypted signed file)
+            // An encrypted document keeps its protection through the edit; AES-256 opened with the owner password needs
+            // its open password for that (asked once, see KeptProtection).
+            var openPassword = Session.OpenPassword;
+            var dropOpenPassword = false;
             while (true)
             {
                 try
                 {
                     var allowRewrite = rewrite;
-                    (result, report) = await Task.Run(() => SignedEdits.Run(() => edit(data, password), allowRewrite));
+                    var (open, drop) = (openPassword, dropOpenPassword);
+                    (result, report) = await Task.Run(() => KeptProtection.Run(open, drop, () => SignedEdits.Run(() => edit(data, password), allowRewrite)));
                     break;
+                }
+                catch (OpenPasswordUnknownException) when (!_disposed)
+                {
+                    switch (SecurityActions.PromptOpenPassword(Window.GetWindow(this), Session.DisplayName, data))
+                    {
+                        case null:
+                            return EditOutcome.Declined;
+                        case { DropIt: true }:
+                            dropOpenPassword = true;
+                            break;
+                        case { Password: var given }:
+                            openPassword = given;
+                            break;
+                    }
                 }
                 catch (OwnerPasswordRequiredException ex) when (!_disposed)
                 {
@@ -829,6 +830,7 @@ public partial class DocumentTab : UserControl, IDisposable
             }
             if (_disposed) return EditOutcome.Failed;
             if (password is not null && password != Session.Password) Session.UsePassword(password); // only once it worked
+            if (openPassword != Session.OpenPassword) Session.UseOpenPassword(openPassword);
             if (ReferenceEquals(result, data)) return EditOutcome.NoChange; // nothing to do: no undo step
             // Signed document: an edit a signature doesn't allow (a page change, or one that couldn't be appended and
             // rewrites the file) shows that signature as invalid from then on. Say so before it happens.
@@ -841,7 +843,8 @@ public partial class DocumentTab : UserControl, IDisposable
             _contentOnlyCommit = contentOnly;
             try
             {
-                Session.Commit(result, label);
+                if (newPasswords is { } np) Session.Commit(result, label, np.Password, np.OpenPassword);
+                else Session.Commit(result, label, Session.Password, dropOpenPassword ? null : Session.OpenPassword);
             }
             finally
             {
@@ -878,15 +881,6 @@ public partial class DocumentTab : UserControl, IDisposable
         {
             EndWrite();
         }
-    }
-
-    private bool ConfirmProtectedEdit()
-    {
-        if (!Session.Engine.IsEncrypted || _protectionWarned) return true;
-        if (!Prompt.Confirm(Window.GetWindow(this), "This PDF is password-protected",
-                "After a page edit it is saved without its password protection.", "Edit anyway", warning: true)) return false;
-        _protectionWarned = true;
-        return true;
     }
 
     public void Undo()
@@ -992,6 +986,7 @@ public partial class DocumentTab : UserControl, IDisposable
 
     private void OnContentChanged(object? sender, EventArgs e)
     {
+        _readAloud?.Stop(); // it reads the old pages' text
         CancelSearch();
         _results.Clear();
         _searched = null;
@@ -1138,7 +1133,7 @@ public partial class DocumentTab : UserControl, IDisposable
 
         if (e.Data.GetData(PagesFormat) is PageDragData d)
             e.Effects = d.Source == this ? DragDropEffects.Move : DragDropEffects.Copy;
-        else if (DroppedPdfs(e).Length > 0)
+        else if (DroppedPdfs(e).Length > 0 || FileTools.DroppedImages(e).Length > 0)
             e.Effects = DragDropEffects.Copy;
         else
             return;
@@ -1165,6 +1160,12 @@ public partial class DocumentTab : UserControl, IDisposable
     {
         if (!Session.IsPdf || IsBusy) return;
         var pages = e.Data.GetData(PagesFormat) as PageDragData;
+        if (pages is null && FileTools.DroppedImages(e) is { Length: > 0 } images)
+        {
+            // Image files become pages here (after the drop completes, so Explorer isn't held).
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _ = FileTools.InsertImages(this, images, before));
+            return;
+        }
         var files = pages is null ? DroppedPdfs(e) : [];
         if (pages is null && files.Length == 0) return;
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _ = DropPagesAsync(pages, files, before));
@@ -1283,18 +1284,6 @@ public partial class DocumentTab : UserControl, IDisposable
     }
 
     // ───────────────────────────── Bookmarks ─────────────────────────────
-
-    private void LoadOutline()
-    {
-        var outline = Session.Engine.GetOutline();
-        Outline.ItemsSource = outline;
-        NoBookmarks.Visibility = outline.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void NavigateTo(OutlineNode node)
-    {
-        if (node.PageIndex >= 0 && node.PageIndex < Viewer.PageCount) Viewer.GoToPage(node.PageIndex, node.TargetY);
-    }
 
     /// <summary>The tree item whose header (not expander, not children, not a scroll bar) is under the mouse, if any.</summary>
     private static TreeViewItem? HeaderItemUnder(object source)
@@ -1814,6 +1803,7 @@ public partial class DocumentTab : UserControl, IDisposable
         _idle?.TrySetResult();
         _writesDone?.TrySetResult();
         _formQueue.Clear();
+        _readAloud?.Dispose();
         SaveViewState();
         CancelSearch();
         _scheduler.Dispose();

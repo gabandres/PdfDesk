@@ -80,7 +80,11 @@ internal static class PdfObj
             var stream = new MemoryStream(data, writable: false);
             var doc = string.IsNullOrEmpty(password) ? PdfReader.Open(stream, mode) : PdfReader.Open(stream, password, mode);
             // A signed document opened for editing: remember its original objects so the save can be incremental.
-            if (mode == PdfDocumentOpenMode.Modify) Incremental.Track(doc, data, password);
+            if (mode == PdfDocumentOpenMode.Modify)
+            {
+                Incremental.Track(doc, data, password);
+                KeptProtection.Track(doc, data, password); // encrypted: the edit is saved with the same protection
+            }
             return doc;
         }
         catch (PdfReaderException ex)
@@ -115,6 +119,7 @@ internal static class PdfObj
     {
         var xmp = Xmp.Read(doc);
         if (!rewrite && Incremental.Save(doc, xmp) is { } appended) return appended;
+        KeptProtection.Reapply(doc);
         using var ms = new MemoryStream();
         doc.Save(ms, false);
         return Xmp.Patch(ms, doc.Info, xmp);

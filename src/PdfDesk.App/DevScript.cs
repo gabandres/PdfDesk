@@ -467,6 +467,17 @@ internal static class DevScript
                 timer.Start();
                 break;
             }
+            // File tools, bookmarks, Read Aloud: openpw pw|drop|cancel (answers the next open-password prompt) · security ·
+            // bookmarks · bookmark add Title | child path Title | rename path Title | delete path | move path parent index |
+            // dest path (paths are 0-based, dotted: 1.0) · readaloud (toggle) · readaloud-state · readaloud-skip 1|-1
+            case "openpw": OpenPasswords.Enqueue(arg == "cancel" ? null : arg == "drop" ? new OpenPasswordAnswer(null, true) : new OpenPasswordAnswer(arg, false)); break;
+            case "security": log.Add($"security: {SecurityActions.Describe(tab!.Session)} password={(tab.Session.Password is null ? "none" : "set")} open={(tab.Session.OpenPassword is null ? "none" : "set")}"); break;
+            case "bookmarks": log.Add($"bookmarks: {tab!.DevBookmarks()}"); break;
+            case "bookmark": log.Add($"bookmark: {await tab!.DevBookmark(arg)}"); break;
+            case "readaloud": await tab!.ToggleReadAloud(); break;
+            case "readaloud-state": log.Add($"readaloud: {tab!.ReadAloudPlayer.State}"); break;
+            case "readaloud-skip": tab!.ReadAloudPlayer.DevSkip(int.Parse(arg)); break;
+            case "dropimages": log.Add($"dropimages handled: {FileTools.HandleWindowDrop(window, arg.Split(';'))}"); break; // as if dropped on the window
             case "exit": break;
             default: log.Add($"unknown step: {line}"); break;
         }
@@ -543,6 +554,11 @@ internal static class DevScript
     /// false when nothing is queued (show the real dialog).
     /// </summary>
     internal static bool TakeSavePath(out string? path) => SavePaths.TryDequeue(out path);
+
+    private static readonly Queue<OpenPasswordAnswer?> OpenPasswords = new();
+
+    /// <summary>The scripted answer to the next open-password prompt (<c>openpw</c>), if any (a null answer = cancel).</summary>
+    internal static bool TakeOpenPassword(out OpenPasswordAnswer? answer) => OpenPasswords.TryDequeue(out answer);
 
     /// <summary>
     /// <c>mouse move|down|up|click|dbl|right page x y</c>: mouse messages at a page point (points, top-left origin; scrolled
@@ -699,9 +715,11 @@ internal static class DevScript
         var combos = Descendants<System.Windows.Controls.ComboBox>(dlg).ToList();
         var texts = Descendants<System.Windows.Controls.TextBox>(dlg).Where(t => t.TemplatedParent is null).ToList();
         var checks = Descendants<System.Windows.Controls.CheckBox>(dlg).ToList();
+        var passwords = Descendants<System.Windows.Controls.PasswordBox>(dlg).ToList();
         foreach (var s in settings.Where(s => s.Length == 2))
         {
-            if (s[0].StartsWith("combo")) combos[int.Parse(s[0][5..])].SelectedIndex = int.Parse(s[1]);
+            if (s[0].StartsWith("pw")) passwords[int.Parse(s[0][2..])].Password = s[1].Replace("{sp}", " ");
+            else if (s[0].StartsWith("combo")) combos[int.Parse(s[0][5..])].SelectedIndex = int.Parse(s[1]);
             else if (s[0].StartsWith("text")) texts[int.Parse(s[0][4..])].Text = s[1].Replace("{sp}", " ");
             else if (s[0].StartsWith("check")) checks[int.Parse(s[0][5..])].IsChecked = s[1] == "on";
         }

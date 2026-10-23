@@ -135,4 +135,18 @@ public static class Cmd
     public static readonly RoutedUICommand Redact = Make("_Redact", nameof(Redact));
     public static readonly RoutedUICommand RecognizeText = Make("Recognize Te_xt (OCR)…", nameof(RecognizeText));
     public static readonly RoutedUICommand ReloadFromDisk = Make("Re_load from Disk", nameof(ReloadFromDisk), K(Key.F5));
+
+    // File: create, protect, reduce (see FileTools, SecurityActions)
+    public static readonly RoutedUICommand NewFromImages = Make("New from _Images…", nameof(NewFromImages));
+    public static readonly RoutedUICommand NewFromClipboard = Make("New from Clip_board", nameof(NewFromClipboard), K(Key.N, ModifierKeys.Control | ModifierKeys.Alt));
+    public static readonly RoutedUICommand ProtectPassword = Make("Protect with Pass_word…", nameof(ProtectPassword));
+    public static readonly RoutedUICommand RemoveProtection = Make("Remove Pro_tection…", nameof(RemoveProtection));
+    public static readonly RoutedUICommand ReduceSize = Make("Reduce File Si_ze…", nameof(ReduceSize));
+    public static readonly RoutedUICommand Flatten = Make("_Flatten Comments and Fields…", nameof(Flatten));
+
+    // Bookmarks pane (Ctrl+B adds one for the current view, as in Acrobat)
+    public static readonly RoutedUICommand AddBookmark = Make("Add _Bookmark", nameof(AddBookmark), K(Key.B, ModifierKeys.Control));
+
+    // Read Aloud (Ctrl+Shift+Y, as in Acrobat)
+    public static readonly RoutedUICommand ReadAloud = Make("Read _Aloud", nameof(ReadAloud), K(Key.Y, ModifierKeys.Control | ModifierKeys.Shift));
 }

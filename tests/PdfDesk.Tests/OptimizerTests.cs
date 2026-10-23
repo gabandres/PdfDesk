@@ -128,10 +128,14 @@ public class OptimizerTests
     {
         var pdf = PdfSecurity.Protect(Bloated(), null, "open", "owner");
         Assert.Throws<OwnerPasswordRequiredException>(() => Optimizer.Optimize(pdf, "open"));
-        var result = Optimizer.Optimize(pdf, "owner");
+        // AES-256: the open password can't be recovered from the owner password, so the caller passes it on.
+        Assert.Throws<OpenPasswordUnknownException>(() => Optimizer.Optimize(pdf, "owner"));
+        var result = KeptProtection.Run("open", false, () => Optimizer.Optimize(pdf, "owner"));
         Assert.True(result.SizeAfter * 10 < result.SizeBefore);
         Assert.Equal(1, result.ImagesDownsampled);
-        // Like every Core edit of an encrypted file, the result is saved without encryption (see PdfSecurity.Protect).
+        // Like every Core edit of an encrypted file, the result keeps the protection.
+        Assert.Throws<PasswordRequiredException>(() => PdfEngine.Open(result.Data, InputFileTypes.PDF, null));
+        Assert.Equal(EncryptionMethod.Aes256, PdfSecurity.ReadSecurity(result.Data, "open").Method);
         using var engine = PdfEngine.Open(result.Data, InputFileTypes.PDF, "open");
         Assert.Contains("Hello optimizer", engine.GetText(0).Text);
     }

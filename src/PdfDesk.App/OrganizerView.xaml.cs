@@ -521,7 +521,7 @@ public partial class OrganizerView : UserControl
         e.Effects = DragDropEffects.None;
         if (_tab is null || !_tab.Session.IsPdf || _tab.IsBusy) return;
         if (e.Data.GetData(PagesFormat) is PageDragData d) e.Effects = d.Source == _tab ? DragDropEffects.Move : DragDropEffects.Copy;
-        else if (DocumentTab.DroppedPdfs(e).Length > 0) e.Effects = DragDropEffects.Copy;
+        else if (DocumentTab.DroppedPdfs(e).Length > 0 || FileTools.DroppedImages(e).Length > 0) e.Effects = DragDropEffects.Copy;
         else return;
 
         // Auto-scroll near the edges while dragging.

@@ -92,6 +92,8 @@
                                     <MenuItem Command="app:Cmd.Open" />
                                     <MenuItem x:Name="RecentMenu" Header="Open _Recent" />
                                     <MenuItem Command="app:Cmd.Combine" />
+                                    <MenuItem Command="app:Cmd.NewFromImages" />
+                                    <MenuItem Command="app:Cmd.NewFromClipboard" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Save" />
                                     <MenuItem Command="app:Cmd.SaveAs" />
@@ -101,6 +103,9 @@
                                     <MenuItem Command="app:Cmd.Print" />
                                     <MenuItem Command="app:Cmd.ExportImages" />
                                     <MenuItem Command="app:Cmd.Properties" />
+                                    <MenuItem Command="app:Cmd.ProtectPassword" />
+                                    <MenuItem Command="app:Cmd.RemoveProtection" />
+                                    <MenuItem Command="app:Cmd.ReduceSize" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.CloseDoc" />
                                     <MenuItem Command="app:Cmd.CloseAll" />
@@ -159,6 +164,8 @@
                                     <Separator />
                                     <MenuItem x:Name="NavPaneMenu" Command="app:Cmd.NavPane" />
                                     <MenuItem Header="_Bookmarks" Click="OnShowBookmarks" />
+                                    <MenuItem Command="app:Cmd.AddBookmark" />
+                                    <MenuItem x:Name="ReadAloudMenu" Command="app:Cmd.ReadAloud" />
                                     <MenuItem Header="_Theme">
                                         <MenuItem x:Name="ThemeSystemMenu" Header="Use _Windows setting" Click="OnThemeMenu" Tag="System" />
                                         <MenuItem x:Name="ThemeLightMenu" Header="_Light" Click="OnThemeMenu" Tag="Light" />
@@ -188,6 +195,7 @@
                                     <MenuItem Command="app:Cmd.ReversePages" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.CropPages" />
+                                    <MenuItem Command="app:Cmd.Flatten" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Combine" />
                                 </MenuItem>

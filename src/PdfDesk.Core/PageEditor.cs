@@ -147,6 +147,7 @@ public static class PageEditor
         return Edit(data, password, doc =>
         {
             if (!keep.Any(i => i >= 0 && i < doc.PageCount)) throw new InvalidOperationException("No pages selected.");
+            KeptProtection.Forget(doc); // a new document: saved without the password protection
             PdfStructure.RemovePages(doc, Enumerable.Range(0, doc.PageCount).Where(i => !keep.Contains(i)));
         }, rewrite: true);
     }
@@ -307,6 +308,7 @@ public static class PageEditor
         if (!rewrite && Incremental.Save(doc, xmp) is { } appended) return appended;
         doc.Options.CompressContentStreams = true;
         doc.Options.NoCompression = false;
+        KeptProtection.Reapply(doc);
         using var ms = new MemoryStream();
         doc.Save(ms, closeStream: false);
         return Xmp.Patch(ms, doc.Info, xmp);
