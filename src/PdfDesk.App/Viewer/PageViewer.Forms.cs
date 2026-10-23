@@ -582,12 +582,13 @@ public sealed partial class PageViewer
 
     // ───────────────────────────── Editor plumbing ─────────────────────────────
 
-    private void ShowEditor(FrameworkElement editor, FormWidget? widget, (int, Point, string?, double)? stamp)
+    private void ShowEditor(FrameworkElement editor, FormWidget? widget, (int, Point, string?, double)? stamp, DrawingTextEdit? drawing = null)
     {
         CloseEditor();
         _editor = editor;
         _editorWidget = widget;
         _editorStamp = stamp;
+        _editorDrawing = drawing;
         editor.PreviewKeyDown += OnEditorKey;
         editor.LostKeyboardFocus += OnEditorLostFocus;
         if (widget is not null && editor is TextBox box && (widget.Triggers & FormTriggers.Keystroke) != 0 && Keystrokes is { } keys)
@@ -657,6 +658,10 @@ public sealed partial class PageViewer
             Canvas.SetTop(_editor, r.Y + s.Pt.Y * k - 1);
             if (_editor is TextBox tb) tb.FontSize = s.Size * k;
         }
+        else if (_editorDrawing is { } d && d.Page < _rects.Length && !_rects[d.Page].IsEmpty)
+        {
+            PositionDrawingEditor(d, k);
+        }
         else
         {
             _editor.Visibility = Visibility.Collapsed;
@@ -668,12 +673,18 @@ public sealed partial class PageViewer
         var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
         switch (e.Key)
         {
+            case Key.Escape when _editorDrawing is not null:
+                // A text box keeps what was typed (as in Acrobat): Esc only leaves it.
+                CommitEditor();
+                Focus();
+                e.Handled = true;
+                break;
             case Key.Escape:
                 CloseEditor();
                 Focus();
                 e.Handled = true;
                 break;
-            case Key.Enter when _editorWidget is { Multiline: false } || (_editorStamp is not null && !shift && Keyboard.Modifiers == ModifierKeys.Control):
+            case Key.Enter when _editorWidget is { Multiline: false } || ((_editorStamp is not null || _editorDrawing is not null) && !shift && Keyboard.Modifiers == ModifierKeys.Control):
                 CommitEditor();
                 Focus();
                 e.Handled = true;
@@ -696,6 +707,8 @@ public sealed partial class PageViewer
         // Moving into the combo box's own dropdown is not leaving the editor.
         if (sender is ComboBox c && (c.IsDropDownOpen || c.IsKeyboardFocusWithin)) return;
         if (e.NewFocus is DependencyObject d && sender is DependencyObject s && IsDescendant(s, d)) return;
+        // The drawing style bar works on the open text box (it hands the focus back).
+        if (_editorDrawing is not null && e.NewFocus is DependencyObject f && EditorCompanion is { } companion && IsDescendant(companion, f)) return;
         CommitEditor();
     }
 
@@ -736,6 +749,10 @@ public sealed partial class PageViewer
                 if (text.Length > 0 || s.Id is not null)
                     StampEdited?.Invoke(this, new StampEdit(s.Page, MeasureStamp(s.Pt, text, s.Size), StampKind.Text, text, s.Size, s.Id));
             }
+            else if (_editorDrawing is { } dt && _editor is TextBox dtb)
+            {
+                CommitDrawingText(dt, dtb.Text);
+            }
         }
         finally
         {
@@ -764,7 +781,10 @@ public sealed partial class PageViewer
         _editor = null;
         _editorWidget = null;
         _editorStamp = null;
+        var hadDrawing = _editorDrawing is not null;
+        _editorDrawing = null;
         _surface.InvalidateVisual();
+        if (hadDrawing) DrawingSelectionChanged?.Invoke(this, EventArgs.Empty);
         if (closed is not null) RaiseAction(closed, FormTrigger.Blur);
     }
 

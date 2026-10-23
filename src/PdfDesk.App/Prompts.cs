@@ -146,6 +146,14 @@ public static class ShortcutsWindow
             ("Organize pages", "Move the selected pages", "Alt+Shift+arrow keys"),
             ("Organize pages", "Open the page", "Enter or double-click"),
             ("Organize pages", "Back to reading", "Esc"),
+            ("Drawing", "Square, circle, or a line at 45°", "Shift while dragging"),
+            ("Drawing", "Back to the hand tool", "Esc"),
+            ("Drawing", "Select a drawing", "Click it (hand tool)"),
+            ("Drawing", "Move the selected drawing", "Drag, or arrow keys (Shift: 10 pt)"),
+            ("Drawing", "Resize the selected drawing", "Drag a handle (Shift keeps the shape)"),
+            ("Drawing", "Delete the selected drawing", "Del"),
+            ("Drawing", "Edit a text box or callout", "Double-click or Enter"),
+            ("Drawing", "Finish typing in a text box", "Esc, Ctrl+Enter or click outside"),
             ("Anywhere", "Search all commands", Cmd.GestureText(Cmd.CommandPalette) ?? ""),
         ]);
 

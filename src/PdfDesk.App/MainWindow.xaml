@@ -202,6 +202,8 @@
                                     <MenuItem Command="app:Cmd.Underline" />
                                     <MenuItem Command="app:Cmd.StrikeOut" />
                                     <MenuItem x:Name="NoteMenu" Command="app:Cmd.AddNote" />
+                                    <!-- Pen, highlighter, shapes, lines, text boxes: filled in code (MainWindow.BuildDrawMenu) -->
+                                    <MenuItem x:Name="DrawMenu" Header="_Draw" />
                                     <Separator />
                                     <MenuItem x:Name="AttachMenu" Header="Attach a _File…" Click="OnAttachFile" />
                                     <MenuItem Command="app:Cmd.RecognizeText" />
@@ -220,7 +222,7 @@
                                 </MenuItem>
                             </Menu>
                             <!-- Tooltips name the action; the shortcut is added from the command's own gestures (Cmd.AddShortcutsToTips).
-                                 Letter keys (H, T, G, A, K, X) are page-view keys, not commands, so they are written here. -->
+                                 Letter keys (H, T, G, A, K, X and the drawing tools') are page-view keys, not commands, so they are written here. -->
                             <!-- Without a document only Combine applies; with one it moves into the document commands -->
                             <Button x:Name="NoDocCombineButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Command="app:Cmd.Combine"
                                     ToolTip="Combine several PDFs into one" Content="&#xE8F1;" />
@@ -256,6 +258,15 @@
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text" AutomationProperties.Name="Highlight" />
                                 <ToggleButton x:Name="NoteButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE90A;" ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />
+                                <!-- Drawing tools: one dropdown keeps the bar to one row; the icon is the last tool used -->
+                                <ToggleButton x:Name="DrawButton" Style="{StaticResource CommandButton}" Click="OnDrawClick" AutomationProperties.Name="Draw"
+                                              ToolTip="Draw: pen, highlighter, rectangle, ellipse, line, arrow, text box, callout">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock x:Name="DrawButtonIcon" Style="{StaticResource Icon}" Text="&#xE70F;" FontSize="15" />
+                                        <TextBlock Text="Draw" Margin="8,0,0,0" VerticalAlignment="Center" app:ToolbarPanel.IsLabel="True" />
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE70D;" FontSize="9" Margin="6,2,0,0" />
+                                    </StackPanel>
+                                </ToggleButton>
                                 <ToggleButton x:Name="RedactButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redact" Content="&#xE73B;"
                                               ToolTip="Redact: drag over areas to black out, then apply (removes the content for good)" AutomationProperties.Name="Redact" />
                                 <Border Style="{StaticResource BarSeparator}" />

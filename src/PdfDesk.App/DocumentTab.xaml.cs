@@ -761,8 +761,10 @@ public partial class DocumentTab : UserControl, IDisposable
     /// password/signature warning) or <see cref="EditOutcome.Failed"/> (the edit threw, or the file isn't a PDF).
     /// </summary>
     /// <param name="signaturesWarned">The caller already said the edit breaks signatures (redaction): don't ask again.</param>
+    /// <param name="veil">Cover the tab with a progress veil if the edit takes long. Off for quick annotation edits made while
+    /// drawing: the next stroke must reach the page (it waits for this edit, the tab stays busy meanwhile).</param>
     public async Task<EditOutcome> TryEdit(string label, Func<byte[], string?, byte[]> edit, int? goToPage = null, bool quiet = false, bool contentOnly = false,
-        bool signaturesWarned = false)
+        bool signaturesWarned = false, bool veil = true)
     {
         if (!Session.IsPdf)
         {
@@ -794,7 +796,7 @@ public partial class DocumentTab : UserControl, IDisposable
             }
         }
 
-        using var busy = BeginBusy($"{label}…");
+        using var busy = BeginBusy(veil ? $"{label}…" : null);
         hold?.Dispose();
         BeginWrite();
         try

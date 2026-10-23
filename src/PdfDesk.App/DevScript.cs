@@ -10,10 +10,11 @@ namespace PdfDesk.App;
 /// Developer aid: <c>PdfDesk.exe file.pdf --script steps.txt</c> runs UI steps off-screen and saves window snapshots,
 /// so the UI can be verified without capturing the user's screen. One step per line:
 /// <c>wait ms · shot out.png · page N · zoom 150|fitwidth|fitpage · layout Continuous|Facing|… · find text ·
-/// findnext · tool hand|select|snapshot|addtext|check|note|redact · selectall · rotateview cw|ccw|0|90|180|270 · keys text (real key messages, Shift
+/// findnext · tool hand|select|snapshot|addtext|check|note|redact|pen|marker|rect|ellipse|line|arrow|textbox|callout · selectall · rotateview cw|ccw|0|90|180|270 · keys text (real key messages, Shift
 /// for capitals and symbols; {tab} {enter} {sp}; sent to the open dialog if there is one) · editor · nav pages|bookmarks|search · select 1,3 · rotate 90 ·
 /// delete · undo · redo · scroll dy · log text · exit</c>, plus <c>key Delete ctrl shift</c> (one WPF Key with modifiers),
-/// <c>focus</c> (log the focused element) and <c>annots</c> (log the comments). Review steps: <c>selecttext p x1 y1 x2 y2 ·
+/// <c>focus</c> (log the focused element) and <c>annots</c> (log the comments). Drawing: <c>drawings</c> (log them with their bounds and look) <c>·
+/// selectdrawing i|none · drawsel</c> (the selection, tool and style bar) <c>· drawstyle color #RRGGBB|thinner|thicker|smaller|larger|clearer|opaque|fill|border|start|end|delete</c>; draw with <c>tool pen</c> + <c>drag</c>. Review steps: <c>selecttext p x1 y1 x2 y2 ·
 /// highlight · underline · strikeout · note p x y text · editcomment i text · deletecomment i · selectcomment i ·
 /// commentfilter text · pane comments|attachments|layers|signatures · redact p x y w h · redact-text · redact-search ·
 /// apply-redactions [confirm] · attachments · attach path · extract i path · open-attachment i · remove-attachment i ·
@@ -75,7 +76,9 @@ internal static class DevScript
             case "layout": v!.SetLayout(Enum.Parse<ViewLayout>(arg, true)); break;
             case "rotateview" when arg is "cw" or "ccw": (arg == "cw" ? Cmd.RotateViewRight : Cmd.RotateViewLeft).Execute(null, window); break;
             case "rotateview": v!.SetViewRotation(int.Parse(arg)); break;
-            case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, "addtext" => ViewerTool.AddText, "check" => ViewerTool.AddCheck, "note" => ViewerTool.AddNote, "redact" => ViewerTool.Redact, _ => ViewerTool.Hand }; break;
+            case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, "addtext" => ViewerTool.AddText, "check" => ViewerTool.AddCheck, "note" => ViewerTool.AddNote, "redact" => ViewerTool.Redact,
+                "pen" => ViewerTool.Pen, "marker" or "highlighter" => ViewerTool.Highlighter, "rect" or "rectangle" => ViewerTool.Rectangle, "ellipse" => ViewerTool.Ellipse,
+                "line" => ViewerTool.Line, "arrow" => ViewerTool.Arrow, "textbox" => ViewerTool.TextBox, "callout" => ViewerTool.Callout, _ => ViewerTool.Hand }; break;
             case "selectall": v!.SelectAll(); break;
             case "find": Cmd.Find.Execute(null, window); SetFindText(tab!, arg); tab!.FindNext(false); break;
             case "findnext": tab!.FindNext(false); break;
@@ -127,6 +130,18 @@ internal static class DevScript
                 break;
             }
             case "annots": log.Add(Annotations(tab!)); break;
+            case "drawings": log.Add(Drawings(tab!)); break;
+            case "drawsel": log.Add($"selected drawing: {v!.SelectedDrawing?.Id ?? "(none)"} {(v.SelectedDrawing is { } sd ? CommentItem.TitleOf(sd) : "")}; tool={v.Tool}; editing text={v.EditingText?.Tool.ToString() ?? "no"}; style bar: {tab!.DevStyleBar}"); break;
+            case "selectdrawing": v!.SelectDrawing(arg == "none" ? null : tab!.DevDrawings[int.Parse(arg)].Id); break;
+            case "drawstyle":
+            {
+                // drawstyle color #RRGGBB | thinner | thicker | smaller | larger | clearer | opaque | fill | border | start | end | delete
+                var a = arg.Split(' ', 2);
+                tab!.DevStyle(a[0], a.Length > 1 ? a[1] : null);
+                await Task.Delay(500);
+                log.Add($"style bar: {tab.DevStyleBar}");
+                break;
+            }
             case "selecttext":
             {
                 // selecttext <page> <x1> <y1> <x2> <y2>: select the text between two page points (points, top-left origin).
@@ -153,7 +168,11 @@ internal static class DevScript
             }
             case "deletecomment": log.Add($"deletecomment: {await tab!.DeleteComment(tab.Comments.Where(c => !c.IsPdfDeskStamp).ElementAt(int.Parse(arg)))}"); break;
             case "selectcomment":
-                if (tab!.FindName("CommentList") is System.Windows.Controls.ListBox cl) cl.SelectedIndex = int.Parse(arg);
+                if (tab!.FindName("CommentList") is System.Windows.Controls.ListBox cl)
+                {
+                    cl.SelectedIndex = -1; // a fresh pick, like a click
+                    cl.SelectedIndex = int.Parse(arg);
+                }
                 break;
             case "commentfilter":
                 if (tab!.FindName("CommentFilter") is System.Windows.Controls.TextBox cf) cf.Text = arg;
@@ -757,6 +776,20 @@ internal static class DevScript
         var list = tab.Comments.Where(c => !c.IsPdfDeskStamp).ToList();
         return $"annots: {list.Count}" + string.Concat(list.Select(c =>
             $"\n  {c.Subtype} p{c.PageIndex + 1} {c.Rect.X:0},{c.Rect.Y:0} {c.Rect.Width:0}x{c.Rect.Height:0} quads={c.QuadRects.Count} by '{c.Author}' replyTo={c.ReplyTo ?? "-"}: '{Trunc(c.Contents)}'"));
+    }
+
+    /// <summary>The drawing annotations (index, kind, where, look), one line each.</summary>
+    private static string Drawings(DocumentTab tab)
+    {
+        var list = tab.DevDrawings;
+        return $"drawings: {list.Count}" + string.Concat(list.Select((a, i) =>
+        {
+            var b = a.Geometry!.Bounds;
+            var s = a.Style!;
+            return $"\n  [{i}] {CommentItem.TitleOf(a)} ({a.Subtype}) p{a.PageIndex + 1} bounds {b.X:0.#},{b.Y:0.#} {b.Width:0.#}x{b.Height:0.#} box {a.Geometry.Box.X:0.#},{a.Geometry.Box.Y:0.#} {a.Geometry.Box.Width:0.#}x{a.Geometry.Box.Height:0.#} " +
+                   $"paths={a.Geometry.Paths.Count}/{a.Geometry.Paths.Sum(p => p.Count)}pts callout={a.Geometry.Callout.Count} color={DrawStyles.Hex(s.Color) ?? "-"} fill={DrawStyles.Hex(s.Fill) ?? "-"} " +
+                   $"w={s.Width:0.#} op={s.Opacity:0.##} font={s.FontSize:0.#} ends={s.StartEnding}/{s.EndEnding} hl={s.Highlighter} '{Trunc(a.Contents)}'";
+        }));
     }
 
     private static Core.AttachmentInfo Attachment(DocumentTab tab, string nameOrIndex) =>
