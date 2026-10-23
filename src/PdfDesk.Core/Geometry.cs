@@ -35,3 +35,47 @@ public readonly record struct PageGeometry(double OriginX, double OriginY, doubl
 
 /// <summary>A point in page space: PDF points, origin at the page's top-left, y down.</summary>
 public readonly record struct PointD(double X, double Y);
+
+/// <summary>
+/// A view turned by a multiple of 90° clockwise (the file is unchanged): maps page-space points and rectangles of a
+/// <c>width</c> x <c>height</c> page into the turned page's own space (origin at its top-left, y down) and back.
+/// </summary>
+public static class RotatedView
+{
+    /// <summary>0, 90, 180 or 270 (any multiple of 90, negative too; other angles snap down to one).</summary>
+    public static int Normalize(int degrees) => ((degrees % 360) + 360) % 360 / 90 * 90;
+
+    /// <summary>The turned page's size.</summary>
+    public static (double Width, double Height) Size(double width, double height, int rotation) =>
+        rotation is 90 or 270 ? (height, width) : (width, height);
+
+    public static (double X, double Y) ToView(double x, double y, double width, double height, int rotation) => rotation switch
+    {
+        90 => (height - y, x),
+        180 => (width - x, height - y),
+        270 => (y, width - x),
+        _ => (x, y),
+    };
+
+    public static (double X, double Y) FromView(double x, double y, double width, double height, int rotation) => rotation switch
+    {
+        90 => (y, height - x),
+        180 => (width - x, height - y),
+        270 => (width - y, x),
+        _ => (x, y),
+    };
+
+    public static RectD ToView(RectD r, double width, double height, int rotation)
+    {
+        var (x0, y0) = ToView(r.X, r.Y, width, height, rotation);
+        var (x1, y1) = ToView(r.Right, r.Bottom, width, height, rotation);
+        return RectD.FromEdges(x0, y0, x1, y1);
+    }
+
+    public static RectD FromView(RectD r, double width, double height, int rotation)
+    {
+        var (x0, y0) = FromView(r.X, r.Y, width, height, rotation);
+        var (x1, y1) = FromView(r.Right, r.Bottom, width, height, rotation);
+        return RectD.FromEdges(x0, y0, x1, y1);
+    }
+}

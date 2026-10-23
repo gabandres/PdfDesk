@@ -69,7 +69,7 @@ public sealed partial class PageViewer
         for (var p = a.Page; p <= b.Page && p < count; p++)
             if (_texts.TryGetValue(p, out var t)) cached[p] = t;
         var total = Math.Min(b.Page, count - 1) - a.Page + 1;
-        return await Task.Run(() => BuildText(a, b, p => cached.TryGetValue(p, out var t) ? t : engine.GetText(p, cache: false), count,
+        return await Task.Run(() => BuildText(a, b, p => cached.TryGetValue(p, out var t) ? t : engine.GetText(p, cache: false, cancel), count,
             done => progress?.Report((done, total)), cancel), cancel);
     }
 
@@ -140,7 +140,7 @@ public sealed partial class PageViewer
         if (_engine is null || _scheduler is null || page < 0 || page >= PageCount || _texts.ContainsKey(page)) return;
         var engine = _engine;
         var gen = _generation;
-        _scheduler.Enqueue($"x{page}", RenderScheduler.BackgroundPriority + priority, _ => engine.GetText(page), result =>
+        _scheduler.Enqueue($"x{page}", RenderScheduler.BackgroundPriority + priority, ct => engine.GetText(page, cancel: ct), result =>
         {
             if (gen != _generation || result is not PageText t) return;
             _texts[page] = t;
@@ -233,31 +233,21 @@ public sealed partial class PageViewer
                 return new TextPos(page, t.LineAt(i).End);
             case Key.Up:
             {
-                var x = CaretRect(t, i)?.X ?? 0;
+                var (x, y) = CaretPoint(t, i);
                 var (start, _) = t.LineAt(i);
-                if (start > 0)
-                {
-                    var (ps, pe) = t.LineAt(start - 1);
-                    return new TextPos(page, NearestInLine(t, ps, pe, x));
-                }
+                if (start > 0) return new TextPos(page, t.NearestCaretInLine(start - 1, x, y));
                 if (page == 0) return new TextPos(0, 0);
                 if (TryGetPageText(page - 1) is not { } above) return null;
-                var (ls, le) = above.LineAt(above.Text.Length);
-                return new TextPos(page - 1, NearestInLine(above, ls, le, x));
+                return new TextPos(page - 1, above.NearestCaretInLine(above.Text.Length, x, y));
             }
             case Key.Down:
             {
-                var x = CaretRect(t, i)?.X ?? 0;
+                var (x, y) = CaretPoint(t, i);
                 var (_, end) = t.LineAt(i);
-                if (end < text.Length)
-                {
-                    var (ns, ne) = t.LineAt(end + 1);
-                    return new TextPos(page, NearestInLine(t, ns, ne, x));
-                }
+                if (end < text.Length) return new TextPos(page, t.NearestCaretInLine(end + 1, x, y));
                 if (page == last) return new TextPos(page, text.Length);
                 if (TryGetPageText(page + 1) is not { } next) return null;
-                var (fs, fe) = next.LineAt(0);
-                return new TextPos(page + 1, NearestInLine(next, fs, fe, x));
+                return new TextPos(page + 1, next.NearestCaretInLine(0, x, y));
             }
         }
         return c;
@@ -290,13 +280,12 @@ public sealed partial class PageViewer
         return null;
     }
 
-    /// <summary>The caret in [start, end] nearest to x (for moving between lines).</summary>
-    private static int NearestInLine(PageText t, int start, int end, double x)
-    {
-        for (var i = start; i < end; i++)
-            if (t.GetRects(i, i + 1) is [var r, ..] && x < r.CenterX) return i;
-        return end;
-    }
+    /// <summary>
+    /// The caret's middle in page space, to find the nearest caret on the next or previous line (measured along that
+    /// line's direction, so sideways and right-to-left lines work too).
+    /// </summary>
+    private static (double X, double Y) CaretPoint(PageText t, int caret) =>
+        CaretRect(t, caret) is { } r ? (r.X, r.CenterY) : (0, 0);
 
     private void RevealCaret(TextPos c)
     {

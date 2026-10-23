@@ -30,29 +30,68 @@ public sealed record PageLink(RectD Area, int PageIndex, string? Uri, double? Ta
 public sealed record RenderedImage(int Width, int Height, byte[] Pixels)
 {
     public int Stride => Width * 3;
+
+    /// <summary>The image turned clockwise by <paramref name="rotation"/> (0, 90, 180 or 270); itself for 0.</summary>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired (checked every few rows).</exception>
+    public RenderedImage Rotated(int rotation, CancellationToken cancel = default)
+    {
+        rotation = RotatedView.Normalize(rotation);
+        if (rotation == 0) return this;
+        var (w, h) = rotation == 180 ? (Width, Height) : (Height, Width);
+        var dst = GC.AllocateUninitializedArray<byte>(Pixels.Length);
+        var src = Pixels;
+        int sw = Width, sh = Height, dstStride = w * 3;
+        for (var y = 0; y < sh; y++)
+        {
+            if ((y & 63) == 0) cancel.ThrowIfCancellationRequested();
+            var s = y * sw * 3;
+            for (var x = 0; x < sw; x++, s += 3)
+            {
+                // Clockwise: 90 sends (x, y) to (h' - 1 - y, x); 180 to (w - 1 - x, h - 1 - y); 270 to (y, w - 1 - x).
+                var (dx, dy) = rotation switch
+                {
+                    90 => (sh - 1 - y, x),
+                    180 => (sw - 1 - x, sh - 1 - y),
+                    _ => (y, sw - 1 - x),
+                };
+                var d = dy * dstStride + dx * 3;
+                dst[d] = src[s];
+                dst[d + 1] = src[s + 1];
+                dst[d + 2] = src[s + 2];
+            }
+        }
+        return new RenderedImage(w, h, dst);
+    }
 }
 
 /// <summary>
 /// One open document in MuPDF. MuPDF is not thread-safe per document, so every call takes a lock; callers may use
 /// it from any thread (renders run on a background worker, hit-testing on the UI thread). Text, links and outline
 /// come from a second MuPDF instance of the same file with its own lock, so the UI never waits behind a render.
+/// Each instance keeps only the most recently used pages loaded (<see cref="LoadedPages"/>), so native memory stays
+/// bounded however far a long document is scrolled.
 /// </summary>
 public sealed class PdfEngine : IDisposable
 {
     private const int TextCacheSize = 48;
 
+    /// <summary>MuPDF pages (with their display lists) kept loaded per instance; older ones are freed.</summary>
+    internal const int LoadedPagesKept = 32;
+
     /// <summary>Largest render or image export allowed, in pixels (200 MP is 600 MB of BGR).</summary>
     public const long MaxPixels = 200_000_000;
 
-    // Lock order: _gate before _textGate (only Dispose takes both).
+    // Lock order: _gate before _textGate (only Dispose and the LoadedCounts test hook take both).
     private readonly Lock _gate = new();
     private readonly Lock _textGate = new();
     private readonly MuPDFContext _ctx;
     private readonly MuPDFDocument _doc;
+    private readonly LoadedPages _loaded;     // under _gate
     private readonly Func<MuPDFContext, MuPDFDocument> _reopen;
     private readonly string? _password;
     private MuPDFContext? _textCtx;
     private MuPDFDocument? _textDoc;
+    private LoadedPages? _textLoaded;         // under _textGate
     private readonly PageGeometry[] _pages;
     private readonly Dictionary<int, PageText> _textCache = [];
     private readonly LinkedList<int> _textLru = [];
@@ -71,9 +110,11 @@ public sealed class PdfEngine : IDisposable
         IsEncrypted = encrypted;
         _reopen = reopen;
         _password = password;
+        _loaded = new LoadedPages(doc, LoadedPagesKept);
         _pages = new PageGeometry[doc.Pages.Count];
         for (var i = 0; i < _pages.Length; i++)
         {
+            _loaded.Touch(i); // reading every page's size loads it: keep only the last few
             var b = doc.Pages[i].Bounds;
             _pages[i] = new PageGeometry(b.X0, b.Y0, b.Width, b.Height);
         }
@@ -156,6 +197,7 @@ public sealed class PdfEngine : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             cancel.ThrowIfCancellationRequested();
+            _loaded.Touch(page);
             var g = _pages[page];
             var r = region ?? new RectD(0, 0, g.Width, g.Height);
             var area = new Rectangle(g.OriginX + r.X, g.OriginY + r.Y, g.OriginX + r.Right, g.OriginY + r.Bottom);
@@ -191,6 +233,7 @@ public sealed class PdfEngine : IDisposable
             var scale = dpi / 72.0;
             var g = _pages[page];
             CheckSize(Math.Ceiling(g.Width * scale), Math.Ceiling(g.Height * scale));
+            _loaded.Touch(page);
             if (jpeg) _doc.SaveImageAsJPEG(page, scale, path, 90, includeAnnotations: true);
             else _doc.SaveImage(page, scale, PixelFormats.RGB, path, RasterOutputFileTypes.PNG, includeAnnotations: true);
         }
@@ -299,13 +342,43 @@ public sealed class PdfEngine : IDisposable
             throw;
         }
         _textCtx = ctx;
+        _textLoaded = new LoadedPages(doc, LoadedPagesKept);
         return _textDoc = doc;
     }
 
-    /// <summary>The page's text layer (cached; cheap to call repeatedly from the UI).</summary>
-    public PageText GetText(int page, bool cache = true)
+    /// <summary>The text instance with <paramref name="page"/> marked as just used. Call under _textGate.</summary>
+    private MuPDFDocument TextDoc(int page)
     {
-        lock (_textGate)
+        var doc = TextDoc();
+        _textLoaded!.Touch(page);
+        return doc;
+    }
+
+    /// <summary>
+    /// Takes the text lock. While another page's text is being read it waits, but gives up as soon as
+    /// <paramref name="cancel"/> fires (a cancelled job doesn't queue up behind a long extraction).
+    /// </summary>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired.</exception>
+    private void EnterText(CancellationToken cancel)
+    {
+        if (!cancel.CanBeCanceled)
+        {
+            _textGate.Enter();
+            return;
+        }
+        while (!_textGate.TryEnter(20)) cancel.ThrowIfCancellationRequested();
+        if (!cancel.IsCancellationRequested) return;
+        _textGate.Exit();
+        cancel.ThrowIfCancellationRequested();
+    }
+
+    /// <summary>The page's text layer (cached; cheap to call repeatedly from the UI).</summary>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired before the page was read.</exception>
+    public PageText GetText(int page, bool cache = true, CancellationToken cancel = default)
+    {
+        cancel.ThrowIfCancellationRequested();
+        EnterText(cancel);
+        try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_textCache.TryGetValue(page, out var hit))
@@ -328,13 +401,18 @@ public sealed class PdfEngine : IDisposable
             }
             return text;
         }
+        finally
+        {
+            _textGate.Exit();
+        }
     }
 
     private PageText ExtractText(int page)
     {
         var g = _pages[page];
         var lines = new List<List<(string, RectD)>>();
-        using var st = TextDoc().GetStructuredTextPage(page, includeAnnotations: false);
+        var directions = new List<(double, double)>();
+        using var st = TextDoc(page).GetStructuredTextPage(page, includeAnnotations: false);
         foreach (var block in st)
         {
             if (block is not MuPDFTextStructuredTextBlock tb) continue;
@@ -351,21 +429,25 @@ public sealed class PdfEngine : IDisposable
                     chars.Add((ch.Character, RectD.FromEdges(l - g.OriginX, t - g.OriginY, r - g.OriginX, b - g.OriginY)));
                 }
                 lines.Add(chars);
+                directions.Add((line.Direction.X, line.Direction.Y)); // the baseline's direction (sideways text: vertical)
             }
         }
-        return new PageText(lines);
+        return new PageText(lines, directions);
     }
 
-    public IReadOnlyList<PageLink> GetLinks(int page)
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired before the links were read.</exception>
+    public IReadOnlyList<PageLink> GetLinks(int page, CancellationToken cancel = default)
     {
-        lock (_textGate)
+        cancel.ThrowIfCancellationRequested();
+        EnterText(cancel);
+        try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_links.TryGetValue(page, out var cached)) return cached;
 
             var g = _pages[page];
             var list = new List<PageLink>();
-            foreach (var link in TextDoc().Pages[page].Links)
+            foreach (var link in TextDoc(page).Pages[page].Links)
             {
                 var a = link.ActiveArea;
                 var area = RectD.FromEdges(a.X0 - g.OriginX, a.Y0 - g.OriginY, a.X1 - g.OriginX, a.Y1 - g.OriginY);
@@ -381,7 +463,83 @@ public sealed class PdfEngine : IDisposable
             }
             return _links[page] = [.. list];
         }
+        finally
+        {
+            _textGate.Exit();
+        }
     }
+
+    /// <summary>
+    /// MuPDFCore keeps every page it loads, and the display list made to render or read it, until the document is
+    /// closed: scrolling through a 10,000-page file would hold them all in native memory. This keeps the most recently
+    /// used pages of one MuPDF instance and frees the others (they load again when needed). Use under that instance's
+    /// lock. Pinned to MuPDFCore 2.0.1's internals (the page and display list arrays); if they differ, it falls back to
+    /// the public <see cref="MuPDFDocument.ClearCache"/> (display lists only) every <c>capacity</c> pages.
+    /// </summary>
+    internal sealed class LoadedPages(MuPDFDocument doc, int capacity)
+    {
+        private const BindingFlags Internal = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        private static readonly FieldInfo? PageArray = typeof(MuPDFPageCollection).GetField("Pages", Internal);
+        private static readonly FieldInfo? ListArray = typeof(MuPDFDocument).GetField("DisplayLists", Internal);
+        private readonly LinkedList<int> _lru = [];
+        private readonly Dictionary<int, LinkedListNode<int>> _nodes = [];
+        private int _evicted;
+
+        public int Count => _lru.Count;
+
+        /// <summary>Marks a page as just used; frees the least recently used one beyond the capacity.</summary>
+        public void Touch(int page)
+        {
+            if (_nodes.TryGetValue(page, out var node))
+            {
+                _lru.Remove(node);
+                _lru.AddFirst(node);
+                return;
+            }
+            _nodes[page] = _lru.AddFirst(page);
+            while (_lru.Count > capacity)
+            {
+                var old = _lru.Last!.Value;
+                _lru.RemoveLast();
+                _nodes.Remove(old);
+                Free(old);
+            }
+        }
+
+        private void Free(int page)
+        {
+            if (ListArray?.GetValue(doc) is Array lists && PageArray?.GetValue(doc.Pages) is Array pages
+                && page < lists.Length && page < pages.Length)
+            {
+                (lists.GetValue(page) as IDisposable)?.Dispose();
+                lists.SetValue(null, page);
+                (pages.GetValue(page) as IDisposable)?.Dispose();
+                pages.SetValue(null, page);
+                return;
+            }
+            if (++_evicted % capacity == 0) doc.ClearCache();
+        }
+
+        /// <summary>Test hook: how many pages and display lists the instance holds right now (-1 if unknown).</summary>
+        internal (int Pages, int Lists) Held()
+        {
+            if (ListArray?.GetValue(doc) is not Array lists || PageArray?.GetValue(doc.Pages) is not Array pages) return (-1, -1);
+            int p = 0, l = 0;
+            foreach (var x in pages) if (x is not null) p++;
+            foreach (var x in lists) if (x is not null) l++;
+            return (p, l);
+        }
+    }
+
+    /// <summary>Test hook: MuPDF pages and display lists held by the render and text instances.</summary>
+    internal ((int Pages, int Lists) Render, (int Pages, int Lists) Text) LoadedCounts()
+    {
+        lock (_gate)
+        {
+            lock (_textGate) return (_loaded.Held(), _textLoaded?.Held() ?? (0, 0));
+        }
+    }
+
 
     public IReadOnlyList<OutlineNode> GetOutline()
     {

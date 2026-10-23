@@ -59,12 +59,15 @@ public sealed partial class PageViewer
 
     private TextStamp? SelectedSig => _selectedSig is null ? null : _sigStamps.Values.SelectMany(l => l).FirstOrDefault(s => s.Id == _selectedSig);
 
-    /// <summary>Near the selected stamp's bottom-right resize handle (in surface pixels).</summary>
+    /// <summary>
+    /// Near the selected stamp's resize handle (in surface pixels): its bottom-right corner on the page, which a turned
+    /// view shows at another corner.
+    /// </summary>
     private bool OnHandle(int page, Point sp, TextStamp s)
     {
         if (s.PageIndex != page) return false;
-        var r = ToSurfaceRect(page, s.Rect);
-        return Math.Abs(sp.X - r.Right) <= HandleSize && Math.Abs(sp.Y - r.Bottom) <= HandleSize;
+        var h = ToSurfacePoint(page, s.Rect.Right, s.Rect.Bottom);
+        return Math.Abs(sp.X - h.X) <= HandleSize && Math.Abs(sp.Y - h.Y) <= HandleSize;
     }
 
     private bool SigStampsActive => _tool is ViewerTool.Hand or ViewerTool.AddSignature;
@@ -225,10 +228,12 @@ public sealed partial class PageViewer
             dc.DrawRectangle(SigBoxFill, SigBoxPen, ToSurfaceRect(page, d.Stamp.Rect));
         if (SelectedSig is { } s && s.PageIndex == page)
         {
-            var r = ToSurfaceRect(page, _sigDrag is { } dd && dd.Stamp.Id == s.Id ? dd.Stamp.Rect : s.Rect);
+            var shown = _sigDrag is { } dd && dd.Stamp.Id == s.Id ? dd.Stamp.Rect : s.Rect;
+            var r = ToSurfaceRect(page, shown);
             r.Inflate(2, 2);
             dc.DrawRectangle(null, SigSelectPen, r);
-            dc.DrawRectangle(Brushes.White, SigSelectPen, new Rect(r.Right - HandleSize / 2, r.Bottom - HandleSize / 2, HandleSize, HandleSize));
+            var h = ToSurfacePoint(page, shown.Right, shown.Bottom);
+            dc.DrawRectangle(Brushes.White, SigSelectPen, new Rect(h.X - HandleSize / 2, h.Y - HandleSize / 2, HandleSize, HandleSize));
         }
         else if (_tool == ViewerTool.AddSignature && _sigStamps.TryGetValue(page, out var list))
         {

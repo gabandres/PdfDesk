@@ -1323,6 +1323,8 @@ public partial class MainWindow : Window
         Bind(Cmd.LayoutContinuous, t => SetLayout(t, ViewLayout.Continuous));
         Bind(Cmd.LayoutFacing, t => SetLayout(t, ViewLayout.Facing));
         Bind(Cmd.LayoutCover, t => SetLayout(t, ViewLayout.FacingCover));
+        Bind(Cmd.RotateViewRight, t => t.PageView.RotateView(clockwise: true), t => !t.IsOrganizing && t.PageView.PageCount > 0);
+        Bind(Cmd.RotateViewLeft, t => t.PageView.RotateView(clockwise: false), t => !t.IsOrganizing && t.PageView.PageCount > 0);
         Bind(Cmd.FirstPage, t => t.PageView.GoToPage(0), t => t.PageView.CurrentPage > 0);
         Bind(Cmd.PrevPage, t => t.PageView.PreviousPage(), t => t.PageView.CurrentPage > 0);
         Bind(Cmd.NextPage, t => t.PageView.NextPage(), t => t.PageView.CurrentPage < t.PageView.PageCount - 1);
@@ -1370,9 +1372,9 @@ public partial class MainWindow : Window
         if (ActiveTab is { IsBusy: false, Session.IsPdf: true } t) _ = t.AddAttachment();
     }
 
-    private void OnRedactText(object sender, RoutedEventArgs e)
+    private async void OnRedactText(object sender, RoutedEventArgs e)
     {
-        if (ActiveTab is { IsBusy: false } t && t.RedactSelection() == 0) ShowStatus("Select the text to redact first (Select text tool, T)");
+        if (ActiveTab is { IsBusy: false } t && await t.RedactSelection() == 0) ShowStatus("Select the text to redact first (Select text tool, T)");
     }
 
     private void OnRedactHits(object sender, RoutedEventArgs e)
