@@ -70,13 +70,15 @@ public partial class MainWindow : Window
     private WindowState _preFullScreenState;
     private bool _fullScreen;
     private List<PaletteItem> _paletteAll = [];
-    private static readonly Dictionary<string, BitmapSource> RecentThumbs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Start-page previews, valid while the file keeps this size and last-write time.</summary>
+    private static readonly Dictionary<string, (long Size, DateTime Written, BitmapSource Image)> RecentThumbs = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Start-page previews open files in place; saves wait for the one in progress so they never collide.</summary>
     private static readonly SemaphoreSlim PreviewGate = new(1, 1);
 
     private readonly Dictionary<DocumentTab, Task<bool>> _saves = [];
     private readonly HashSet<DocumentTab> _closingTabs = [];
     private readonly HashSet<string> _opening = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _forwardedWhileClosing = [];
     private int _openBusy;
     private bool _closeApproved;
     private bool _closeRunning;
@@ -98,6 +100,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // Shortcuts shown on buttons come from the commands' gestures, so they always match the bindings.
+        Cmd.AddShortcutsToTips(this);
+        PaletteKeyText.Text = Cmd.GestureText(Cmd.CommandPalette);
+        AppearanceButton.ToolTip = $"Appearance: dark mode, light mode, dark pages ({Cmd.GestureText(Cmd.ToggleDarkMode)} switches dark mode)";
         TabStrip.ItemsSource = _tabs;
         RestorePlacement();
         BindCommands();
@@ -305,13 +311,17 @@ public partial class MainWindow : Window
             {
                 _sessionPromptRunning = false;
                 ShutdownBlockReasonDestroy(hwnd);
+                OpenForwardedWhileClosing();
             }
         });
     }
 
     // ───────────────────────────── Toasts ─────────────────────────────
 
-    /// <summary>Shows a short message at the bottom-left; with an action (e.g. Undo) it stays a little longer.</summary>
+    /// <summary>
+    /// Shows a short message at the bottom; with an action (e.g. Undo) it stays a little longer, and an error stays until
+    /// dismissed.
+    /// </summary>
     public void ShowToast(Toast toast)
     {
         var text = new TextBlock { Text = toast.Message, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 };
@@ -338,7 +348,9 @@ public partial class MainWindow : Window
         AutomationProperties.SetLiveSetting(card, AutomationLiveSetting.Polite);
         AutomationProperties.SetName(card, toast.Message);
 
+        // Errors stay until dismissed (they may need reading twice, or acting on); other toasts fade on their own.
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(toast.Action is null ? 3.5 : 7) };
+        var persistent = toast.IsError;
         void Dismiss()
         {
             timer.Stop();
@@ -346,7 +358,8 @@ public partial class MainWindow : Window
         }
         timer.Tick += (_, _) => Dismiss();
         card.MouseEnter += (_, _) => timer.Stop();
-        card.MouseLeave += (_, _) => timer.Start();
+        card.MouseLeave += (_, _) => { if (!persistent) timer.Start(); };
+        if (persistent) AutomationProperties.SetLiveSetting(card, AutomationLiveSetting.Assertive);
 
         var close = new Button { Style = (Style)FindResource("IconButton"), Content = "", FontSize = 10, Height = 26, MinWidth = 26, ToolTip = "Dismiss" };
         close.Click += (_, _) => Dismiss();
@@ -371,7 +384,7 @@ public partial class MainWindow : Window
         while (Toasts.Children.Count > 3) Toasts.Children.RemoveAt(0);
         card.Loaded += (_, _) => System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(card)?
             .RaiseAutomationEvent(System.Windows.Automation.Peers.AutomationEvents.LiveRegionChanged);
-        timer.Start();
+        if (!persistent) timer.Start();
     }
 
     public void ShowStatus(string text) => ShowToast(new Toast(text));
@@ -562,12 +575,6 @@ public partial class MainWindow : Window
             ToggleFullScreen();
             e.Handled = true;
         }
-        else if (ctrl && e.Key == Key.Tab && _tabs.Count > 1)
-        {
-            var i = TabStrip.SelectedIndex;
-            TabStrip.SelectedIndex = (i + (shift ? -1 : 1) + _tabs.Count) % _tabs.Count;
-            e.Handled = true;
-        }
         else if (ctrl && !shift && e.Key is >= Key.D1 and <= Key.D9 && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt)
                  && !Keyboard.IsKeyDown(Key.RightAlt))
         {
@@ -615,8 +622,58 @@ public partial class MainWindow : Window
 
     private void FocusCommandBar()
     {
-        if (FindChild<System.Windows.Controls.Primitives.ButtonBase>(DocCommands.Visibility == Visibility.Visible ? DocCommands : CommandBar) is { } first)
-            first.Focus();
+        if (FindChild<System.Windows.Controls.Primitives.ButtonBase>(CommandBar) is { } first) first.Focus();
+    }
+
+    /// <summary>The "More" (…) button at the end of the command bar: the commands that didn't fit, as a menu.</summary>
+    private void OnMoreClick(object sender, RoutedEventArgs e)
+    {
+        var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        foreach (var item in DocCommands.OverflowItems)
+        {
+            if (item is not System.Windows.Controls.Primitives.ButtonBase b)
+            {
+                if (menu.Items.Count > 0 && menu.Items[^1] is not Separator) menu.Items.Add(new Separator()); // a bar separator
+                continue;
+            }
+            // A command shows its own name and shortcut; the icon is the button's.
+            var mi = new MenuItem { Command = b.Command, CommandTarget = b.CommandTarget };
+            if (b.Command is not RoutedUICommand) mi.Header = b.ToolTip as string ?? AutomationProperties.GetName(b);
+            if (GlyphOf(b) is { } glyph) mi.Icon = new TextBlock { Text = glyph, FontFamily = (FontFamily)FindResource("Icons"), FontSize = 14 };
+            if (b is System.Windows.Controls.Primitives.ToggleButton { IsChecked: true }) mi.IsChecked = true;
+            if (b.Command is null) mi.Click += (_, _) => b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            menu.Items.Add(mi);
+        }
+        if (menu.Items.Count > 0 && menu.Items[^1] is Separator s) menu.Items.Remove(s);
+        menu.IsOpen = true;
+    }
+
+    /// <summary>The icon a button shows (a Segoe Fluent Icons character), alone or before its label; null if it has none.</summary>
+    private static string? GlyphOf(System.Windows.Controls.Primitives.ButtonBase b)
+    {
+        static bool IsGlyph(string? s) => s is { Length: 1 } && char.GetUnicodeCategory(s[0]) == System.Globalization.UnicodeCategory.PrivateUse;
+        if (b.Content is string text) return IsGlyph(text) ? text : null;
+        if (b.Content is Panel panel)
+            foreach (var tb in panel.Children.OfType<TextBlock>())
+                if (IsGlyph(tb.Text)) return tb.Text;
+        return null;
+    }
+
+    /// <summary>Each command's icon from the command bar and start page buttons, for the command palette.</summary>
+    private Dictionary<ICommand, string> CommandGlyphs()
+    {
+        var glyphs = new Dictionary<ICommand, string>();
+        void Walk(DependencyObject root)
+        {
+            foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+            {
+                if (child is System.Windows.Controls.Primitives.ButtonBase { Command: { } cmd } b && GlyphOf(b) is { } g) glyphs.TryAdd(cmd, g);
+                Walk(child);
+            }
+        }
+        Walk(CommandBar);
+        Walk(StartPage);
+        return glyphs;
     }
 
     private static bool IsInside(DependencyObject? d, DependencyObject container)
@@ -677,6 +734,7 @@ public partial class MainWindow : Window
             }
 
             var index = _tabs.IndexOf(model);
+            RememberClosed(tab);
             Discard(model);
             if (!wasActive && previous is not null && _tabs.Contains(previous)) TabStrip.SelectedItem = previous;
             else if (_tabs.Count > 0) TabStrip.SelectedItem = _tabs[Math.Clamp(index, 0, _tabs.Count - 1)];
@@ -709,14 +767,47 @@ public partial class MainWindow : Window
         _closeRunning = true;
         try
         {
-            if (_closed || !await PrepareToCloseAll() || _closed) return;
+            if (_closed) return;
+            if (!await PrepareToCloseAll() || _closed) return;
+            if (_forwardedWhileClosing.Count > 0)
+            {
+                // Another launch asked for a file while the window was closing: keep the window for it. The documents
+                // the user agreed to close still close.
+                foreach (var m in _tabs.ToList()) Discard(m);
+                UpdateUi();
+                return;
+            }
             _closeApproved = true;
             Close();
         }
         finally
         {
             _closeRunning = false;
+            OpenForwardedWhileClosing();
         }
+    }
+
+    /// <summary>
+    /// Files another launch forwarded ("Open with PdfDesk" while it runs). While the window asks about unsaved changes
+    /// before closing they wait, so a new tab can't appear only to be closed unasked; they open once the close is cancelled
+    /// or has closed the documents (see <see cref="CloseWindowAsync"/>).
+    /// </summary>
+    public void OpenForwarded(IReadOnlyList<string> files)
+    {
+        if (_closeRunning || _sessionPromptRunning)
+        {
+            _forwardedWhileClosing.AddRange(files);
+            return;
+        }
+        OpenFiles(files);
+    }
+
+    private void OpenForwardedWhileClosing()
+    {
+        if (_forwardedWhileClosing.Count == 0 || _closed || _closeApproved || _closeRunning || _sessionPromptRunning) return;
+        var files = _forwardedWhileClosing.ToList();
+        _forwardedWhileClosing.Clear();
+        OpenFiles(files);
     }
 
     /// <summary>Flushes every tab's pending edits, then asks about each unsaved document. False if anything should stay open.</summary>
@@ -917,7 +1008,9 @@ public partial class MainWindow : Window
         try
         {
             if (tab.IsDisposed) return false;
-            tab.Session.SaveAs(path);
+            // Written on a worker thread (big files don't freeze the window); busy meanwhile, so no edit or close cuts in.
+            using var busy = tab.BeginBusy($"Saving {Path.GetFileName(path)}…");
+            await tab.Session.SaveAsAsync(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1036,27 +1129,35 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Renders each recent file's first page in the background (cached for the session). Each preview opens the file only
+    /// Renders each recent file's first page in the background (cached while the file is unchanged). Each preview opens the file only
     /// while it renders, one at a time, and never while a save is writing (see <see cref="PreviewGate"/>).
     /// </summary>
     private void LoadRecentThumbnails(List<RecentItem> items)
     {
         var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
         lock (RecentThumbs)
+        {
+            // Files no longer in the list don't keep a preview in memory.
+            var listed = items.Select(i => i.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var gone in RecentThumbs.Keys.Where(k => !listed.Contains(k)).ToList()) RecentThumbs.Remove(gone);
+            // Shown at once; checked against the file below and redrawn if it changed since.
             foreach (var item in items)
-                if (RecentThumbs.TryGetValue(item.Path, out var cached)) item.Thumbnail = cached;
-
-        var todo = items.Where(i => i.Thumbnail is null).ToList();
-        if (todo.Count == 0) return;
+                if (RecentThumbs.TryGetValue(item.Path, out var cached)) item.Thumbnail = cached.Image;
+        }
+        if (items.Count == 0) return;
         _ = Task.Run(async () =>
         {
-            foreach (var item in todo)
+            foreach (var item in items)
             {
                 if (_closed) return;
                 await PreviewGate.WaitAsync();
                 try
                 {
-                    if (!File.Exists(item.Path)) continue;
+                    var info = new FileInfo(item.Path);
+                    if (!info.Exists) continue;
+                    var (size, written) = (info.Length, info.LastWriteTimeUtc);
+                    lock (RecentThumbs)
+                        if (RecentThumbs.TryGetValue(item.Path, out var cached) && cached.Size == size && cached.Written == written) continue;
                     BitmapSource bmp;
                     using (var engine = PdfEngine.OpenPreview(item.Path))
                     {
@@ -1065,7 +1166,7 @@ public partial class MainWindow : Window
                         var scale = Math.Min(140 / g.Width, 170 / g.Height) * dpi;
                         bmp = PageViewer.ToBitmap(engine.Render(0, scale));
                     }
-                    lock (RecentThumbs) RecentThumbs[item.Path] = bmp;
+                    lock (RecentThumbs) RecentThumbs[item.Path] = (size, written, bmp);
                     _ = Dispatcher.BeginInvoke(() => item.Thumbnail = bmp);
                 }
                 catch (Exception ex)
@@ -1126,8 +1227,13 @@ public partial class MainWindow : Window
 
     private async Task CloseAllAsync()
     {
+        var models = _tabs.ToList(); // a file opened while the prompts are up stays open
         if (!await PrepareToCloseAll()) return;
-        foreach (var m in _tabs.ToList()) Discard(m);
+        foreach (var m in models.Where(_tabs.Contains))
+        {
+            RememberClosed(m.Tab);
+            Discard(m);
+        }
         UpdateUi();
     }
 
@@ -1147,6 +1253,12 @@ public partial class MainWindow : Window
         BindAlways(Cmd.Shortcuts, () => ShortcutsWindow.Show(this, MainMenu));
         BindAlways(Cmd.FullScreen, ToggleFullScreen);
         BindAlways(Cmd.ToggleDarkMode, () => SetTheme(App.IsDark ? "Light" : "Dark"));
+        CommandBindings.Add(new CommandBinding(Cmd.NextTab, (_, e) => { SelectTabBy(1); e.Handled = true; },
+            (_, e) => { e.CanExecute = _tabs.Count > 1; e.Handled = true; }));
+        CommandBindings.Add(new CommandBinding(Cmd.PrevTab, (_, e) => { SelectTabBy(-1); e.Handled = true; },
+            (_, e) => { e.CanExecute = _tabs.Count > 1; e.Handled = true; }));
+        CommandBindings.Add(new CommandBinding(Cmd.ReopenClosed, (_, e) => { _ = ReopenClosedAsync(); e.Handled = true; },
+            (_, e) => { e.CanExecute = _closedTabs.Count > 0; e.Handled = true; }));
         BindAlways(Cmd.DarkPages, () =>
         {
             AppSettings.Current.DarkPages = !AppSettings.Current.DarkPages;
@@ -1314,7 +1426,54 @@ public partial class MainWindow : Window
         {
             ClosePalette();
             e.Handled = true;
+            return;
         }
+        // Tab switching wins over the focused control (the page view scrolls on Ctrl+PgDn, lists move on Ctrl+Tab).
+        if (Palette.Visibility == Visibility.Visible) return;
+        foreach (var cmd in new[] { Cmd.NextTab, Cmd.PrevTab })
+        {
+            if (!cmd.InputGestures.OfType<KeyGesture>().Any(g => g.Matches(this, e))) continue;
+            if (cmd.CanExecute(null, this)) cmd.Execute(null, this);
+            e.Handled = true;
+            return;
+        }
+    }
+
+    private void SelectTabBy(int step)
+    {
+        if (_tabs.Count < 2) return;
+        TabStrip.SelectedIndex = (TabStrip.SelectedIndex + step + _tabs.Count) % _tabs.Count;
+    }
+
+    // ───────────────────────────── Reopen closed tabs ─────────────────────────────
+
+    private const int MaxClosedTabs = 10;
+    private readonly List<(string Path, int Page)> _closedTabs = [];
+
+    /// <summary>Remembers a tab the user closed (file and page) for Reopen Closed Tab.</summary>
+    private void RememberClosed(DocumentTab tab)
+    {
+        if (tab.Session.FilePath is not { } path) return;
+        _closedTabs.RemoveAll(c => string.Equals(c.Path, path, StringComparison.OrdinalIgnoreCase));
+        _closedTabs.Add((path, tab.PageView.CurrentPage));
+        if (_closedTabs.Count > MaxClosedTabs) _closedTabs.RemoveRange(0, _closedTabs.Count - MaxClosedTabs);
+    }
+
+    private async Task ReopenClosedAsync()
+    {
+        if (_closedTabs.Count == 0)
+        {
+            ShowStatus("No closed tabs to reopen");
+            return;
+        }
+        var (path, page) = _closedTabs[^1];
+        _closedTabs.RemoveAt(_closedTabs.Count - 1);
+        await OpenFileAsync(path);
+        if (_tabs.FirstOrDefault(t => string.Equals(t.Tab.Session.FilePath, path, StringComparison.OrdinalIgnoreCase))?.Tab is not { } tab) return;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            if (!tab.IsDisposed && page < tab.PageView.PageCount) tab.PageView.GoToPage(page, record: false);
+        });
     }
 
     private void ToggleFullScreen()
@@ -1361,6 +1520,7 @@ public partial class MainWindow : Window
     private List<PaletteItem> BuildPaletteItems()
     {
         var items = new List<PaletteItem>();
+        var glyphs = CommandGlyphs();
         void Walk(ItemsControl parent, string category)
         {
             foreach (var mi in parent.Items.OfType<MenuItem>())
@@ -1378,7 +1538,9 @@ public partial class MainWindow : Window
                     if (!cmd.CanExecute(null, this)) continue; // only offer what can run right now
                     var gesture = cmd.InputGestures.OfType<KeyGesture>().FirstOrDefault()?.GetDisplayStringForCulture(System.Globalization.CultureInfo.CurrentCulture)
                                   ?? mi.InputGestureText ?? "";
-                    items.Add(new PaletteItem(name, category, gesture, "", () => { if (cmd.CanExecute(null, this)) cmd.Execute(null, this); }));
+                    // The command's toolbar or start-page icon, else the generic command glyph.
+                    items.Add(new PaletteItem(name, category, gesture, glyphs.GetValueOrDefault(cmd, ""),
+                        () => { if (cmd.CanExecute(null, this)) cmd.Execute(null, this); }));
                 }
                 else
                 {
@@ -1422,11 +1584,11 @@ public partial class MainWindow : Window
             if (int.TryParse(q, out var number) && number >= 1 && number <= t.PageView.PageCount && byLabel != number - 1)
             {
                 var label = t.PageLabel(number - 1);
-                result.Insert(0, new PaletteItem(label != number.ToString() ? $"Go to page {number} ({label})" : $"Go to page {number}", "", "", "",
+                result.Insert(0, new PaletteItem(label != number.ToString() ? $"Go to page {number} ({label})" : $"Go to page {number}", "", "", "",
                     () => { t.SetOrganizing(false); t.PageView.GoToPage(number - 1); }));
             }
             if (byLabel is { } p)
-                result.Insert(0, new PaletteItem($"Go to page {t.PageLabel(p)} ({p + 1} of {t.PageView.PageCount})", "", "", "",
+                result.Insert(0, new PaletteItem($"Go to page {t.PageLabel(p)} ({p + 1} of {t.PageView.PageCount})", "", "", "",
                     () => { t.SetOrganizing(false); t.PageView.GoToPage(p); }));
         }
         PaletteList.ItemsSource = result;
@@ -1510,7 +1672,8 @@ public partial class MainWindow : Window
         AppSettings.Current.Save();
         App.ApplyTheme();
         UpdateUi();
-        ShowStatus(theme switch { "Dark" => "Dark mode on", "Light" => "Light mode on", _ => "Following your Windows setting" });
+        // Dark and light show for themselves; following Windows may change nothing visible, so say it took effect.
+        if (theme is not ("Dark" or "Light")) ShowStatus("Following your Windows setting");
     }
 
     // ───────────────────────────── Settings ─────────────────────────────
@@ -1550,6 +1713,7 @@ public partial class MainWindow : Window
         StartPage.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         AppTitle.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         DocCommands.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
+        NoDocCombineButton.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Title = t is null ? "PdfDesk" : $"{(t.Session.IsDirty ? "● " : "")}{t.DisplayTitle} – PdfDesk";
 
         var v = t?.PageView;
@@ -1584,8 +1748,8 @@ public partial class MainWindow : Window
 
         UndoMenu.Header = t?.Session.UndoLabel is { } u ? $"_Undo {u}" : "_Undo";
         RedoMenu.Header = t?.Session.RedoLabel is { } r ? $"_Redo {r}" : "_Redo";
-        UndoButton.ToolTip = t?.Session.UndoLabel is { } u2 ? $"Undo {u2} (Ctrl+Z)" : "Undo (Ctrl+Z)";
-        RedoButton.ToolTip = t?.Session.RedoLabel is { } r2 ? $"Redo {r2} (Ctrl+Y)" : "Redo (Ctrl+Y)";
+        UndoButton.ToolTip = Cmd.Tip(t?.Session.UndoLabel is { } u2 ? $"Undo {u2}" : "Undo", Cmd.Undo);
+        RedoButton.ToolTip = Cmd.Tip(t?.Session.RedoLabel is { } r2 ? $"Redo {r2}" : "Redo", Cmd.Redo);
         CommandManager.InvalidateRequerySuggested();
     }
 
@@ -1594,20 +1758,79 @@ public partial class MainWindow : Window
         var s = AppSettings.Current;
         Width = Math.Max(MinWidth, s.WindowWidth);
         Height = Math.Max(MinHeight, s.WindowHeight);
-        if (!double.IsNaN(s.WindowLeft) && !double.IsNaN(s.WindowTop) &&
-            s.WindowLeft >= SystemParameters.VirtualScreenLeft - 50 && s.WindowTop >= SystemParameters.VirtualScreenTop - 50 &&
-            s.WindowLeft < SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - 100 &&
-            s.WindowTop < SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - 100)
+        if (!double.IsNaN(s.WindowLeft) && !double.IsNaN(s.WindowTop) && FitToMonitor(new Rect(s.WindowLeft, s.WindowTop, Width, Height)) is { } fit)
         {
             WindowStartupLocation = WindowStartupLocation.Manual;
-            Left = s.WindowLeft;
-            Top = s.WindowTop;
+            Left = fit.Left;
+            Top = fit.Top;
+            Width = Math.Max(MinWidth, fit.Width);
+            Height = Math.Max(MinHeight, fit.Height);
         }
         else
         {
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
         }
         if (s.WindowMaximized) WindowState = WindowState.Maximized;
+    }
+
+    /// <summary>
+    /// The saved window rectangle (DIPs) moved and shrunk to fit the working area of the monitor it mostly lies on, or
+    /// null when its title bar wouldn't be reachable on any monitor (one was unplugged, or the layout changed): the gaps
+    /// between monitors of different sizes count as off-screen, unlike a check against the bounding box of all of them.
+    /// </summary>
+    private static Rect? FitToMonitor(Rect saved)
+    {
+        Rect? best = null;
+        var bestArea = 0.0;
+        foreach (var work in MonitorWorkAreas())
+        {
+            // The top strip (title bar) must be on this monitor, enough to grab and drag.
+            var caption = Rect.Intersect(new Rect(saved.Left, saved.Top, saved.Width, 40), work);
+            if (caption.IsEmpty || caption.Width < 100 || caption.Height < 20) continue;
+            var overlap = Rect.Intersect(saved, work);
+            var area = overlap.IsEmpty ? 0 : overlap.Width * overlap.Height;
+            if (best is not null && area <= bestArea) continue;
+            bestArea = area;
+            var w = Math.Min(saved.Width, work.Width);
+            var h = Math.Min(saved.Height, work.Height);
+            best = new Rect(Math.Clamp(saved.Left, work.Left, work.Right - w), Math.Clamp(saved.Top, work.Top, work.Bottom - h), w, h);
+        }
+        return best;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc callback, IntPtr data);
+
+    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, ref RECT rect, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int Size;
+        public RECT Monitor, Work;
+        public int Flags;
+    }
+
+    /// <summary>Each monitor's working area (without the taskbar) in DIPs at that monitor's own scale.</summary>
+    private static List<Rect> MonitorWorkAreas()
+    {
+        var areas = new List<Rect>();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr monitor, IntPtr _, ref RECT _, IntPtr _) =>
+        {
+            var info = new MONITORINFO { Size = Marshal.SizeOf<MONITORINFO>() };
+            if (!GetMonitorInfo(monitor, ref info)) return true;
+            var scale = GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : 1.0; // MDT_EFFECTIVE_DPI
+            var r = info.Work;
+            areas.Add(new Rect(r.Left / scale, r.Top / scale, (r.Right - r.Left) / scale, (r.Bottom - r.Top) / scale));
+            return true;
+        }, IntPtr.Zero);
+        return areas;
     }
 
     private void SavePlacement()

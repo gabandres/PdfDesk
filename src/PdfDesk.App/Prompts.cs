@@ -41,7 +41,7 @@ public static class Prompt
         var result = buttons.Length - 1;
         var win = new Window
         {
-            Title = "PdfDesk",
+            Title = title, // the action, not just the app name (Alt+Tab, screen readers)
             Width = 440,
             SizeToContent = SizeToContent.Height,
             ResizeMode = ResizeMode.NoResize,
@@ -143,9 +143,10 @@ public static class ShortcutsWindow
             ("Pages pane", "Delete selected pages", "Del"),
             ("Pages pane", "Reorder pages", "Drag thumbnails (onto another tab to copy)"),
             ("Organize pages", "Move between pages", "Arrow keys (Shift extends the selection)"),
+            ("Organize pages", "Move the selected pages", "Alt+Shift+arrow keys"),
             ("Organize pages", "Open the page", "Enter or double-click"),
             ("Organize pages", "Back to reading", "Esc"),
-            ("Anywhere", "Search all commands", "Ctrl+K"),
+            ("Anywhere", "Search all commands", Cmd.GestureText(Cmd.CommandPalette) ?? ""),
         ]);
 
         var win = new Window
@@ -194,6 +195,54 @@ public static class ShortcutsWindow
 }
 
 /// <summary>
+/// A long job's progress on PdfDesk's taskbar button (indeterminate until a fraction is reported), so it shows while the
+/// window is minimized or behind others. Jobs may overlap: the button shows progress until the last one ends.
+/// </summary>
+public sealed class TaskbarProgress : IDisposable
+{
+    private static readonly Dictionary<Window, int> Active = [];
+    private readonly Window? _window;
+    private bool _ended;
+
+    public TaskbarProgress(Window? owner)
+    {
+        // The taskbar button belongs to the top-level window, not to a dialog it owns.
+        var w = owner ?? Application.Current?.MainWindow;
+        while (w?.Owner is { } parent) w = parent;
+        _window = w;
+        if (w is null) return;
+        w.TaskbarItemInfo ??= new System.Windows.Shell.TaskbarItemInfo();
+        Active[w] = Active.GetValueOrDefault(w) + 1;
+        w.TaskbarItemInfo.ProgressState = System.Windows.Shell.TaskbarItemProgressState.Indeterminate;
+    }
+
+    /// <summary>0..1; call on the UI thread.</summary>
+    public void Report(double fraction)
+    {
+        if (_ended || _window?.TaskbarItemInfo is not { } info) return;
+        // With several jobs running, one bar can't stand for all of them.
+        if (Active.GetValueOrDefault(_window) > 1) return;
+        info.ProgressState = System.Windows.Shell.TaskbarItemProgressState.Normal;
+        info.ProgressValue = Math.Clamp(fraction, 0, 1);
+    }
+
+    public void Dispose()
+    {
+        if (_ended || _window is null) return;
+        _ended = true;
+        var left = Active.GetValueOrDefault(_window) - 1;
+        if (left > 0)
+        {
+            Active[_window] = left;
+            if (_window.TaskbarItemInfo is { } busy) busy.ProgressState = System.Windows.Shell.TaskbarItemProgressState.Indeterminate;
+            return;
+        }
+        Active.Remove(_window);
+        if (_window.TaskbarItemInfo is { } info) info.ProgressState = System.Windows.Shell.TaskbarItemProgressState.None;
+    }
+}
+
+/// <summary>
 /// A small progress window with a Cancel button for long jobs (printing, exporting). It only appears if the job takes
 /// longer than a moment. <see cref="Report"/> may be called from any thread.
 /// </summary>
@@ -205,6 +254,7 @@ public sealed class ProgressPrompt : IDisposable
     private readonly ProgressBar _bar;
     private readonly Button _cancel;
     private readonly System.Windows.Threading.DispatcherTimer _delay;
+    private readonly TaskbarProgress _taskbar;
     private bool _closed;
 
     public CancellationToken Token { get; }
@@ -216,6 +266,7 @@ public sealed class ProgressPrompt : IDisposable
     {
         Token = _cts.Token;
         owner ??= Application.Current.MainWindow;
+        _taskbar = new TaskbarProgress(owner);
         _text = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
         _bar = new ProgressBar { IsIndeterminate = true, Height = 4, Margin = new Thickness(0, 14, 0, 0) };
         _cancel = new Button { Content = "Cancel", MinWidth = 104, IsCancel = true, HorizontalAlignment = HorizontalAlignment.Right };
@@ -275,6 +326,7 @@ public sealed class ProgressPrompt : IDisposable
         {
             _bar.IsIndeterminate = false;
             _bar.Value = Math.Clamp(f, 0, 1) * 100;
+            _taskbar.Report(f);
         }
     }
 
@@ -292,6 +344,7 @@ public sealed class ProgressPrompt : IDisposable
         if (_closed) return;
         _closed = true;
         _delay.Stop();
+        _taskbar.Dispose();
         _win.Close();
     }
 }

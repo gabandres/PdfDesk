@@ -289,6 +289,14 @@ public partial class OrganizerView : UserControl
         var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
         var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
         var f = Math.Max(0, _focus);
+        // Alt+Shift+arrows move the selected pages (with Alt held, WPF reports the arrow as a system key).
+        if (Keyboard.Modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && e.Key == Key.System
+            && e.SystemKey is Key.Left or Key.Right or Key.Up or Key.Down)
+        {
+            _ = MoveSelectionAsync(e.SystemKey);
+            e.Handled = true;
+            return;
+        }
         switch (e.Key)
         {
             case Key.Left: MoveFocus(f - 1, shift); break;
@@ -305,6 +313,40 @@ public partial class OrganizerView : UserControl
             default: return;
         }
         e.Handled = true;
+    }
+
+    /// <summary>Alt+Shift+arrow: moves the selected pages one place (or one row) and tells screen readers where they went.</summary>
+    private async Task MoveSelectionAsync(Key key)
+    {
+        if (_tab is null || _tab.IsBusy || !_tab.Session.IsPdf) return;
+        var pages = SelectedPages;
+        if (pages.Length == 0 && _focus >= 0 && _focus < _items.Count) pages = [_focus];
+        if (pages.Length == 0) return;
+        int min = pages.Min(), max = pages.Max(), count = _items.Count;
+        int? before = key switch
+        {
+            Key.Left when min > 0 => min - 1,
+            Key.Right when max < count - 1 => max + 2,
+            Key.Up when min > 0 => Math.Max(0, min - _columns),
+            Key.Down when max < count - 1 => Math.Min(count, max + _columns + 1),
+            _ => null,
+        };
+        if (before is not { } b)
+        {
+            Announce(key is Key.Left or Key.Up ? "Already at the start" : "Already at the end");
+            return;
+        }
+        if (await _tab.MovePagesAsync(pages, b) is not { } first) return;
+        var n = pages.Length;
+        Announce(n == 1 ? $"Moved to position {first + 1} of {count}" : $"Moved {n} pages to positions {first + 1}–{first + n} of {count}");
+    }
+
+    /// <summary>Speaks <paramref name="message"/> through the selection line (a polite live region).</summary>
+    private void Announce(string message)
+    {
+        SelectionText.Text = message;
+        System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(SelectionText)?
+            .RaiseAutomationEvent(System.Windows.Automation.Peers.AutomationEvents.LiveRegionChanged);
     }
 
     // ───────────────────────────── Mouse ─────────────────────────────
@@ -493,12 +535,12 @@ public partial class OrganizerView : UserControl
         else HideInsertion();
     }
 
-    private async void OnDrop(object sender, DragEventArgs e)
+    private void OnDrop(object sender, DragEventArgs e)
     {
         e.Handled = true;
         HideInsertion();
         if (_tab is null || DropTarget(e.GetPosition(Rows)) is not { } t) return;
-        await _tab.DropPages(e, t.Before);
+        _tab.DropPages(e, t.Before); // the work runs after the drop completes
     }
 
     private void ShowInsertion(Rect marker)

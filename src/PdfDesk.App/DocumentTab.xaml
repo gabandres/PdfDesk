@@ -16,7 +16,7 @@
         <StackPanel x:Name="Rail" Grid.Column="0" Margin="4,6,4,0" Width="40">
             <ToggleButton x:Name="PagesRail" Style="{StaticResource RailButton}" Content="&#xE8A9;" ToolTip="Pages (thumbnails)" />
             <ToggleButton x:Name="BookmarksRail" Style="{StaticResource RailButton}" Content="&#xE8A4;" ToolTip="Bookmarks" />
-            <ToggleButton x:Name="SearchRail" Style="{StaticResource RailButton}" Content="&#xE721;" ToolTip="Search (Ctrl+Shift+F)" />
+            <ToggleButton x:Name="SearchRail" Style="{StaticResource RailButton}" Content="&#xE721;" ToolTip="Search" />
             <ToggleButton x:Name="CommentsRail" Style="{StaticResource RailButton}" Content="&#xE90A;" ToolTip="Comments"
                           AutomationProperties.Name="Comments" />
             <Grid x:Name="AttachmentsRailHost">
@@ -42,7 +42,7 @@
                     <TextBlock x:Name="PaneTitle" DockPanel.Dock="Left" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
                     <TextBlock x:Name="PaneDetail" DockPanel.Dock="Left" Margin="8,0,0,0" VerticalAlignment="Center" Style="{StaticResource Caption}" FontSize="12" />
                     <Button x:Name="ClosePaneButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="11" Height="28" MinWidth="28"
-                            Content="&#xE711;" ToolTip="Close pane (F4)" />
+                            Content="&#xE711;" ToolTip="Close pane" />
                 </DockPanel>
                 <Grid>
                     <ListBox x:Name="Thumbs" SelectionMode="Extended" AllowDrop="True" BorderThickness="0" Background="Transparent"
@@ -152,7 +152,7 @@
                                  ToolTip="Show only comments containing this text, author or type" />
                         <WrapPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,6,0,2">
                             <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" FontSize="14"
-                                    ToolTip="Highlight the selected text (Ctrl+Shift+H)" AutomationProperties.Name="Highlight" />
+                                    ToolTip="Highlight the selected text" AutomationProperties.Name="Highlight" />
                             <Button Style="{StaticResource IconButton}" Command="app:Cmd.Underline" Content="&#xE8DC;" FontSize="14"
                                     ToolTip="Underline the selected text" AutomationProperties.Name="Underline" />
                             <Button Style="{StaticResource IconButton}" Command="app:Cmd.StrikeOut" Content="&#xE738;" FontSize="14"
@@ -397,7 +397,7 @@
                                 Content="&#xE711;" ToolTip="Leave the redaction tool (marks stay until you clear them)" AutomationProperties.Name="Close redaction bar" />
                         <Button x:Name="RedactApply" DockPanel.Dock="Right" Content="Apply redactions…" Margin="8,0,4,0" Style="{DynamicResource AccentButtonStyle}" />
                         <Button x:Name="RedactClear" DockPanel.Dock="Right" Content="Clear marks" Margin="12,0,0,0" />
-                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="16" Margin="0,0,12,0"
+                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE73B;" FontSize="16" Margin="0,0,12,0"
                                    Foreground="{DynamicResource SystemFillColorCriticalBrush}" />
                         <TextBlock x:Name="RedactBarText" VerticalAlignment="Center" TextWrapping="Wrap" />
                     </DockPanel>
@@ -428,6 +428,7 @@
                             <MenuItem Command="app:Cmd.FitWidth" />
                             <MenuItem Command="app:Cmd.FitPage" />
                             <Separator />
+                            <!-- "Page": these change the file (rotating only the view is a View command) -->
                             <MenuItem Command="app:Cmd.RotateRight" Header="Rotate Page Clockwise" />
                             <MenuItem Command="app:Cmd.RotateLeft" Header="Rotate Page Counterclockwise" />
                             <MenuItem Command="app:Cmd.Organize" />
@@ -447,15 +448,19 @@
                         <TextBox x:Name="FindBox" Width="230" VerticalContentAlignment="Center" AutomationProperties.Name="Find in document"
                                  ToolTip="Enter: next match · Shift+Enter: previous · Esc: close" />
                         <TextBlock x:Name="FindStatus" Margin="10,0,6,0" VerticalAlignment="Center" MinWidth="64" FontSize="12" Style="{StaticResource Caption}" />
-                        <ToggleButton x:Name="FindMatchCase" Style="{StaticResource CommandButton}" Content="Aa" FontWeight="SemiBold" ToolTip="Match case" Padding="8,4"
-                                      AutomationProperties.Name="Match case" />
-                        <ToggleButton x:Name="FindWholeWords" Style="{StaticResource CommandButton}" Content="ab|" FontWeight="SemiBold" ToolTip="Whole words" Padding="8,4"
-                                      AutomationProperties.Name="Whole words" />
+                        <!-- Option toggles: the tooltip says what each short label means; screen readers get the name and on/off state -->
+                        <ToggleButton x:Name="FindMatchCase" Style="{StaticResource CommandButton}" Content="Aa" FontWeight="SemiBold" Padding="8,4"
+                                      ToolTip="Match case: find &quot;PDF&quot; but not &quot;pdf&quot;" AutomationProperties.Name="Match case" />
+                        <ToggleButton x:Name="FindWholeWords" Style="{StaticResource CommandButton}" Content="ab|" FontWeight="SemiBold" Padding="8,4"
+                                      ToolTip="Whole words only: &quot;page&quot; doesn't find &quot;pages&quot;" AutomationProperties.Name="Whole words only" />
                         <ToggleButton x:Name="FindIgnoreAccents" Style="{StaticResource CommandButton}" Content="é=e" FontWeight="SemiBold" Padding="8,4"
-                                      ToolTip="Ignore accents" AutomationProperties.Name="Ignore accents" />
-                        <Button x:Name="FindPrevButton" Style="{StaticResource IconButton}" Content="&#xE70E;" FontSize="12" ToolTip="Previous match (Shift+F3)" />
-                        <Button x:Name="FindNextButton" Style="{StaticResource IconButton}" Content="&#xE70D;" FontSize="12" ToolTip="Next match (F3)" />
-                        <Button x:Name="FindCloseButton" Style="{StaticResource IconButton}" Content="&#xE711;" FontSize="11" ToolTip="Close (Esc)" />
+                                      ToolTip="Ignore accents: &quot;e&quot; also finds é, è and ê" AutomationProperties.Name="Ignore accents" />
+                        <Button x:Name="FindPrevButton" Style="{StaticResource IconButton}" Content="&#xE70E;" FontSize="12" ToolTip="Previous match"
+                                AutomationProperties.Name="Previous match" />
+                        <Button x:Name="FindNextButton" Style="{StaticResource IconButton}" Content="&#xE70D;" FontSize="12" ToolTip="Next match"
+                                AutomationProperties.Name="Next match" />
+                        <Button x:Name="FindCloseButton" Style="{StaticResource IconButton}" Content="&#xE711;" FontSize="11" ToolTip="Close (Esc)"
+                                AutomationProperties.Name="Close find" />
                     </StackPanel>
                 </Border>
 
@@ -469,17 +474,17 @@
                     <StackPanel Orientation="Horizontal">
                         <Button Style="{StaticResource IconButton}" Command="app:Cmd.PrevPage" Content="&#xE76B;" FontSize="12" ToolTip="Previous page (Left / PgUp)" />
                         <TextBox x:Name="PageBox" MinWidth="48" MaxWidth="120" VerticalAlignment="Center" HorizontalContentAlignment="Center" Margin="2,0"
-                                 AutomationProperties.Name="Page number" ToolTip="Type a page number (or the page's label, such as iv) and press Enter (Ctrl+G)" />
+                                 AutomationProperties.Name="Page number" ToolTip="Type a page number (or the page's label, such as iv) and press Enter" />
                         <TextBlock x:Name="PageCountText" VerticalAlignment="Center" Margin="6,0,4,0" MinWidth="32" Style="{StaticResource Caption}" />
                         <Button Style="{StaticResource IconButton}" Command="app:Cmd.NextPage" Content="&#xE76C;" FontSize="12" ToolTip="Next page (Right / PgDn)" />
                         <Border Style="{StaticResource BarSeparator}" />
-                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomOut" Content="&#xE738;" FontSize="12" ToolTip="Zoom out (Ctrl+-)" />
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomOut" Content="&#xE738;" FontSize="12" ToolTip="Zoom out" />
                         <ComboBox x:Name="ZoomBox" IsEditable="True" Width="96" VerticalAlignment="Center" Margin="2,0"
                                   AutomationProperties.Name="Zoom" ToolTip="Zoom (Ctrl+mouse wheel or pinch)" />
-                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomIn" Content="&#xE710;" FontSize="12" ToolTip="Zoom in (Ctrl+=)" />
+                        <Button Style="{StaticResource IconButton}" Command="app:Cmd.ZoomIn" Content="&#xE710;" FontSize="12" ToolTip="Zoom in" />
                         <Border Style="{StaticResource BarSeparator}" />
-                        <ToggleButton x:Name="FitWidthButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitWidth" Content="&#xE9A6;" FontSize="14" ToolTip="Fit width (Ctrl+2)" />
-                        <ToggleButton x:Name="FitPageButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitPage" Content="&#xE7C3;" FontSize="14" ToolTip="Fit page (Ctrl+0)" />
+                        <ToggleButton x:Name="FitWidthButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitWidth" Content="&#xE9A6;" FontSize="14" ToolTip="Fit width" />
+                        <ToggleButton x:Name="FitPageButton" Style="{StaticResource IconButton}" Command="app:Cmd.FitPage" Content="&#xE7C3;" FontSize="14" ToolTip="Fit page" />
                     </StackPanel>
                 </Border>
             </Grid>
@@ -488,7 +493,7 @@
             <app:OrganizerView x:Name="Organizer" Visibility="Collapsed" />
 
             <!-- Busy veil for page edits (appears only if an edit takes noticeably long) -->
-            <Border x:Name="BusyOverlay" Visibility="Collapsed" Background="#22000000">
+            <Border x:Name="BusyOverlay" Visibility="Collapsed" Background="{DynamicResource SmokeFillColorDefaultBrush}">
                 <Border HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Card}" Padding="20,14">
                     <StackPanel Orientation="Horizontal">
                         <ProgressBar IsIndeterminate="True" Width="80" Height="4" VerticalAlignment="Center" />

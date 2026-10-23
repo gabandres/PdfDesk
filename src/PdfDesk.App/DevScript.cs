@@ -26,7 +26,7 @@ namespace PdfDesk.App;
 /// answer=Button{sp}Text · savepath path|cancel</c> (the next Save As/extract picker returns it) <c>· later ms step</c>
 /// (run a step while the next one is blocked in a modal) <c>· copyfile src dst</c> (another program writes a file)
 /// <c>· theme dark|light</c> (the app's Toggle Dark Mode) <c>· highcontrast on|off|system</c> (the page view's
-/// high-contrast palette). Results and errors go to <c>steps.txt.log</c> (rewritten after every step). Debug builds
+/// high-contrast palette) <c>· size W H</c> (resize the window) <c>· bounds Name</c> (a named element's position and visibility). Results and errors go to <c>steps.txt.log</c> (rewritten after every step). Debug builds
 /// only, or any build with PDFDESK_DEVSCRIPT=1.
 /// </summary>
 internal static class DevScript
@@ -377,6 +377,26 @@ internal static class DevScript
                 break;
             }
             case "darkpages": Cmd.DarkPages.Execute(null, window); break;
+            case "bounds":
+            {
+                // bounds Name: where a named element of the window is, and whether it shows.
+                if (window.FindName(arg) is FrameworkElement fe)
+                {
+                    var at = fe.IsVisible ? fe.TranslatePoint(new Point(0, 0), window) : default;
+                    log.Add($"bounds {arg}: {at.X:0},{at.Y:0} {fe.ActualWidth:0}x{fe.ActualHeight:0} visibility={fe.Visibility} visible={fe.IsVisible}");
+                }
+                else log.Add($"bounds {arg}: not found");
+                break;
+            }
+            case "size":
+            {
+                // size W H: resize the window (DIPs), e.g. to see the command bar overflow on a narrow window.
+                var a = arg.Split(' ');
+                window.Width = double.Parse(a[0], System.Globalization.CultureInfo.InvariantCulture);
+                window.Height = double.Parse(a[1], System.Globalization.CultureInfo.InvariantCulture);
+                window.UpdateLayout();
+                break;
+            }
             case "toast": window.ShowToast(new Toast(arg, "Undo", () => { })); break;
             case "palette":
                 Cmd.CommandPalette.Execute(null, window);

@@ -145,6 +145,7 @@ public static class Organize
 
     public static async Task Extract(Window owner, DocumentTab tab, MainWindow host)
     {
+        if (!await tab.SettleAsync()) return;
         var dlg = new FormDialog(owner, "Extract Pages", "Extract");
         var range = dlg.AddRange(tab);
         var mode = dlg.AddChoice("Extract to", ["A new document (opens in a tab)", "One PDF file…", "A separate PDF file per page…"]);
@@ -155,20 +156,24 @@ public static class Organize
             if (!range.TryGet(out pages, out var err)) return err;
             return delete.IsChecked == true && pages.Length >= tab.PageView.PageCount ? "You can't delete every page of a document." : null;
         });
-        if (!dlg.ShowModal()) return;
+        if (!dlg.ShowModal() || !await tab.SettleAsync()) return;
+        if (pages.Any(p => p >= tab.PageView.PageCount)) return; // the document changed meanwhile
         if (!ConfirmUnprotected(owner, tab, "The extracted pages are saved without its password protection.", "Extract anyway")) return;
 
         var name = Path.GetFileNameWithoutExtension(tab.Session.DisplayName);
         var data = tab.Session.Data;
         var pw = tab.Session.Password;
         var label = PageRange.Format(pages);
+        // Held from here, also while the save dialogs are open, so no edit lands between reading the pages and writing them.
+        var busy = tab.BeginBusy(null);
         try
         {
             switch (mode.SelectedIndex)
             {
                 case 0:
                 {
-                    tab.SetBusy("Extracting pages…");
+                    busy.Dispose();
+                    busy = tab.BeginBusy("Extracting pages…");
                     var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
                     host.OpenSession(DocumentSession.FromBytes(bytes, $"{name} (pages {label}).pdf", pw));
                     break;
@@ -185,7 +190,8 @@ public static class Organize
                         Prompt.Info(owner, $"{Path.GetFileName(path)} is open in PdfDesk",
                             "Choose a different name. To replace that document, extract to a new document instead, then use Save As.");
                     }
-                    tab.SetBusy("Extracting pages…");
+                    busy.Dispose();
+                    busy = tab.BeginBusy("Extracting pages…");
                     var bytes = await Task.Run(() => PageEditor.Extract(data, pw, pages));
                     await Task.Run(() => AtomicFile.WriteAllBytes(path, bytes));
                     host.ShowStatus($"Saved {Path.GetFileName(path)}");
@@ -197,7 +203,8 @@ public static class Organize
                     if (folder is null) return;
                     var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     var files = pages.Select(p => (PdfFiles.UniquePath(folder, $"{name} (page {p + 1}).pdf", reserved), (Func<byte[]>)(() => PageEditor.Extract(data, pw, [p])))).ToList();
-                    tab.SetBusy("Extracting pages…");
+                    busy.Dispose();
+                    busy = tab.BeginBusy("Extracting pages…");
                     await Task.Run(() => PdfFiles.WriteBatch(files));
                     host.ShowStatus($"Saved {Pages(pages.Length)} to {folder}");
                     Shell.Open(folder);
@@ -213,7 +220,7 @@ public static class Organize
         }
         finally
         {
-            tab.SetBusy(null);
+            busy.Dispose();
         }
 
         if (delete.IsChecked == true)
@@ -222,6 +229,7 @@ public static class Organize
 
     public static async Task Split(Window owner, DocumentTab tab, MainWindow host)
     {
+        if (!await tab.SettleAsync()) return;
         var count = tab.PageView.PageCount;
         var outline = tab.Session.Engine.GetOutline();
         var dlg = new FormDialog(owner, "Split Document", "Split", 480);
@@ -289,14 +297,14 @@ public static class Organize
             }
             return null;
         });
-        if (!dlg.ShowModal()) return;
+        if (!dlg.ShowModal() || !await tab.SettleAsync() || tab.PageView.PageCount != count) return;
         if (!ConfirmUnprotected(owner, tab, "The split files are saved without its password protection.", "Split anyway")) return;
 
         var data = tab.Session.Data;
         var pw = tab.Session.Password;
         var folder = folderBox.Text;
         var files = parts.Select((p, i) => (targets[i], (Func<byte[]>)(() => PageEditor.Extract(data, pw, p.Pages)))).ToList();
-        tab.SetBusy($"Splitting into {parts.Count} files…");
+        using var busy = tab.BeginBusy($"Splitting into {parts.Count} files…");
         try
         {
             await Task.Run(() => PdfFiles.WriteBatch(files));
@@ -307,10 +315,6 @@ public static class Organize
         {
             Log.Write($"Split failed: {ex}");
             Prompt.Error(owner, "Split didn't work", BatchFailure(ex));
-        }
-        finally
-        {
-            tab.SetBusy(null);
         }
     }
 
@@ -439,6 +443,7 @@ public static class Organize
         }
         var bookmarks = dlg.BookmarkPerFile;
         host.ShowStatus($"Combining {sources.Count} files…");
+        using var taskbar = new TaskbarProgress(host);
         try
         {
             var bytes = await Task.Run(() => PageEditor.Merge(sources, bookmarks));

@@ -58,21 +58,27 @@ foreach ($path in $lnk, $desktopLnk) {
 }
 
 # "Open with" + Default Apps registration (per user). Windows still asks you to pick the default yourself.
+# New-Item -Force on an existing key deletes its values (other apps' Open With entries, every registered app), so
+# shared keys are only created when missing; our own keys are created the same way for consistency.
+function Get-Key([string]$path) {
+    if (-not (Test-Path $path)) { New-Item $path -Force | Out-Null }
+    Get-Item $path
+}
 $open = "`"$exe`" `"%1`""
-New-Item "$classes\$progId\shell\open\command" -Force | Set-ItemProperty -Name '(default)' -Value $open
+Get-Key "$classes\$progId\shell\open\command" | Set-ItemProperty -Name '(default)' -Value $open
 Set-ItemProperty "$classes\$progId" -Name '(default)' -Value 'PDF Document'
-New-Item "$classes\$progId\DefaultIcon" -Force | Set-ItemProperty -Name '(default)' -Value "`"$docIcon`""
-New-Item "$classes\Applications\PdfDesk.exe\shell\open\command" -Force | Set-ItemProperty -Name '(default)' -Value $open
-New-Item "$classes\Applications\PdfDesk.exe\SupportedTypes" -Force | Out-Null
-New-Item 'HKCU:\Software\PdfDesk\Capabilities\FileAssociations' -Force | Out-Null
+Get-Key "$classes\$progId\DefaultIcon" | Set-ItemProperty -Name '(default)' -Value "`"$docIcon`""
+Get-Key "$classes\Applications\PdfDesk.exe\shell\open\command" | Set-ItemProperty -Name '(default)' -Value $open
+Get-Key "$classes\Applications\PdfDesk.exe\SupportedTypes" | Out-Null
+Get-Key 'HKCU:\Software\PdfDesk\Capabilities\FileAssociations' | Out-Null
 Set-ItemProperty 'HKCU:\Software\PdfDesk\Capabilities' -Name ApplicationName -Value 'PdfDesk'
 Set-ItemProperty 'HKCU:\Software\PdfDesk\Capabilities' -Name ApplicationDescription -Value 'View, search, print and organize PDF files'
 foreach ($t in $types) {
-    New-Item "$classes\$t\OpenWithProgids" -Force | New-ItemProperty -Name $progId -Value '' -PropertyType String -Force | Out-Null
+    Get-Key "$classes\$t\OpenWithProgids" | New-ItemProperty -Name $progId -Value '' -PropertyType String -Force | Out-Null
     New-ItemProperty "$classes\Applications\PdfDesk.exe\SupportedTypes" -Name $t -Value '' -PropertyType String -Force | Out-Null
     Set-ItemProperty 'HKCU:\Software\PdfDesk\Capabilities\FileAssociations' -Name $t -Value $progId
 }
-New-Item 'HKCU:\Software\RegisteredApplications' -Force | Set-ItemProperty -Name PdfDesk -Value 'Software\PdfDesk\Capabilities'
+Get-Key 'HKCU:\Software\RegisteredApplications' | Set-ItemProperty -Name PdfDesk -Value 'Software\PdfDesk\Capabilities'
 
 Add-Type -Namespace Win32 -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, IntPtr a, IntPtr b);'
 [Win32.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) # SHCNE_ASSOCCHANGED

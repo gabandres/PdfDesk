@@ -51,7 +51,7 @@ public partial class App : Application
                 return;
             }
             _ready.BringToFront();
-            _ready.OpenFiles(forwarded);
+            _ready.OpenForwarded(forwarded);
         }));
 
         base.OnStartup(e);

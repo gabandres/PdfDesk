@@ -193,7 +193,8 @@
             <Setter Property="MaxWidth" Value="240" />
             <Setter Property="AutomationProperties.Name" Value="{Binding Title}" />
             <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
-            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <!-- Fluent focus rectangle when tabbing or arrowing through the tabs (not on mouse clicks) -->
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ListBoxItem">

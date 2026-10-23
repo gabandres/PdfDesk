@@ -139,7 +139,9 @@ public partial class DocumentTab : UserControl, IDisposable
 
     public DocumentSession Session { get; }
     public PageViewer PageView => Viewer;
-    public bool IsBusy { get; private set; }
+    /// <summary>True while any long operation (edit, print, export, save, reload, a warning prompt) holds the tab.</summary>
+    public bool IsBusy => _busy.Count > 0;
+    private readonly List<BusyLease> _busy = [];
 
     /// <summary>Page, zoom, selection, dirty state or busy state changed (refresh toolbar/status/header).</summary>
     public event EventHandler? StateChanged;
@@ -154,6 +156,14 @@ public partial class DocumentTab : UserControl, IDisposable
         InitializeComponent();
         Session = session;
         _scheduler = new RenderScheduler(Dispatcher);
+
+        // Shortcuts in tooltips come from the commands' gestures (never typed by hand, so they can't drift).
+        Cmd.AddShortcutsToTips(this);
+        PageBox.ToolTip = Cmd.Tip((string)PageBox.ToolTip, Cmd.GoToPage);
+        SearchRail.ToolTip = Cmd.Tip("Search", Cmd.SearchPane);
+        ClosePaneButton.ToolTip = Cmd.Tip("Close pane", Cmd.NavPane);
+        FindPrevButton.ToolTip = Cmd.Tip("Previous match", Cmd.FindPrevious);
+        FindNextButton.ToolTip = Cmd.Tip("Next match", Cmd.FindNext);
 
         Thumbs.ItemsSource = _thumbs;
         SearchResults.ItemsSource = _results;
@@ -229,7 +239,7 @@ public partial class DocumentTab : UserControl, IDisposable
         _busyDelay.Tick += (_, _) =>
         {
             _busyDelay.Stop();
-            if (IsBusy) BusyOverlay.Visibility = Visibility.Visible;
+            if (BusyText.Text.Length > 0) BusyOverlay.Visibility = Visibility.Visible;
         };
         _saveViewDelay.Tick += (_, _) =>
         {
@@ -494,7 +504,7 @@ public partial class DocumentTab : UserControl, IDisposable
         var fields = widgets.Where(w => !w.ReadOnly && w.Kind is not (FormFieldKind.PushButton or FormFieldKind.Signature))
             .Select(w => w.FieldName).Distinct().Count();
         FormBar.Visibility = fields > 0 && !_formBarDismissed ? Visibility.Visible : Visibility.Collapsed;
-        FormBarText.Text = $"This form has {fields} fillable field{(fields == 1 ? "" : "s")}. Click a field to fill it; Tab moves to the next one. Save (Ctrl+S) when you're done.";
+        FormBarText.Text = $"This form has {fields} fillable field{(fields == 1 ? "" : "s")}. Click a field to fill it; Tab moves to the next one. {Cmd.Tip("Save", Cmd.Save)} when you're done.";
         RaiseState();
     }
 
@@ -747,11 +757,12 @@ public partial class DocumentTab : UserControl, IDisposable
         }
         if (_disposed) return EditOutcome.Failed;
         if (IsBusy) return EditOutcome.Busy;
+        BusyLease? hold = null;
         if ((Session.Engine.IsEncrypted && !_protectionWarned) || NeedsSignedWarning)
         {
             // Hold the tab while the warning is open, so an edit started meanwhile waits (Busy) instead of slipping in
             // or opening a second prompt. No veil: the prompt is the only thing on screen.
-            IsBusy = true;
+            hold = BeginBusy(null);
             var go = false;
             try
             {
@@ -759,13 +770,18 @@ public partial class DocumentTab : UserControl, IDisposable
             }
             finally
             {
-                if (!go) SetBusy(null);
+                if (!go) hold.Dispose();
             }
             if (!go) return EditOutcome.Declined;
-            if (_disposed) return EditOutcome.Failed;
+            if (_disposed)
+            {
+                hold.Dispose();
+                return EditOutcome.Failed;
+            }
         }
 
-        SetBusy($"{label}…");
+        using var busy = BeginBusy($"{label}…");
+        hold?.Dispose();
         BeginWrite();
         try
         {
@@ -847,7 +863,6 @@ public partial class DocumentTab : UserControl, IDisposable
         finally
         {
             EndWrite();
-            if (!_disposed) SetBusy(null);
         }
     }
 
@@ -899,15 +914,51 @@ public partial class DocumentTab : UserControl, IDisposable
         }
     }
 
-    public void SetBusy(string? text)
+    /// <summary>
+    /// Holds the tab busy until the returned lease is disposed (once; disposing again does nothing). Leases nest: the tab is
+    /// idle only when every lease has ended, so one operation finishing never clears another's busy state. With
+    /// <paramref name="text"/> a veil with that text appears if the work takes noticeably long; null holds without a veil.
+    /// </summary>
+    public BusyLease BeginBusy(string? text)
     {
-        IsBusy = text is not null;
+        var lease = new BusyLease(this, text);
+        _busy.Add(lease);
+        UpdateBusy();
+        return lease;
+    }
+
+    /// <summary>
+    /// Before a long operation that asks for options first (print, export, extract): lets a value still being typed land
+    /// and any edit in flight finish. Call it before the dialog and again after (opening a dialog commits the open field
+    /// editor). False when the tab was closed meanwhile.
+    /// </summary>
+    public async Task<bool> SettleAsync()
+    {
+        await FlushPendingEditsAsync();
+        return !_disposed;
+    }
+
+    private void EndBusy(BusyLease lease)
+    {
+        if (!_busy.Remove(lease) || _disposed) return;
+        UpdateBusy();
+    }
+
+    private void UpdateBusy()
+    {
+        var text = _busy.LastOrDefault(b => b.Text is not null)?.Text;
         BusyText.Text = text ?? "";
         // Most edits finish in a blink; only show the veil if one takes noticeably long.
-        _busyDelay.Stop();
-        if (IsBusy) _busyDelay.Start();
-        else BusyOverlay.Visibility = Visibility.Collapsed;
-        Cursor = IsBusy ? Cursors.AppStarting : null;
+        if (text is null)
+        {
+            _busyDelay.Stop();
+            BusyOverlay.Visibility = Visibility.Collapsed;
+        }
+        else if (BusyOverlay.Visibility != Visibility.Visible && !_busyDelay.IsEnabled)
+        {
+            _busyDelay.Start();
+        }
+        Cursor = text is not null ? Cursors.AppStarting : null;
         if (!IsBusy)
         {
             var idle = _idle;
@@ -916,6 +967,13 @@ public partial class DocumentTab : UserControl, IDisposable
         }
         RaiseState();
         CommandManager.InvalidateRequerySuggested();
+    }
+
+    /// <summary>One holder of the tab's busy state (see <see cref="BeginBusy"/>).</summary>
+    public sealed class BusyLease(DocumentTab tab, string? text) : IDisposable
+    {
+        public string? Text { get; } = text;
+        public void Dispose() => tab.EndBusy(this);
     }
 
     private void OnContentChanged(object? sender, EventArgs e)
@@ -1076,29 +1134,38 @@ public partial class DocumentTab : UserControl, IDisposable
         ShowInsertion(y);
     }
 
-    private async void OnThumbDrop(object sender, DragEventArgs e)
+    private void OnThumbDrop(object sender, DragEventArgs e)
     {
         e.Handled = true;
         HideInsertion();
         var (before, _) = InsertionPoint(e.GetPosition(Thumbs));
-        await DropPages(e, before);
+        DropPages(e, before);
     }
 
-    /// <summary>Handles pages dragged from this or another tab, or PDF files from Explorer, dropped before page <paramref name="before"/>.</summary>
-    public async Task DropPages(DragEventArgs e, int before)
+    /// <summary>
+    /// Handles pages dragged from this or another tab, or PDF files from Explorer, dropped before page <paramref name="before"/>.
+    /// Only reads what was dropped here; the work (reading files, password or warning prompts) runs after the drop has
+    /// completed, so the drag source (Explorer) isn't left frozen mid-drag.
+    /// </summary>
+    public void DropPages(DragEventArgs e, int before)
     {
         if (!Session.IsPdf || IsBusy) return;
-        if (e.Data.GetData(PagesFormat) is PageDragData d)
+        var pages = e.Data.GetData(PagesFormat) as PageDragData;
+        var files = pages is null ? DroppedPdfs(e) : [];
+        if (pages is null && files.Length == 0) return;
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _ = DropPagesAsync(pages, files, before));
+    }
+
+    private async Task DropPagesAsync(PageDragData? d, string[] files, int before)
+    {
+        if (_disposed || !Session.IsPdf) return;
+        if (d is not null)
         {
             if (d.Source == this)
             {
-                var order = PageEditor.MoveOrder(Viewer.PageCount, d.Pages, before);
-                if (order.SequenceEqual(Enumerable.Range(0, order.Length))) return;
-                var newFirst = Array.IndexOf(order, d.Pages[0]);
-                if (await RunEdit($"Move {Plural(d.Pages.Length)}", (data, pw) => PageEditor.Reorder(data, pw, order), newFirst))
-                    SelectPages(Enumerable.Range(newFirst, d.Pages.Length));
+                await MovePagesAsync(d.Pages, before);
             }
-            else
+            else if (!d.Source.IsDisposed)
             {
                 var src = new PdfSource(d.Source.Session.Data, d.Source.Session.Password, d.Source.Session.DisplayName);
                 await RunEdit($"Copy {Plural(d.Pages.Length)} from {src.Name}", (data, pw) => PageEditor.Insert(data, pw, src, d.Pages, before), before);
@@ -1106,11 +1173,27 @@ public partial class DocumentTab : UserControl, IDisposable
             return;
         }
 
-        foreach (var path in DroppedPdfs(e).Reverse())
+        foreach (var path in files.Reverse())
         {
-            if (PdfFiles.LoadForImport(Window.GetWindow(this)!, path) is not { } source) continue;
+            if (_disposed || Window.GetWindow(this) is not { } owner) return;
+            if (PdfFiles.LoadForImport(owner, path) is not { } source) continue;
             await RunEdit($"Insert {Path.GetFileName(path)}", (data, pw) => PageEditor.Insert(data, pw, source, null, before), before);
         }
+    }
+
+    /// <summary>
+    /// Moves <paramref name="pages"/> so they sit before original page <paramref name="before"/> (one undo step) and keeps
+    /// them selected. Returns where the first one landed, or null when nothing moved.
+    /// </summary>
+    public async Task<int?> MovePagesAsync(int[] pages, int before)
+    {
+        if (pages.Length == 0 || pages.Any(p => p < 0 || p >= Viewer.PageCount)) return null;
+        var order = PageEditor.MoveOrder(Viewer.PageCount, pages, before);
+        if (order.SequenceEqual(Enumerable.Range(0, order.Length))) return null;
+        var newFirst = Array.IndexOf(order, pages.Min());
+        if (!await RunEdit($"Move {Plural(pages.Length)}", (data, pw) => PageEditor.Reorder(data, pw, order), newFirst)) return null;
+        SelectPages(Enumerable.Range(newFirst, pages.Length));
+        return newFirst;
     }
 
     private static string Plural(int n) => n == 1 ? "1 page" : $"{n} pages";
@@ -1164,7 +1247,6 @@ public partial class DocumentTab : UserControl, IDisposable
 
     private sealed class InsertionAdorner(UIElement adorned) : Adorner(adorned)
     {
-        private static readonly Pen LinePen = new(new SolidColorBrush(Color.FromRgb(0x00, 0x78, 0xD4)), 3);
         private double _y;
 
         public double Y
@@ -1180,7 +1262,9 @@ public partial class DocumentTab : UserControl, IDisposable
         protected override void OnRender(DrawingContext dc)
         {
             IsHitTestVisible = false;
-            dc.DrawLine(LinePen, new Point(8, _y), new Point(AdornedElement.RenderSize.Width - 8, _y));
+            // The theme's accent (the Windows accent color; the highlight color in high contrast).
+            var brush = TryFindResource("AccentFillColorDefaultBrush") as Brush ?? SystemColors.HighlightBrush;
+            dc.DrawLine(new Pen(brush, 3), new Point(8, _y), new Point(AdornedElement.RenderSize.Width - 8, _y));
         }
     }
 
@@ -1563,6 +1647,20 @@ public partial class DocumentTab : UserControl, IDisposable
         }
     }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr hwnd);
+
+    /// <summary>
+    /// True while a modal dialog is open: a WPF one (thread modal), or a Windows one such as a file picker or the print
+    /// dialog (those disable the window they belong to).
+    /// </summary>
+    private bool IsDialogOpen()
+    {
+        if (System.Windows.Interop.ComponentDispatcher.IsThreadModal) return true;
+        var hwnd = Window.GetWindow(this) is { } w ? new System.Windows.Interop.WindowInteropHelper(w).Handle : IntPtr.Zero;
+        return hwnd != IntPtr.Zero && !IsWindowEnabled(hwnd);
+    }
+
     /// <summary>After our own save: the copy on disk is ours now, so any "changed on disk" bar is stale.</summary>
     public void NoteSaved()
     {
@@ -1582,9 +1680,11 @@ public partial class DocumentTab : UserControl, IDisposable
     private void CheckDisk()
     {
         if (_disposed || Session.FilePath is null) return;
-        if (IsBusy || _pendingWrites > 0)
+        // A modal dialog (an edit's options, a prompt, a file picker) may hold page numbers or the engine of this content:
+        // look again once the edit in progress is done and every dialog is closed.
+        if (IsBusy || _pendingWrites > 0 || IsDialogOpen())
         {
-            ScheduleDiskCheck(); // look again once the edit in progress is done
+            ScheduleDiskCheck();
             return;
         }
         bool missing, changed;
@@ -1633,12 +1733,21 @@ public partial class DocumentTab : UserControl, IDisposable
         // Let an open editor's value and any edit in flight land first, so nothing is written over the reloaded copy.
         await FlushPendingEditsAsync();
         if (_disposed || IsBusy || _pendingWrites > 0) return;
+        // Read and parsed on a worker thread (big files don't freeze the window); busy meanwhile, so no edit cuts in.
+        var busy = BeginBusy($"Reloading {Session.DisplayName}…");
         try
         {
-            _formQueue.Clear();
-            Viewer.ClearPendingValues();
-            _signatureBaselineStale = true;
-            Session.ReloadFromDisk();
+            var reloaded = await Session.ReloadFromDiskAsync(() =>
+            {
+                if (_disposed) return false;
+                // Values typed while the file was read are part of the copy being replaced.
+                _formQueue.Clear();
+                Viewer.ClearPendingValues();
+                _signatureBaselineStale = true;
+                busy.Dispose(); // idle again before the new content arrives, so its handlers see a normal tab
+                return true;
+            });
+            if (!reloaded) return;
             _undoIds.Clear();
             _redoIds.Clear();
             _reloadAttempts = 0;
@@ -1657,6 +1766,10 @@ public partial class DocumentTab : UserControl, IDisposable
             _reloadAttempts = 0;
             ShowDiskBar($"{Session.DisplayName} was changed by another program, but it couldn't be reloaded: {ex.Message}",
                 "Try again", () => _ = ReloadFromDiskAsync(toast), null, null);
+        }
+        finally
+        {
+            busy.Dispose();
         }
     }
 

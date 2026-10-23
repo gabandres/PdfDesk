@@ -11,7 +11,8 @@
             <DockPanel LastChildFill="False">
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock Text="Organize pages" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
-                    <TextBlock x:Name="SelectionText" Margin="16,0,0,0" VerticalAlignment="Center" Style="{StaticResource Caption}" />
+                    <TextBlock x:Name="SelectionText" Margin="16,0,0,0" VerticalAlignment="Center" Style="{StaticResource Caption}"
+                               AutomationProperties.LiveSetting="Polite" />
                     <Button x:Name="SelectAllButton" Content="Select all" Margin="16,0,0,0" Style="{StaticResource TextButton}" />
                     <Button x:Name="SelectNoneButton" Content="Clear selection" Margin="4,0,0,0" Style="{StaticResource TextButton}" />
                 </StackPanel>
@@ -84,8 +85,10 @@
                                         </StackPanel>
                                     </Border>
                                     <DataTemplate.Triggers>
+                                        <!-- The focused card (keyboard cursor, or the last one clicked) shows its actions too, not only on hover -->
                                         <DataTrigger Binding="{Binding IsFocused}" Value="True">
                                             <Setter TargetName="Card" Property="BorderBrush" Value="{DynamicResource TextFillColorTertiaryBrush}" />
+                                            <Setter TargetName="Actions" Property="Visibility" Value="Visible" />
                                         </DataTrigger>
                                         <DataTrigger Binding="{Binding IsSelected}" Value="True">
                                             <Setter TargetName="Card" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />

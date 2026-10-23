@@ -34,7 +34,6 @@
                         <Style TargetType="ListBoxItem" BasedOn="{StaticResource TitleTab}">
                             <Setter Property="MinWidth" Value="110" />
                             <Setter Property="MaxWidth" Value="{Binding TabMaxWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
-                            <Setter Property="FocusVisualStyle" Value="{DynamicResource DefaultControlFocusVisualStyle}" />
                         </Style>
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemsPanel>
@@ -46,7 +45,7 @@
                         <DataTemplate DataType="{x:Type app:TabModel}">
                             <DockPanel ToolTip="{Binding ToolTip}" AutomationProperties.Name="{Binding Title}" Background="Transparent">
                                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" FontSize="10" Height="24" MinWidth="24" Padding="4"
-                                        Content="&#xE711;" ToolTip="Close (Ctrl+W)" Click="OnTabCloseClick" Margin="6,0,0,0" />
+                                        Content="&#xE711;" ToolTip="{x:Static app:Cmd.CloseTabTip}" Click="OnTabCloseClick" Margin="6,0,0,0" />
                                 <TextBlock DockPanel.Dock="Left" Text="&#xE915;" FontFamily="{StaticResource Icons}" FontSize="9" Margin="0,0,6,0"
                                            VerticalAlignment="Center" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"
                                            Visibility="{Binding DirtyVisibility}" ToolTip="Unsaved changes" />
@@ -56,7 +55,7 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
                 <Button x:Name="NewTabButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" FontSize="12" Height="30" MinWidth="30"
-                        Margin="4,6,0,0" Content="&#xE710;" ToolTip="Open a file (Ctrl+O)" Command="app:Cmd.Open"
+                        Margin="4,6,0,0" Content="&#xE710;" ToolTip="Open a file" Command="app:Cmd.Open"
                         WindowChrome.IsHitTestVisibleInChrome="True" />
                 <ProgressBar x:Name="OpenProgress" DockPanel.Dock="Left" IsIndeterminate="True" Width="48" Height="4" Margin="10,4,0,0"
                              VerticalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Opening files" />
@@ -70,23 +69,25 @@
                 <!-- Menu + command bar -->
                 <Border x:Name="CommandBar" DockPanel.Dock="Top" Padding="4,4,8,4"
                         BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
-                    <DockPanel>
+                    <!-- One row at every width: commands that don't fit go into the "More" (…) menu at the end of the bar. -->
+                    <DockPanel MinHeight="34">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Style="{StaticResource CommandButton}" Command="app:Cmd.CommandPalette" ToolTip="Search all commands (Ctrl+K)">
-                                <StackPanel Orientation="Horizontal">
+                            <Button Style="{StaticResource CommandButton}" Command="app:Cmd.CommandPalette" ToolTip="Search all commands">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE765;" FontSize="14" />
                                     <TextBlock Text="Commands" Margin="8,0,8,0" VerticalAlignment="Center" />
-                                    <Border CornerRadius="3" Padding="5,0" BorderThickness="1" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}">
-                                        <TextBlock Text="Ctrl+K" FontSize="11" Style="{StaticResource Caption}" />
+                                    <Border CornerRadius="3" Padding="5,0,5,1" BorderThickness="1" VerticalAlignment="Center"
+                                            BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}">
+                                        <TextBlock x:Name="PaletteKeyText" FontSize="11" Style="{StaticResource Caption}" />
                                     </Border>
                                 </StackPanel>
                             </Button>
                             <Button x:Name="AppearanceButton" Style="{StaticResource IconButton}" Content="&#xE708;" Click="OnAppearanceClick"
-                                    ToolTip="Appearance: dark mode, light mode, dark pages (Ctrl+Shift+L toggles dark mode)" />
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Settings" Content="&#xE713;" ToolTip="Settings (Ctrl+,)" />
+                                    ToolTip="Appearance: dark mode, light mode, dark pages" />
+                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Settings" Content="&#xE713;" ToolTip="Settings" />
                         </StackPanel>
-                        <WrapPanel VerticalAlignment="Center">
-                            <Menu x:Name="MainMenu" Background="Transparent" VerticalAlignment="Center" Margin="0,0,4,0">
+                        <DockPanel VerticalAlignment="Stretch">
+                            <Menu x:Name="MainMenu" DockPanel.Dock="Left" Background="Transparent" VerticalAlignment="Center" Margin="0,0,4,0">
                                 <MenuItem Header="_File">
                                     <MenuItem Command="app:Cmd.Open" />
                                     <MenuItem x:Name="RecentMenu" Header="Open _Recent" />
@@ -103,6 +104,7 @@
                                     <Separator />
                                     <MenuItem Command="app:Cmd.CloseDoc" />
                                     <MenuItem Command="app:Cmd.CloseAll" />
+                                    <MenuItem Command="app:Cmd.ReopenClosed" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Settings" />
                                     <MenuItem Command="app:Cmd.Exit" InputGestureText="Alt+F4" />
@@ -123,11 +125,13 @@
                                     <MenuItem x:Name="SelectMenu" Command="app:Cmd.ToolSelect" InputGestureText="T" />
                                     <MenuItem x:Name="SnapshotMenu" Command="app:Cmd.ToolSnapshot" InputGestureText="G" />
                                     <Separator />
-                                    <MenuItem x:Name="AddTextMenu" Command="app:Cmd.ToolAddText" InputGestureText="A" />
-                                    <MenuItem x:Name="CheckMenu" Command="app:Cmd.ToolCheck" InputGestureText="K" />
-                                    <MenuItem x:Name="CrossMenu" Command="app:Cmd.ToolCross" InputGestureText="X" />
-                                    <MenuItem Command="app:Cmd.AddSignature" />
-                                    <MenuItem Command="app:Cmd.Sign" />
+                                    <!-- Fill & Sign: type or mark on any page, handwritten signature (digital signing is under Review) -->
+                                    <MenuItem Header="_Fill &amp; Sign">
+                                        <MenuItem x:Name="AddTextMenu" Command="app:Cmd.ToolAddText" InputGestureText="A" />
+                                        <MenuItem x:Name="CheckMenu" Command="app:Cmd.ToolCheck" InputGestureText="K" />
+                                        <MenuItem x:Name="CrossMenu" Command="app:Cmd.ToolCross" InputGestureText="X" />
+                                        <MenuItem Command="app:Cmd.AddSignature" />
+                                    </MenuItem>
                                     <Separator />
                                     <MenuItem Command="app:Cmd.CommandPalette" />
                                 </MenuItem>
@@ -213,56 +217,67 @@
                                     <MenuItem Header="_About PdfDesk" Click="OnAbout" />
                                 </MenuItem>
                             </Menu>
-                            <StackPanel x:Name="DocCommands" Orientation="Horizontal">
+                            <!-- Tooltips name the action; the shortcut is added from the command's own gestures (Cmd.AddShortcutsToTips).
+                                 Letter keys (H, T, G, A, K, X) are page-view keys, not commands, so they are written here. -->
+                            <!-- Without a document only Combine applies; with one it moves into the document commands -->
+                            <Button x:Name="NoDocCombineButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Command="app:Cmd.Combine"
+                                    ToolTip="Combine several PDFs into one" Content="&#xE8F1;" />
+                            <app:ToolbarPanel x:Name="DocCommands" VerticalAlignment="Center">
                                 <Border Style="{StaticResource BarSeparator}" />
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Save" ToolTip="Save (Ctrl+S)" Content="&#xE74E;" />
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Print" ToolTip="Print (Ctrl+P)" Content="&#xE749;" />
-                                <Button x:Name="UndoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Undo" ToolTip="Undo (Ctrl+Z)" Content="&#xE7A7;" />
-                                <Button x:Name="RedoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redo" ToolTip="Redo (Ctrl+Y)" Content="&#xE7A6;" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Save" ToolTip="Save" Content="&#xE74E;" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Print" ToolTip="Print" Content="&#xE749;" />
+                                <Button x:Name="UndoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Undo" ToolTip="Undo" Content="&#xE7A7;" />
+                                <Button x:Name="RedoButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redo" ToolTip="Redo" Content="&#xE7A6;" />
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <ToggleButton x:Name="HandButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolHand" ToolTip="Hand tool: drag to scroll (H)" Content="&#xE7C9;" />
                                 <ToggleButton x:Name="SelectButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSelect" ToolTip="Select text (T)" Content="&#xE8E9;" />
                                 <ToggleButton x:Name="SnapshotButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolSnapshot" ToolTip="Snapshot: drag to copy an area as an image (G)" Content="&#xE722;" />
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <ToggleButton x:Name="AddTextButton" Style="{StaticResource CommandButton}" Command="app:Cmd.ToolAddText"
-                                              ToolTip="Fill and Sign: click anywhere on a page to type text, e.g. on a scanned form (A)">
+                                              ToolTip="Fill &amp; Sign, add text: click anywhere on a page to type, e.g. on a scanned form (A)" AutomationProperties.Name="Add text">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Style="{StaticResource Icon}" Text="&#xE8D2;" FontSize="15" />
-                                        <TextBlock Text="Add text" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                        <TextBlock Text="Add text" Margin="8,0,0,0" VerticalAlignment="Center" app:ToolbarPanel.IsLabel="True" />
                                     </StackPanel>
                                 </ToggleButton>
-                                <ToggleButton x:Name="CheckButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCheck" Content="&#xE73E;" ToolTip="Add a check mark: click where it goes (K)" />
-                                <ToggleButton x:Name="CrossButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCross" Content="&#xE711;" ToolTip="Add a cross: click where it goes (X)" />
+                                <ToggleButton x:Name="CheckButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCheck" Content="&#xE73E;"
+                                              ToolTip="Fill &amp; Sign, check mark: click on the page where it goes (K)" AutomationProperties.Name="Add check mark" />
+                                <ToggleButton x:Name="CrossButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolCross" Content="&#xE711;"
+                                              ToolTip="Fill &amp; Sign, cross: click on the page where it goes (X)" AutomationProperties.Name="Add cross" />
                                 <ToggleButton x:Name="AddSignatureButton" Style="{StaticResource CommandButton}" Command="app:Cmd.AddSignature"
                                               ToolTip="Sign: place your handwritten signature or initials, or sign digitally with a certificate" AutomationProperties.Name="Sign">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Style="{StaticResource Icon}" Text="&#xE76D;" FontSize="15" />
-                                        <TextBlock Text="Sign" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                        <TextBlock Text="Sign" Margin="8,0,0,0" VerticalAlignment="Center" app:ToolbarPanel.IsLabel="True" />
                                     </StackPanel>
                                 </ToggleButton>
                                 <Border Style="{StaticResource BarSeparator}" />
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text (Ctrl+Shift+H)" AutomationProperties.Name="Highlight" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text" AutomationProperties.Name="Highlight" />
                                 <ToggleButton x:Name="NoteButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE90A;" ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />
-                                <ToggleButton x:Name="RedactButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redact" Content="&#xE72E;" ToolTip="Redact: drag over areas to black out, then apply" AutomationProperties.Name="Redact" />
+                                <ToggleButton x:Name="RedactButton" Style="{StaticResource IconButton}" Command="app:Cmd.Redact" Content="&#xE73B;"
+                                              ToolTip="Redact: drag over areas to black out, then apply (removes the content for good)" AutomationProperties.Name="Redact" />
                                 <Border Style="{StaticResource BarSeparator}" />
-                                <ToggleButton x:Name="OrganizeButton" Style="{StaticResource CommandButton}" Command="app:Cmd.Organize" ToolTip="Organize pages: reorder, rotate, delete in a grid (Ctrl+Shift+O)">
+                                <ToggleButton x:Name="OrganizeButton" Style="{StaticResource CommandButton}" Command="app:Cmd.Organize" ToolTip="Organize pages: reorder, rotate, delete in a grid">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Style="{StaticResource Icon}" Text="&#xE8B3;" FontSize="15" />
-                                        <TextBlock Text="Organize" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                        <TextBlock Text="Organize" Margin="8,0,0,0" VerticalAlignment="Center" app:ToolbarPanel.IsLabel="True" />
                                     </StackPanel>
                                 </ToggleButton>
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateLeft" ToolTip="Rotate counterclockwise (Ctrl+Shift+-)" Content="&#xE7AD;" />
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateRight" ToolTip="Rotate clockwise (Ctrl+Shift++)" Content="&#xE7AD;" RenderTransformOrigin="0.5,0.5">
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateLeft" ToolTip="Rotate pages counterclockwise" Content="&#xE7AD;" AutomationProperties.Name="Rotate pages counterclockwise" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.RotateRight" ToolTip="Rotate pages clockwise" Content="&#xE7AD;" RenderTransformOrigin="0.5,0.5"
+                                        AutomationProperties.Name="Rotate pages clockwise">
                                     <Button.RenderTransform>
                                         <ScaleTransform ScaleX="-1" />
                                     </Button.RenderTransform>
                                 </Button>
                                 <Button Style="{StaticResource IconButton}" Command="app:Cmd.DeleteSelected" ToolTip="Delete selected pages (Del)" Content="&#xE74D;" />
                                 <Border Style="{StaticResource BarSeparator}" />
-                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Find" ToolTip="Find in document (Ctrl+F)" Content="&#xE721;" />
-                            </StackPanel>
-                            <Button Style="{StaticResource IconButton}" Command="app:Cmd.Combine" ToolTip="Combine several PDFs into one" Content="&#xE8F1;" />
-                        </WrapPanel>
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Find" ToolTip="Find in document" Content="&#xE721;" />
+                                <Button Style="{StaticResource IconButton}" Command="app:Cmd.Combine" ToolTip="Combine several PDFs into one" Content="&#xE8F1;" />
+                                <Button x:Name="MoreButton" app:ToolbarPanel.IsOverflowButton="True" Style="{StaticResource IconButton}" Content="&#xE712;"
+                                        ToolTip="More commands" Click="OnMoreClick" />
+                            </app:ToolbarPanel>
+                        </DockPanel>
                     </DockPanel>
                 </Border>
 
@@ -363,7 +378,7 @@
                     <StackPanel x:Name="Toasts" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,76" />
 
                     <!-- Command palette -->
-                    <Grid x:Name="Palette" Visibility="Collapsed" Background="#01000000">
+                    <Grid x:Name="Palette" Visibility="Collapsed" Background="Transparent">
                         <Border Width="600" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,28,0,0" Padding="8"
                                 CornerRadius="10" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}"
                                 BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -371,8 +386,24 @@
                                 <DropShadowEffect BlurRadius="28" ShadowDepth="4" Opacity="0.28" />
                             </Border.Effect>
                             <DockPanel>
-                                <TextBox x:Name="PaletteBox" DockPanel.Dock="Top" FontSize="15" Padding="10,8"
-                                         AutomationProperties.Name="Type a command, a page number, or a recent file" />
+                                <Grid DockPanel.Dock="Top">
+                                    <TextBox x:Name="PaletteBox" FontSize="15" Padding="10,8"
+                                             AutomationProperties.Name="Type a command, file, or page number" />
+                                    <!-- Placeholder: shown while the box is empty -->
+                                    <TextBlock Text="Type a command, file, or page number" FontSize="15" Margin="13,0,0,0" VerticalAlignment="Center"
+                                               IsHitTestVisible="False">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=PaletteBox}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
                                 <TextBlock DockPanel.Dock="Bottom" Margin="6,8,6,2" FontSize="11" Style="{StaticResource Caption}"
                                            Text="↑↓ to choose · Enter to run · Esc to close · type a number to go to that page" />
                                 <ListBox x:Name="PaletteList" MaxHeight="420" Margin="0,8,0,0" BorderThickness="0" Background="Transparent" ItemContainerStyle="{StaticResource SubtleListItem}"
