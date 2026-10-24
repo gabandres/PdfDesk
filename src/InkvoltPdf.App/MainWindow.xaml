@@ -23,7 +23,7 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition x:Name="CaptionColumn" Width="140" />
             </Grid.ColumnDefinitions>
-            <Image Source="InkvoltPdf.ico" Width="16" Height="16" Margin="14,0,10,0" VerticalAlignment="Center" />
+            <Image app:IconImage.Source="InkvoltPdf.ico" Width="16" Height="16" Margin="14,0,10,0" VerticalAlignment="Center" />
             <!-- Tabs get at most the width left after the + button and a drag strip (set in code); they shrink, then scroll. -->
             <DockPanel x:Name="TabArea" Grid.Column="1" LastChildFill="False">
                 <ListBox x:Name="TabStrip" DockPanel.Dock="Left" Background="Transparent" BorderThickness="0" Padding="0"
