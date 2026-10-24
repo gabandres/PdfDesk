@@ -28,7 +28,7 @@ namespace InkvoltPdf.App;
 /// pickers: <c>prompt Button · answer Button</c> (for the prompt the next step opens) <c>· windows · dialogok Cmd …
 /// answer=Button{sp}Text · savepath path|cancel</c> (the next Save As/extract picker returns it) <c>· later ms step</c>
 /// (run a step while the next one is blocked in a modal) <c>· copyfile src dst</c> (another program writes a file)
-/// <c>· theme dark|light</c> (the app's Toggle Dark Mode) <c>· highcontrast on|off|system</c> (the page view's
+/// <c>· closedialog</c> (close the topmost dialog) <c>· theme dark|light</c> (the app's Toggle Dark Mode) <c>· highcontrast on|off|system</c> (the page view's
 /// high-contrast palette) <c>· size W H</c> (resize the window) <c>· bounds Name</c> (a named element's position and visibility). Results and errors go to <c>steps.txt.log</c> (rewritten after every step). Debug builds
 /// only, or any build with INKVOLTPDF_DEVSCRIPT=1.
 /// </summary>
@@ -303,6 +303,10 @@ internal static class DevScript
             case "shotwin":
                 // shotwin out.png: snapshot of the topmost open dialog.
                 Shot(Application.Current.Windows.OfType<Window>().Last(w => w != window && w.IsVisible), arg);
+                break;
+            case "closedialog":
+                // closedialog: close the topmost open dialog, as its Cancel button would (use with "later").
+                Application.Current.Windows.OfType<Window>().LastOrDefault(w => w != window && w.IsVisible)?.Close();
                 break;
             case "scandialog":
                 // scandialog: the open Scan dialog's scanners and choices (use with "later" while Cmd Scan is open).

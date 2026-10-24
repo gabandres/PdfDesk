@@ -200,6 +200,9 @@
                                     <MenuItem Command="app:Cmd.CropPages" />
                                     <MenuItem Command="app:Cmd.Flatten" />
                                     <Separator />
+                                    <MenuItem Command="app:Cmd.AddHeaderFooter" />
+                                    <MenuItem Command="app:Cmd.RemoveHeaderFooter" />
+                                    <Separator />
                                     <MenuItem Command="app:Cmd.Combine" />
                                 </MenuItem>
                                 <MenuItem Header="_Review">

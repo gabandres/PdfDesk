@@ -124,6 +124,10 @@ public static class Cmd
     public static readonly RoutedUICommand CropPages = Make("Cr_op Pages…", nameof(CropPages));
     public static readonly RoutedUICommand ReversePages = Make("Re_verse Page Order", nameof(ReversePages));
 
+    // Organize: text and images written into the pages (see PageMarkActions)
+    public static readonly RoutedUICommand AddHeaderFooter = Make("Add _Header & Footer…", nameof(AddHeaderFooter));
+    public static readonly RoutedUICommand RemoveHeaderFooter = Make("Remove Header & Foo_ter", nameof(RemoveHeaderFooter));
+
     // Review: panes and markup (bound by MainWindow when the UI for them lands)
     public static readonly RoutedUICommand ShowComments = Make("_Comments", nameof(ShowComments));
     public static readonly RoutedUICommand ShowAttachments = Make("_Attachments", nameof(ShowAttachments));

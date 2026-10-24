@@ -141,6 +141,12 @@ Manager. The installers don't remove an install made under the old names: uninst
   app data, duplicate images and fonts, XMP metadata; runs in the background, then shows before/after sizes (one undo
   step; a file already compact is left alone).
 - **Flatten…** (Organize menu): draws comments and/or form fields into the pages (optionally only what prints).
+- **Header & footer** (Organize › Add Header & Footer…): text left, center and right above and below the page, with page
+  numbers (`<<page>>`, `<<pages>>`), date and time (`<<date>>`, `<<time>>`, or a format: `<<date:yyyy-MM-dd>>`), the file
+  name (`<<file>>`) and Bates numbers (`<<bates>>`: prefix, start, digits, suffix); font size, color, margins and a page
+  range, with a live preview of the first page. Written into the pages (prints everywhere), placed on the page as shown
+  (turned pages too); one undo step. Applying again replaces it on those pages; Remove Header & Footer takes off what
+  Inkvolt PDF added (tagged in the file) and leaves the rest of the page alone.
 - Print (shrinks oversized pages, auto-rotates; renders in the background; progress on the taskbar button, as for
   export, OCR and combine), export pages as PNG/JPEG, document
   properties (title/author/subject/keywords editable), password-protected PDFs. Also views XPS, EPUB, CBZ, FB2, images.
@@ -163,8 +169,8 @@ Manager. The installers don't remove an install made under the old names: uninst
 | Path | What |
 |---|---|
 | `src/InkvoltPdf.Core` | `PdfEngine` (MuPDF: render, text, links, outline), `PageEditor` (PDFsharp page edits, bytes in → bytes out), `DocumentSession` (bytes + undo snapshots), `PageText`, `PageRange` |
-| `src/InkvoltPdf.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments, drawings) + `DrawingGeometry` (hit-testing, resize handles), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` + `BookmarkTree` (outline editing), `Flattener` (annotations/fields into page content), `KeptProtection` (edits keep the encryption), `ReadAloudText` (paragraphs for speech), `PasswordStrength`; helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
-| `src/InkvoltPdf.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing`, `.Drawing` overlays; `DrawTools`); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Drawing.cs`: drawing edits and the style bar; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` / `FileTools.cs` / `SecurityActions.cs` are the commands; `DocumentTab.Bookmarks.cs` the bookmark editor; `ReadAloud.cs` Read Aloud |
+| `src/InkvoltPdf.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments, drawings) + `DrawingGeometry` (hit-testing, resize handles), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` + `BookmarkTree` (outline editing), `Flattener` (annotations/fields into page content), `HeaderFooter` + `PageMarks` (headers, footers, Bates numbers written into pages, removable), `KeptProtection` (edits keep the encryption), `ReadAloudText` (paragraphs for speech), `PasswordStrength`; helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
+| `src/InkvoltPdf.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing`, `.Drawing` overlays; `DrawTools`); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Drawing.cs`: drawing edits and the style bar; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` / `FileTools.cs` / `SecurityActions.cs` / `PageMarkActions.cs` are the commands; `DocumentTab.Bookmarks.cs` the bookmark editor; `ReadAloud.cs` Read Aloud |
 | `src/InkvoltPdf.App` (Inkvolt suite) | `ScanDialog.cs` (Scan / Insert from Scanner), `Inkvolt.cs` (printer status check, opening Inkvolt Print) |
 | `tests/InkvoltPdf.Tests` | `dotnet test tests/InkvoltPdf.Tests` |
 
