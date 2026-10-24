@@ -247,3 +247,11 @@ All dependencies and their licenses: `THIRD-PARTY-NOTICES.md` (also in Help › 
   restyled), each pen stroke is its own annotation, and pen pressure is ignored.
 - Scanning works with network scanners that speak eSCL (AirScan/Mopria); USB-only, WIA and TWAIN scanners aren't
   listed. Printer status needs the printer to be one Inkvolt Print remembers.
+
+## Backlog
+
+- Optional support: GitHub Sponsors, and an in-app "Support Inkvolt" tip through the Store (Store commerce takes 15%).
+  Both apps stay free.
+- Distribution outside the Store (signed GitHub releases, winget community manifests) needs a paid code-signing
+  certificate; on hold. Store apps already install with `winget install 9MXDTSFJ9W28` (Inkvolt PDF) and
+  `9PNR76HJ62SK` (Inkvolt Print).
