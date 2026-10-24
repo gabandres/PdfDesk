@@ -63,7 +63,7 @@ public partial class DocumentTab
                     Notify("There's no image on the clipboard. Copy a picture (for example a screenshot) first.");
                     return Disarm();
                 }
-                bmp = SignatureImages.Fit((BitmapSource)clip.GetAsFrozen(), 2000);
+                bmp = SignatureImages.Fit(SignatureImages.FromClipboard((BitmapSource)clip.GetAsFrozen()), 2000);
                 name = "Pasted image";
             }
             else
@@ -128,6 +128,34 @@ public partial class DocumentTab
         await RunEdit("Add link", (d, pw) => Links.Put(d, pw, p.PageIndex, p.Rect, target.Uri, target.Page));
     }
 
+    /// <summary>
+    /// Makes the selected text a link (asks where it leads): the keyboard way to add one, with caret browsing or a
+    /// selection. One link per page, over its selected lines; one undo step.
+    /// </summary>
+    public async Task<bool> LinkSelection()
+    {
+        if (!CanMarkup) return false;
+        if (Viewer.SelectedPageCount > 50)
+        {
+            Notify("Select the text of at most 50 pages to make it a link.", error: true);
+            return false;
+        }
+        if (await SelectionLineRects("Making a link") is not { } parts) return false;
+        if (parts.Count == 0)
+        {
+            Notify("The selection has no text to make a link.");
+            return false;
+        }
+        if (AskLinkTarget(null, parts[0].Page) is not { } target) return false;
+        var ok = await RunEdit("Add link", (d, pw) =>
+        {
+            foreach (var (page, rects) in parts) d = Links.PutOnText(d, pw, page, rects, target.Uri, target.Page);
+            return d;
+        });
+        if (ok) Viewer.ClearSelection();
+        return ok;
+    }
+
     /// <summary>Changes where a link leads (asks), keeping where it is.</summary>
     public async Task<bool> EditLink(LinkInfo link)
     {
@@ -137,10 +165,30 @@ public partial class DocumentTab
 
     private async Task<bool> ChangeLink(LinkChange c)
     {
-        if (!ReviewIsCurrent()) return false;
-        return c.Rect is { } r
-            ? await RunEdit("Move link", (d, pw) => Links.Move(d, pw, c.Id, c.PageIndex, r))
-            : await RunEdit("Delete link", (d, pw) => Links.Delete(d, pw, c.Id));
+        var outcome = !ReviewIsCurrent() ? EditOutcome.Busy
+            : c.Rect is { } r
+                ? await TryEdit("Move link", (d, pw) => Links.Move(d, pw, c.Id, c.PageIndex, r))
+                : await TryEdit("Delete link", (d, pw) => Links.Delete(d, pw, c.Id));
+        if (outcome is EditOutcome.Done or EditOutcome.NoChange) return true;
+        // Not made (declined, failed, or the tab was busy): the page view already shows the box at its new place, so
+        // show the links as the document has them.
+        await RefreshLinks();
+        return false;
+    }
+
+    private async Task RefreshLinks()
+    {
+        var data = Session.Data;
+        var pw = Session.Password;
+        try
+        {
+            var links = await Task.Run(() => Links.Read(data, pw));
+            if (!_disposed && ReferenceEquals(data, Session.Data)) Viewer.SetLinkAnnotations(links);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log.Write($"Reading links failed: {ex.Message}");
+        }
     }
 
     /// <summary>Asks where a link leads: a web or email address, or a page of this document. Null when cancelled.</summary>

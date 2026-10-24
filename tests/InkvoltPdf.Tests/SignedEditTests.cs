@@ -149,6 +149,13 @@ public class SignedEditTests(ITestOutputHelper output)
         var attached = Attachments.Add(pdf, null, "secret.txt", "classified"u8.ToArray());
         var key = Attachments.List(attached, null).Single().Key;
         Assert.True(SignedEdits.Run(() => Attachments.Remove(attached, null, key)).Report.RemovedItemKept);
+        // Fill & Sign items and headers, footers and watermarks too.
+        var typed = TextStamps.Put(pdf, null, 0, new RectD(100, 100, 200, 20), StampKind.Text, "Private remark", 12);
+        var stampId = TextStamps.Read(typed, null).Single().Id;
+        Assert.True(SignedEdits.Run(() => TextStamps.Remove(typed, null, stampId)).Report.RemovedItemKept);
+        var footer = HeaderFooter.Apply(pdf, null, [0], new HeaderFooterOptions { FooterCenter = "Private" });
+        Assert.True(SignedEdits.Run(() => HeaderFooter.Remove(footer, null)).Report.RemovedItemKept);
+        Assert.False(SignedEdits.Run(() => HeaderFooter.Remove(pdf, null)).Report.RemovedItemKept);
 
         // Unsigned files are rewritten: nothing is left behind.
         Assert.Equal(new SignedEditReport(false, false), SignedEdits.Run(() => PageEditor.Delete(TestPdf.Make(3), null, [1])).Report);

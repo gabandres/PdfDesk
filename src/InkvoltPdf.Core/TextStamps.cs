@@ -129,22 +129,29 @@ public static class TextStamps
         return PdfObj.Save(doc);
     }
 
+    /// <summary>Removes a stamp (Fill &amp; Sign text or mark, a placed signature, picture or stamp).</summary>
     public static byte[] Remove(byte[] data, string? password, string id)
     {
         using var doc = Open(data, password, PdfDocumentOpenMode.Modify);
-        RemoveFrom(doc, id);
+        // On a signed file the stamp stays in the signed revision (an appended removal), like a deleted comment.
+        if (RemoveFrom(doc, id)) SignedEdits.NoteRemoval();
         return PdfObj.Save(doc);
     }
 
-    private static void RemoveFrom(PdfDocument doc, string id)
+    private static bool RemoveFrom(PdfDocument doc, string id)
     {
+        var any = false;
         for (var p = 0; p < doc.PageCount; p++)
         {
             if (Resolve(doc.Pages[p].Elements["/Annots"]) is not PdfArray annots) continue;
             for (var i = annots.Elements.Count - 1; i >= 0; i--)
                 if (Resolve(annots.Elements[i]) is PdfDictionary a && Resolve(a.Elements["/NM"]) is PdfString nm && nm.Value == id)
+                {
                     annots.Elements.RemoveAt(i);
+                    any = true;
+                }
         }
+        return any;
     }
 
     /// <summary>Text lines, top-left aligned, black Helvetica.</summary>

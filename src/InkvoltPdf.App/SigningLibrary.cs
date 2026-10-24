@@ -140,6 +140,23 @@ public static class SignatureImages
         return Fit(bmp, maxSide);
     }
 
+    /// <summary>
+    /// A clipboard image as it looks: 32-bit bitmaps on the clipboard often come with an alpha channel that is all zero
+    /// (the copying app wrote none), which would make the whole picture invisible; those are made opaque.
+    /// </summary>
+    public static BitmapSource FromClipboard(BitmapSource src)
+    {
+        if (src.Format != PixelFormats.Bgra32 && src.Format != PixelFormats.Pbgra32) return src;
+        // The pixels as stored (B, G, R, A either way): converting first would multiply the color by the zero alpha.
+        int w = src.PixelWidth, h = src.PixelHeight;
+        var px = new byte[w * h * 4];
+        src.CopyPixels(px, w * 4, 0);
+        for (var i = 3; i < px.Length; i += 4)
+            if (px[i] != 0) return src;
+        for (var i = 3; i < px.Length; i += 4) px[i] = 255;
+        return FromBgra(w, h, px);
+    }
+
     /// <summary>Scales <paramref name="src"/> down to at most <paramref name="maxSide"/> px on its longer side (never up).</summary>
     public static BitmapSource Fit(BitmapSource src, int maxSide)
     {

@@ -68,7 +68,22 @@ public static class Links
     /// Adds a link (or, with <paramref name="replaceId"/>, moves it and changes where it leads) over
     /// <paramref name="rect"/> (page space): to <paramref name="uri"/> when given, else to page <paramref name="targetPage"/>.
     /// </summary>
-    public static byte[] Put(byte[] data, string? password, int pageIndex, RectD rect, string? uri, int targetPage, string? replaceId = null)
+    public static byte[] Put(byte[] data, string? password, int pageIndex, RectD rect, string? uri, int targetPage, string? replaceId = null) =>
+        Put(data, password, pageIndex, rect, uri, targetPage, replaceId, null);
+
+    /// <summary>
+    /// Makes the text in <paramref name="lineRects"/> (one box per line, page space) a link: one link over all of them
+    /// whose /QuadPoints are the lines, so viewers that read them react to the text only.
+    /// </summary>
+    public static byte[] PutOnText(byte[] data, string? password, int pageIndex, IReadOnlyList<RectD> lineRects, string? uri, int targetPage)
+    {
+        var lines = lineRects.Where(r => !r.IsEmpty).ToList();
+        if (lines.Count == 0) throw new ArgumentException("No text to link.", nameof(lineRects));
+        var all = RectD.FromEdges(lines.Min(r => r.X), lines.Min(r => r.Y), lines.Max(r => r.Right), lines.Max(r => r.Bottom));
+        return Put(data, password, pageIndex, all, uri, targetPage, null, lines);
+    }
+
+    private static byte[] Put(byte[] data, string? password, int pageIndex, RectD rect, string? uri, int targetPage, string? replaceId, List<RectD>? lines)
     {
         if (rect.Width < 1 || rect.Height < 1) throw new ArgumentException("The link needs a size.");
         if (uri is not null) uri = Normalize(uri) ?? throw new ArgumentException("That isn't a web or email address.");
@@ -101,6 +116,20 @@ public static class Links
         var (x1, y1, x2, y2) = TextStamps.FromPageSpace(page, rect);
         annot.Elements["/Rect"] = PdfObj.Reals(doc, x1, y1, x2, y2);
         annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
+        if (lines is not null)
+        {
+            // Corners in the reading orientation of the page as shown, as for text markup: upper-left, upper-right,
+            // lower-left, lower-right.
+            var qp = new List<double>();
+            foreach (var r in lines)
+                foreach (var (px, py) in new[] { (r.X, r.Y), (r.Right, r.Y), (r.X, r.Bottom), (r.Right, r.Bottom) })
+                {
+                    var (qx, qy) = PdfObj.ToPdf(page, px, py);
+                    qp.Add(qx);
+                    qp.Add(qy);
+                }
+            annot.Elements["/QuadPoints"] = PdfObj.Reals(doc, [.. qp]);
+        }
         if (uri is not null)
         {
             var action = new PdfDictionary(doc);
@@ -163,8 +192,8 @@ public static class Links
 
     /// <summary>
     /// The address as it goes into a link, or null when it can't be one: "example.com/x" and "www.example.com" become
-    /// https, "name@example.com" becomes mailto; absolute addresses stay as typed (non-ASCII characters escaped), except
-    /// script and data addresses, which are refused.
+    /// https, "name@example.com" becomes mailto; absolute addresses stay as typed (international domains as punycode,
+    /// other non-ASCII characters percent-encoded), except script and data addresses, which are refused.
     /// </summary>
     public static string? Normalize(string text)
     {
@@ -174,7 +203,59 @@ public static class Links
         else if (!t.Contains("://", StringComparison.Ordinal) && !t.Contains(':') && t.Contains('.')) t = "https://" + t;
         if (!Uri.TryCreate(t, UriKind.Absolute, out var u) || u.IsFile && !t.StartsWith("file:", StringComparison.OrdinalIgnoreCase)) return null;
         if (BlockedSchemes.Contains(u.Scheme, StringComparer.OrdinalIgnoreCase)) return null;
-        return u.Scheme is "mailto" ? t : u.AbsoluteUri;
+        // A link's /URI is 7-bit ASCII: international domain names go in as punycode, other characters percent-encoded
+        // (UTF-8); what still isn't plain ASCII is refused.
+        string ascii;
+        try
+        {
+            ascii = u.Scheme is "mailto" ? AsciiMailto(t) : AsciiUri(u);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+        return ascii.All(c => c is > ' ' and < (char)0x7F) ? ascii : null;
+    }
+
+    private static string AsciiUri(Uri u)
+    {
+        if (u.IsAbsoluteUri && u.HostNameType == UriHostNameType.Dns && !u.Host.All(char.IsAscii))
+            u = new UriBuilder(u) { Host = u.IdnHost }.Uri;
+        return PercentEncode(u.AbsoluteUri);
+    }
+
+    /// <summary>mailto:local@domain?query: the domain as punycode, everything else that isn't ASCII percent-encoded.</summary>
+    private static string AsciiMailto(string t)
+    {
+        var body = t[(t.IndexOf(':') + 1)..];
+        var q = body.IndexOf('?');
+        var (to, query) = q < 0 ? (body, "") : (body[..q], body[q..]);
+        var addresses = to.Split(',').Select(a =>
+        {
+            var at = a.LastIndexOf('@');
+            if (at < 0 || a[(at + 1)..].All(char.IsAscii)) return PercentEncode(a);
+            return PercentEncode(a[..at]) + "@" + new System.Globalization.IdnMapping().GetAscii(Uri.UnescapeDataString(a[(at + 1)..]));
+        });
+        return "mailto:" + string.Join(',', addresses) + PercentEncode(query);
+    }
+
+    /// <summary>Percent-encodes (as UTF-8) every character that isn't printable ASCII, leaving the rest as it is.</summary>
+    private static string PercentEncode(string s)
+    {
+        if (s.All(c => c is > ' ' and < (char)0x7F)) return s;
+        var sb = new System.Text.StringBuilder();
+        Span<byte> utf8 = stackalloc byte[4];
+        foreach (var rune in s.EnumerateRunes())
+        {
+            if (rune.Value is > ' ' and < 0x7F)
+            {
+                sb.Append((char)rune.Value);
+                continue;
+            }
+            var n = rune.EncodeToUtf8(utf8);
+            foreach (var b in utf8[..n]) sb.Append('%').Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        return sb.ToString();
     }
 
     /// <summary>True for addresses viewers open without asking (http, https, mailto).</summary>

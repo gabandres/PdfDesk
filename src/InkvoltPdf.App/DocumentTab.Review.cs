@@ -361,7 +361,7 @@ public partial class DocumentTab
         Viewer.ContextMenuOpening += (_, _) =>
         {
             var markup = Session.IsPdf && Viewer.HasSelection;
-            foreach (var item in new FrameworkElement[] { CtxHighlight, CtxUnderline, CtxStrikeOut, CtxRedactText, CtxMarkupSeparator })
+            foreach (var item in new FrameworkElement[] { CtxHighlight, CtxUnderline, CtxStrikeOut, CtxLinkText, CtxRedactText, CtxMarkupSeparator })
                 item.Visibility = markup ? Visibility.Visible : Visibility.Collapsed;
         };
         InitSigning();

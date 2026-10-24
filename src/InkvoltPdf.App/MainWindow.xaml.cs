@@ -1384,6 +1384,7 @@ public partial class MainWindow : Window
         }, t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.AddImageFromClipboard, t => _ = t.BeginAddImage(null, fromClipboard: true), t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.ToolLink, t => ToggleTool(t, ViewerTool.AddLink), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.LinkSelection, t => _ = t.LinkSelection(), t => t.CanMarkup);
         Bind(Cmd.AddStamp, ShowStampMenu, t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
         foreach (var tool in DrawTools.All)

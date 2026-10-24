@@ -93,8 +93,10 @@ Manager. The installers don't remove an install made under the old names: uninst
   then choose a web or email address (example.com becomes https://, name@example.com becomes mailto:) or a page of this
   document. With the Links tool the document's links show as dashed boxes: click one to select it, drag to move it, drag
   its corner to resize it, double-click or Enter to change where it leads, Delete removes it; with any tool, right-click
-  a link for Edit Link… / Delete Link. Addresses other than http, https and mailto ask before they are added (and, as
-  for any link, before they are opened); script and data addresses are refused. Each change is one undo step.
+  a link for Edit Link… / Delete Link. **Link Selected Text…** (Review menu, right-click, Ctrl+K) makes the selected text
+  a link without the mouse (one link over its lines). Addresses other than http, https and mailto ask before they are
+  added (and, as for any link, before they are opened); script and data addresses are refused. International addresses
+  are written the way PDF needs them (domain as punycode, the rest percent-encoded). Each change is one undo step.
 - **Stamps** (Review › Stamp…, or the Stamp button; S puts down the last one again): Approved, Rejected, Draft, Final,
   Confidential, For Comment, Received, and "Approved by <you> on <date and time>" (your name from Settings,
   else your Windows user name), or custom stamps made from an image (a white background can turn transparent; up to 20

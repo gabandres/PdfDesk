@@ -77,18 +77,12 @@ public static class SignatureStamps
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         if (pageIndex < 0 || pageIndex >= doc.PageCount) throw new ArgumentOutOfRangeException(nameof(pageIndex));
         PdfItem? imageRef = null;
-        PdfItem? oldSubject = null, created = null;
+        (int Page, int Index, PdfDictionary Annot)? old = null;
         if (replaceId is not null)
         {
-            var old = Find(doc, replaceId) ?? throw new InvalidOperationException("The stamp is no longer in the document.");
+            old = Find(doc, replaceId) ?? throw new InvalidOperationException("The stamp is no longer in the document.");
             if (image is null)
-                imageRef = PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(old.Annot.Elements["/AP"])?.Elements["/N"])?.Elements["/Resources"])?.Elements["/XObject"])?.Elements["/Im1"];
-            label = PdfObj.Text(old.Annot.Elements["/Contents"]) ?? label;
-            if (PdfObj.Resolve(old.Annot.Elements["/Name"]) is PdfName oldName) name = oldName.Value;
-            author = PdfObj.Str(old.Annot.Elements["/T"]);
-            oldSubject = old.Annot.Elements["/Subj"];
-            created = old.Annot.Elements["/CreationDate"];
-            PdfObj.Array(doc.Pages[old.Page].Elements["/Annots"])!.Elements.RemoveAt(old.Index);
+                imageRef = PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(old.Value.Annot.Elements["/AP"])?.Elements["/N"])?.Elements["/Resources"])?.Elements["/XObject"])?.Elements["/Im1"];
         }
         if (image is not null) imageRef = ImageXObject(doc, image).Reference;
         if (imageRef is null) throw new InvalidOperationException("The stamp's image is missing.");
@@ -100,17 +94,23 @@ public static class SignatureStamps
         var content = System.Text.Encoding.ASCII.GetBytes($"q {PdfObj.F(rect.Width)} 0 0 {PdfObj.F(rect.Height)} 0 0 cm /Im1 Do Q");
         var ap = PdfObj.FormXObject(doc, content, 0, 0, rect.Width, rect.Height, res, PdfObj.CounterRotation(doc, page));
 
+        if (old is { } o)
+        {
+            // Moved or resized in place: the same annotation (replies, its popup, structure, layer, opacity and its
+            // place among the page's annotations stay), with a new rectangle and appearance.
+            MoveAnnotation(doc, o.Annot, o.Page, pageIndex, x1, y1, x2, y2, ap);
+            return PdfObj.Save(doc);
+        }
+
         var annot = new PdfDictionary(doc);
         annot.Elements["/Type"] = new PdfName("/Annot");
         annot.Elements["/Subtype"] = new PdfName("/Stamp");
         annot.Elements["/Name"] = new PdfName(name);
         annot.Elements["/Rect"] = PdfObj.Reals(doc, x1, y1, x2, y2);
         annot.Elements["/Contents"] = PdfObj.MakeString(label);
-        annot.Elements["/NM"] = new PdfString(replaceId ?? $"{idPrefix}{Guid.NewGuid():N}");
+        annot.Elements["/NM"] = new PdfString($"{idPrefix}{Guid.NewGuid():N}");
         if (author is not null) annot.Elements["/T"] = PdfObj.MakeString(author);
-        if (oldSubject is not null) annot.Elements["/Subj"] = oldSubject;
-        else if (replaceId is null && subject is not null) annot.Elements["/Subj"] = PdfObj.MakeString(subject);
-        if (created is not null) annot.Elements["/CreationDate"] = created;
+        if (subject is not null) annot.Elements["/Subj"] = PdfObj.MakeString(subject);
         annot.Elements["/F"] = new PdfInteger(4); // print
         annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
         annot.Elements["/AP"] = new PdfDictionary(doc) { Elements = { ["/N"] = ap.Reference! } };
@@ -118,6 +118,35 @@ public static class SignatureStamps
         doc.Internals.AddObject(annot);
         PdfObj.Annots(doc, page).Elements.Add(annot.Reference!);
         return PdfObj.Save(doc);
+    }
+
+    /// <summary>
+    /// Gives a placed annotation a new rectangle (PDF coordinates) and normal appearance, and the time of the change. On
+    /// another page it moves into that page's annotations (its popup with it), at the end, as one placed there would be.
+    /// </summary>
+    internal static void MoveAnnotation(PdfDocument doc, PdfDictionary annot, int fromPage, int toPage, double x1, double y1, double x2, double y2, PdfDictionary ap)
+    {
+        annot.Elements["/Rect"] = PdfObj.Reals(doc, x1, y1, x2, y2);
+        var appearance = PdfObj.Dict(annot.Elements["/AP"]) ?? new PdfDictionary(doc);
+        appearance.Elements["/N"] = ap.Reference!;
+        // /D (down) and /R (rollover) would show the old size; /AS names a state of the old /N.
+        appearance.Elements.Remove("/D");
+        appearance.Elements.Remove("/R");
+        annot.Elements["/AP"] = appearance;
+        annot.Elements.Remove("/AS");
+        annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
+        if (fromPage == toPage) return;
+
+        var popup = PdfObj.Dict(annot.Elements["/Popup"]);
+        var from = PdfObj.Annots(doc, doc.Pages[fromPage]);
+        var to = PdfObj.Annots(doc, doc.Pages[toPage]);
+        foreach (var a in popup is null ? [annot] : new[] { annot, popup })
+        {
+            for (var i = from.Elements.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(PdfObj.Dict(from.Elements[i]), a)) from.Elements.RemoveAt(i);
+            to.Elements.Add(a.Reference is { } r ? r : a);
+            a.Elements["/P"] = doc.Pages[toPage].Reference!;
+        }
     }
 
     private static (int Page, int Index, PdfDictionary Annot)? Find(PdfDocument doc, string id)
@@ -150,7 +179,8 @@ public static class SignatureStamps
             return d;
         }
         var image = Image(img.Rgb, "/DeviceRGB");
-        if (img.Alpha is { } alpha && alpha.Any(a => a != 255)) image.Elements["/SMask"] = Image(alpha, "/DeviceGray").Reference!;
+        // Alpha that hides every pixel isn't transparency but a missing alpha channel (32-bit clipboard bitmaps): opaque.
+        if (img.Alpha is { } alpha && alpha.Any(a => a != 255) && alpha.Any(a => a != 0)) image.Elements["/SMask"] = Image(alpha, "/DeviceGray").Reference!;
         return image;
     }
 }

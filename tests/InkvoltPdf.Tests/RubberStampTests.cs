@@ -78,6 +78,57 @@ public class RubberStampTests
     }
 
     [Fact]
+    public void MovingKeepsTheAnnotationItself()
+    {
+        var design = RubberStamps.BuiltIn[0];
+        var (w, h) = RubberStamps.NaturalSize(design);
+        var image = new StampImage(4, 4, [.. Enumerable.Range(0, 16).SelectMany(_ => new byte[] { 30, 30, 200 })], null);
+        var pdf = RubberStamps.Put(TestPdf.Make(2), null, 0, new RectD(100, 100, w, h), design, "Tester");
+        pdf = SignatureStamps.PutImage(pdf, null, 0, new RectD(300, 300, 40, 40), image, "logo.png");
+        var ids = SignatureStamps.Read(pdf, null).Select(s => s.Id).ToList();
+
+        // Another app's reply to each, a see-through look, a tag and a layer: what a move used to lose.
+        using (var doc = PdfObj.Open(pdf, null, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify))
+        {
+            var annots = PdfObj.Array(doc.Pages[0].Elements["/Annots"])!;
+            foreach (var stamp in annots.Elements.Select(PdfObj.Dict).ToList())
+            {
+                stamp!.Elements["/CA"] = new PdfReal(0.5);
+                stamp.Elements["/StructParent"] = new PdfInteger(7);
+                var reply = new PdfDictionary(doc);
+                reply.Elements["/Type"] = new PdfName("/Annot");
+                reply.Elements["/Subtype"] = new PdfName("/Text");
+                reply.Elements["/Rect"] = PdfObj.Reals(doc, 0, 0, 20, 20);
+                reply.Elements["/Contents"] = new PdfString("Agreed");
+                reply.Elements["/IRT"] = stamp.Reference!;
+                doc.Internals.AddObject(reply);
+                annots.Elements.Add(reply.Reference!);
+            }
+            pdf = PdfObj.Save(doc);
+        }
+
+        var moved = RubberStamps.Move(pdf, null, ids[0], 0, new RectD(50, 600, w * 2, h * 2));
+        moved = RubberStamps.Move(moved, null, ids[1], 0, new RectD(400, 500, 80, 80));
+        using var after = Core2Pdf.Open(moved);
+        var list = PdfObj.Array(after.Pages[0].Elements["/Annots"])!.Elements.Select(PdfObj.Dict).ToList();
+        Assert.Equal(4, list.Count);
+        for (var i = 0; i < 2; i++)
+        {
+            // Same place among the page's annotations, same id, its extras kept, and the replies still point at it.
+            var stamp = list[i]!;
+            Assert.Equal(ids[i], PdfObj.Str(stamp.Elements["/NM"]));
+            Assert.Equal(0.5, PdfObj.Num(stamp.Elements["/CA"]));
+            Assert.Equal(7, PdfObj.Int(stamp.Elements["/StructParent"]));
+            Assert.Contains(list, r => r is not null && ReferenceEquals(PdfObj.Dict(r.Elements["/IRT"]), stamp));
+        }
+        var rects = SignatureStamps.Read(moved, null);
+        Assert.Equal(w * 2, rects.Single(s => s.Id == ids[0]).Rect.Width, 1);
+        Assert.Equal(400, rects.Single(s => s.Id == ids[1]).Rect.X, 1);
+        Assert.True(TestImages.PixelAt(moved, 0, 440, 540).B > 150);
+        Assert.Equal(2, Annotations.Read(moved, null).Count(a => a.ReplyTo is not null));
+    }
+
+    [Fact]
     public void OtherScriptsInTheDetailLine()
     {
         var by = RubberStamps.ApprovedBy("Андрей", DateTime.Now);

@@ -15,6 +15,12 @@ public class LinkAndImageTests
     [InlineData("ada@example.com", "mailto:ada@example.com")]
     [InlineData("mailto:ada@example.com", "mailto:ada@example.com")]
     [InlineData("ftp://files.example.com/x", "ftp://files.example.com/x")]
+    // /URI is 7-bit ASCII: international domains as punycode, the rest percent-encoded (UTF-8).
+    [InlineData("https://bücher.example/straße?q=ü", "https://xn--bcher-kva.example/stra%C3%9Fe?q=%C3%BC")]
+    [InlineData("münchen.de", "https://xn--mnchen-3ya.de/")]
+    [InlineData("josé@bücher.example", "mailto:jos%C3%A9@xn--bcher-kva.example")]
+    [InlineData("mailto:ada@example.com?subject=Grüße aus Köln", "mailto:ada@example.com?subject=Gr%C3%BC%C3%9Fe%20aus%20K%C3%B6ln")]
+    [InlineData("https://例え.テスト/パス", "https://xn--r8jz45g.xn--zckzah/%E3%83%91%E3%82%B9")]
     [InlineData("javascript:alert(1)", null)]
     [InlineData("data:text/html,hi", null)]
     [InlineData("not a link", null)]
@@ -89,6 +95,31 @@ public class LinkAndImageTests
         var annot = PdfObj.Dict(PdfObj.Array(doc.Pages[0].Elements["/Annots"])!.Elements[0])!;
         Assert.Equal("NextPage", PdfObj.Name(PdfObj.Dict(annot.Elements["/A"])!.Elements["/N"]));
         Assert.Equal(10, Links.Read(moved, null).Single().Rect.X, 1);
+    }
+
+    [Fact]
+    public void SelectedTextBecomesOneLinkOverItsLines()
+    {
+        RectD[] lines = [new(150, 125, 200, 20), new(72, 155, 120, 20)];
+        var pdf = Links.PutOnText(TestPdf.Make(1), null, 0, lines, "https://example.com/", -1);
+        var link = Links.Read(pdf, null).Single();
+        Assert.Equal((72.0, 125.0, 278.0, 50.0), (Math.Round(link.Rect.X), Math.Round(link.Rect.Y), Math.Round(link.Rect.Width), Math.Round(link.Rect.Height)));
+        using var doc = Core2Pdf.Open(pdf);
+        var annot = PdfObj.Dict(PdfObj.Array(doc.Pages[0].Elements["/Annots"])!.Elements.Single())!;
+        var qp = PdfObj.Array(annot.Elements["/QuadPoints"])!;
+        Assert.Equal(16, qp.Elements.Count);
+        // The first line's upper-left corner, in PDF space (y up).
+        Assert.Equal((150.0, 792 - 125.0), (PdfObj.Num(qp, 0), PdfObj.Num(qp, 1)));
+        Assert.Throws<ArgumentException>(() => Links.PutOnText(pdf, null, 0, [], "https://example.com/", -1));
+    }
+
+    [Fact]
+    public void AllTransparentPicturesAreShownOpaque()
+    {
+        // A 32-bit clipboard bitmap whose app wrote no alpha: every pixel's alpha is 0.
+        var img = Blue() with { Alpha = new byte[30 * 20] };
+        var pdf = SignatureStamps.PutImage(TestPdf.Make(1), null, 0, new RectD(300, 400, 90, 60), img, "Pasted image");
+        Assert.True(TestImages.PixelAt(pdf, 0, 345, 430).B > 150 && TestImages.PixelAt(pdf, 0, 345, 430).R < 80);
     }
 
     [Fact]

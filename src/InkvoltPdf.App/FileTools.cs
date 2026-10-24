@@ -97,7 +97,7 @@ public static class FileTools
             }
             if (Clipboard.ContainsImage() && Clipboard.GetImage() is { } image)
             {
-                var frozen = (BitmapSource)image.GetAsFrozen(); // frozen here: the encoding runs on a worker thread
+                var frozen = SignatureImages.FromClipboard((BitmapSource)image.GetAsFrozen()); // frozen here: the encoding runs on a worker thread
                 var bytes = await Task.Run(() => ImageImport.ImagesToPdf([(EncodePng(frozen), "Clipboard.png")], PageSizeOption.FitImage));
                 host.OpenSession(DocumentSession.FromBytes(bytes, "Untitled.pdf"));
                 host.ShowStatus("New PDF made from the clipboard image. Save to keep it.");

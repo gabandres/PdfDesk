@@ -434,6 +434,7 @@
                             <MenuItem x:Name="CtxHighlight" Command="app:Cmd.Highlight" />
                             <MenuItem x:Name="CtxUnderline" Command="app:Cmd.Underline" />
                             <MenuItem x:Name="CtxStrikeOut" Command="app:Cmd.StrikeOut" />
+                            <MenuItem x:Name="CtxLinkText" Command="app:Cmd.LinkSelection" />
                             <MenuItem x:Name="CtxRedactText" Header="Mark Text for _Redaction" />
                             <Separator x:Name="CtxMarkupSeparator" />
                             <MenuItem Command="app:Cmd.Copy" />

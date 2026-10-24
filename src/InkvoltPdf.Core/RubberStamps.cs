@@ -124,22 +124,23 @@ public static class RubberStamps
         if (rect.IsEmpty) throw new ArgumentException("The stamp needs a size.");
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         if (pageIndex < 0 || pageIndex >= doc.PageCount) throw new ArgumentOutOfRangeException(nameof(pageIndex));
-        PdfItem? created = null;
+        (int Page, PdfDictionary Annot)? old = null;
         if (replaceId is not null)
         {
-            var (oldPage, old) = Annotations.Find(doc, replaceId) ?? throw new InvalidOperationException("The stamp is no longer in the document.");
-            design = DesignOf(old) ?? design;
-            author = PdfObj.Str(old.Elements["/T"]);
-            created = old.Elements["/CreationDate"];
-            var annots = PdfObj.Annots(doc, doc.Pages[oldPage]);
-            for (var i = annots.Elements.Count - 1; i >= 0; i--)
-                if (ReferenceEquals(PdfObj.Dict(annots.Elements[i]), old)) annots.Elements.RemoveAt(i);
+            old = Annotations.Find(doc, replaceId) ?? throw new InvalidOperationException("The stamp is no longer in the document.");
+            design = DesignOf(old.Value.Annot) ?? design;
         }
 
         var page = doc.Pages[pageIndex];
         var (x1, y1, x2, y2) = TextStamps.FromPageSpace(page, rect);
         var (ops, resources) = Appearance(doc, design, rect.Width, rect.Height);
         var ap = PdfObj.FormXObject(doc, ops, 0, 0, rect.Width, rect.Height, resources, PdfObj.CounterRotation(doc, page));
+        if (old is { } o)
+        {
+            // Redrawn at its new size in place: the same annotation, everything else about it kept.
+            SignatureStamps.MoveAnnotation(doc, o.Annot, o.Page, pageIndex, x1, y1, x2, y2, ap);
+            return PdfObj.Save(doc);
+        }
 
         var stored = new PdfDictionary(doc);
         stored.Elements["/Title"] = PdfObj.MakeString(design.Title);
@@ -153,12 +154,12 @@ public static class RubberStamps
         annot.Elements["/Rect"] = PdfObj.Reals(doc, x1, y1, x2, y2);
         annot.Elements["/Contents"] = PdfObj.MakeString(design.Detail is null ? design.Title : $"{design.Title}\n{design.Detail}");
         annot.Elements["/Subj"] = PdfObj.MakeString(design.Label);
-        annot.Elements["/NM"] = new PdfString(replaceId ?? $"{IdPrefix}{Guid.NewGuid():N}");
+        annot.Elements["/NM"] = new PdfString($"{IdPrefix}{Guid.NewGuid():N}");
         annot.Elements["/C"] = PdfObj.Reals(doc, design.Color.R, design.Color.G, design.Color.B);
         annot.Elements["/F"] = new PdfInteger(4); // print
         if (author is not null) annot.Elements["/T"] = PdfObj.MakeString(author);
         annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
-        annot.Elements["/CreationDate"] = created ?? PdfObj.DateString(DateTimeOffset.Now);
+        annot.Elements["/CreationDate"] = PdfObj.DateString(DateTimeOffset.Now);
         annot.Elements[DesignKey] = stored;
         annot.Elements["/AP"] = new PdfDictionary(doc) { Elements = { ["/N"] = ap.Reference! } };
         annot.Elements["/P"] = page.Reference!;
