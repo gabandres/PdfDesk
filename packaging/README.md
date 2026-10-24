@@ -85,6 +85,34 @@ Version: four numbers, the last one 0 (the Store reserves it), higher than every
 > print system, use Windows OCR, and sign documents with certificates from the user's Windows certificate store and
 > smart cards. It installs no services or drivers, needs no administrator rights, and changes no system settings.
 
+### Draft Store description
+
+Short description:
+
+> A fast, private PDF reader and editor: fill and sign forms, comment, draw, organize pages, redact and OCR. No account,
+> no ads, no telemetry.
+
+Description:
+
+> Inkvolt PDF opens big documents instantly and keeps your files on your PC. Read, fill, sign, mark up and rearrange
+> PDFs with a clean Windows 11 interface, in tabs, in light or dark.
+>
+> - Read comfortably: continuous or two-page layouts, fast search, bookmarks, dark pages for night reading, Read Aloud.
+> - Fill & Sign: fill any form, type anywhere on a page, and add a handwritten signature or initials.
+> - Digital signatures: sign with a certificate or smart card, add a trusted timestamp, and check every signature's
+>   status in detail.
+> - Comment and draw: highlight, underline, sticky notes, pen, shapes, arrows, text boxes and callouts.
+> - Organize: reorder, rotate, insert, extract, split and merge pages; make PDFs from images or the clipboard.
+> - Redact for real: removes the text and images underneath, not just a black box on top.
+> - Make scans searchable with Windows' own text recognition, protect files with a password, and reduce their size.
+> - Scan straight into a PDF with Inkvolt Print.
+>
+> No account, no cloud, no ads, no telemetry. Your documents never leave your PC.
+>
+> Free and open source (AGPL-3.0). Source code: https://github.com/gabandres/inkvolt-pdf
+
+Keywords (up to 7): PDF, PDF editor, fill and sign, digital signature, annotate, merge PDF, OCR.
+
 ### Privacy policy
 
 Partner Center asks for a privacy policy URL; publish a short page (e.g. on the product site or a public gist) saying:
