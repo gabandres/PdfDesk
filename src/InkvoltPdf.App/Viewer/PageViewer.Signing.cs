@@ -8,12 +8,13 @@ namespace InkvoltPdf.App.Viewer;
 /// <summary>A page area (page space): where a digital signature or a handwritten signature goes.</summary>
 public sealed record SignaturePlacement(int PageIndex, RectD Rect);
 
-/// <summary>A handwritten signature stamp moved or resized (<see cref="Rect"/>), or deleted (null).</summary>
+/// <summary>A handwritten signature stamp or a picture moved or resized (<see cref="Rect"/>), or deleted (null).</summary>
 public sealed record SignatureStampChange(string Id, int PageIndex, RectD? Rect);
 
 /// <summary>
 /// Signing on top of the page view: dragging the box of a visible digital signature (<see cref="ViewerTool.PlaceSignature"/>),
-/// and placing, selecting, moving, resizing and deleting handwritten signature stamps (<see cref="ViewerTool.AddSignature"/>).
+/// and placing, selecting, moving, resizing and deleting image stamps: handwritten signatures (<see cref="ViewerTool.AddSignature"/>)
+/// and pictures (<see cref="ViewerTool.AddImage"/>). The placing tools put the host's pending item where the page is clicked.
 /// </summary>
 public sealed partial class PageViewer
 {
@@ -70,7 +71,23 @@ public sealed partial class PageViewer
         return Math.Abs(sp.X - h.X) <= HandleSize && Math.Abs(sp.Y - h.Y) <= HandleSize;
     }
 
-    private bool SigStampsActive => _tool is ViewerTool.Hand or ViewerTool.AddSignature;
+    /// <summary>A tool whose click places the host's pending stamp (a signature, a picture).</summary>
+    public bool IsPlacingTool => _tool is ViewerTool.AddSignature or ViewerTool.AddImage;
+
+    private bool SigStampsActive => _tool == ViewerTool.Hand || IsPlacingTool;
+
+    /// <summary>The kind of a placed stamp shown on the pages (null when it isn't one).</summary>
+    public StampKind? PlacedStampKind(string id) => _sigStamps.Values.SelectMany(l => l).FirstOrDefault(s => s.Id == id)?.Kind;
+
+    /// <summary>Selects a placed stamp (e.g. picked in the Comments pane): ready to move, resize or delete. Null clears.</summary>
+    public void SelectPlacedStamp(string? id)
+    {
+        var stamp = id is null ? null : _sigStamps.Values.SelectMany(l => l).FirstOrDefault(s => s.Id == id);
+        if (_selectedSig == stamp?.Id) return;
+        _selectedSig = stamp?.Id;
+        if (stamp is not null && !SigStampsActive) Tool = ViewerTool.Hand;
+        _surface.InvalidateVisual();
+    }
 
     /// <summary>Signing presses. True if consumed (the caller captures nothing: this does).</summary>
     private bool HandleSigningDown(MouseButtonEventArgs e, int page, Point sp)
@@ -100,7 +117,7 @@ public sealed partial class PageViewer
             _selectedSig = null;
             _surface.InvalidateVisual();
         }
-        if (_tool != ViewerTool.AddSignature) return false;
+        if (!IsPlacingTool) return false;
         var size = SignatureStampSize;
         var g = _engine!.GetPage(page);
         var x = Math.Clamp(pt.X - size.Width / 2, 0, Math.Max(0, g.Width - size.Width));
@@ -195,7 +212,7 @@ public sealed partial class PageViewer
         if (!SigStampsActive || page < 0) return null;
         if (SelectedSig is { } sel && OnHandle(page, sp, sel)) return Cursors.SizeNWSE;
         if (SigStampAt(page, ToPagePoint(page, sp)) is not null) return Cursors.SizeAll;
-        return _tool == ViewerTool.AddSignature ? Cursors.Cross : null;
+        return IsPlacingTool ? Cursors.Cross : null;
     }
 
     private bool HandleSigningKey(KeyEventArgs e)
@@ -206,7 +223,7 @@ public sealed partial class PageViewer
             SignatureStampChanged?.Invoke(this, new SignatureStampChange(s.Id, s.PageIndex, null));
             return true;
         }
-        if (e.Key == Key.Escape && _tool == ViewerTool.PlaceSignature)
+        if (e.Key == Key.Escape && (_tool == ViewerTool.PlaceSignature || IsPlacingTool && _selectedSig is null))
         {
             Tool = ViewerTool.Hand;
             return true;
@@ -235,7 +252,7 @@ public sealed partial class PageViewer
             var h = ToSurfacePoint(page, shown.Right, shown.Bottom);
             dc.DrawRectangle(Brushes.White, SigSelectPen, new Rect(h.X - HandleSize / 2, h.Y - HandleSize / 2, HandleSize, HandleSize));
         }
-        else if (_tool == ViewerTool.AddSignature && _sigStamps.TryGetValue(page, out var list))
+        else if (IsPlacingTool && _sigStamps.TryGetValue(page, out var list))
         {
             foreach (var st in list) dc.DrawRectangle(null, _palette.StampPen, ToSurfaceRect(page, st.Rect.Inflate(1)));
         }

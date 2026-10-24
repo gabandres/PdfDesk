@@ -25,6 +25,7 @@ public sealed class CommentItem(AnnotationInfo info, string pageHeader, int dept
     /// <summary>What a comment is called ("Highlight", "Arrow", "Callout"…).</summary>
     public static string TitleOf(AnnotationInfo info) => info.ReplyTo is not null ? "Reply" : DrawingTitle(info) ?? info.Kind switch
     {
+        AnnotationKind.Stamp => string.IsNullOrWhiteSpace(info.Subject) ? "Stamp" : info.Subject,
         AnnotationKind.Text => "Note",
         AnnotationKind.FreeText => "Text box",
         AnnotationKind.StrikeOut => "Strike-out",
@@ -274,7 +275,12 @@ public partial class DocumentTab
                 FlashComment(sel.Info);
                 // A drawing picked in the list is selected on the page too (ready to move, restyle or delete).
                 _syncingComments = true;
-                try { Viewer.SelectDrawing(DrawTools.IsDrawing(sel.Info) ? sel.Info.Id : null); }
+                try
+                {
+                    Viewer.SelectDrawing(DrawTools.IsDrawing(sel.Info) ? sel.Info.Id : null);
+                    // A placed picture, signature or stamp too.
+                    Viewer.SelectPlacedStamp(sel.Info.Kind == AnnotationKind.Stamp ? sel.Info.Id : null);
+                }
                 finally { _syncingComments = false; }
             }
         };
@@ -360,6 +366,7 @@ public partial class DocumentTab
         };
         InitSigning();
         InitDrawing();
+        InitInsert();
         _ = LoadReviewAsync();
     }
 
@@ -385,7 +392,8 @@ public partial class DocumentTab
         (bool HasXfa, bool XfaOnly)? Xfa,
         ViewerPrefs? Prefs,
         string? Title,
-        IReadOnlyList<TextStamp> SignatureStamps);
+        IReadOnlyList<TextStamp> SignatureStamps,
+        IReadOnlyList<LinkInfo> Links);
 
     /// <summary>Reads labels, comments, attachments, layers and signatures off the UI thread (the latest request wins).</summary>
     private async Task LoadReviewAsync()
@@ -415,6 +423,7 @@ public partial class DocumentTab
 
         _annotations = info.Annotations;
         Viewer.SetSignatureStamps(info.SignatureStamps);
+        Viewer.SetLinkAnnotations(info.Links);
         Viewer.SetAnnotations([.. _annotations.Where(a => !a.IsInkvoltPdfStamp)]);
         RefreshCommentList();
 
@@ -469,7 +478,8 @@ public partial class DocumentTab
         var prefs = first ? Try<ViewerPrefs?>("opening settings", () => DocumentFeatures.ReadViewerPrefs(data, pw), null) : null;
         var title = wantTitle ? Try<string?>("title", () => PageEditor.ReadMetadata(data, pw).Title, null) : null;
         var sigStamps = Try<IReadOnlyList<TextStamp>>("signature stamps", () => SignatureStamps.Read(data, pw), []);
-        return new ReviewInfo(labels, annots, files, layers, order, sigs, xfa, prefs, title, sigStamps);
+        var links = Try<IReadOnlyList<LinkInfo>>("links", () => Links.Read(data, pw), []);
+        return new ReviewInfo(labels, annots, files, layers, order, sigs, xfa, prefs, title, sigStamps, links);
     }
 
     /// <summary>Honors the document's opening settings (only for files without a remembered position).</summary>

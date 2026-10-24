@@ -154,6 +154,11 @@ public static class ShortcutsWindow
             ("Drawing", "Delete the selected drawing", "Del"),
             ("Drawing", "Edit a text box or callout", "Double-click or Enter"),
             ("Drawing", "Finish typing in a text box", "Esc, Ctrl+Enter or click outside"),
+            ("Pictures and signatures", "Move / resize the selected one", "Drag it / drag its corner"),
+            ("Pictures and signatures", "Delete the selected one", "Del"),
+            ("Links", "Add a link (Links tool)", "Drag a box over the text"),
+            ("Links", "Change where the selected link leads", "Double-click or Enter"),
+            ("Links", "Delete the selected link", "Del, or right-click › Delete Link"),
             ("Anywhere", "Search all commands", Cmd.GestureText(Cmd.CommandPalette) ?? ""),
         ]);
 

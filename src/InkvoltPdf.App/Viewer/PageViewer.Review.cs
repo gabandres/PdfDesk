@@ -264,6 +264,7 @@ public sealed partial class PageViewer
         _flashTimer?.Stop();
         _markPage = -1;
         ResetSigning();
+        ResetLinks();
         ResetDrawing();
         if (_redactions.Count == 0) return;
         _redactions.Clear();

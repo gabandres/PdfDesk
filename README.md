@@ -85,6 +85,16 @@ Manager. The installers don't remove an install made under the old names: uninst
   run); type text or put check marks/crosses anywhere on a page (A, K, X); **Sign** places a handwritten signature or
   initials (drawn with mouse/pen/touch, typed in a script font, or an imported image; up to 3 signatures + initials saved
   on this PC) as a stamp every viewer shows: drag to move, drag the corner to resize, Delete removes it (undoable).
+- **Images** (Review › Add Image… or the toolbar, I; Add Image from Clipboard): pick a picture (JPEG, PNG, BMP, GIF,
+  TIFF; transparency kept) or take the copied one, then click where it goes; drag to move, drag the corner to resize,
+  Delete removes it. A Stamp annotation with the picture as its appearance, so every viewer shows and prints it; listed
+  in the Comments pane (picking it there selects it on the page). Each change is one undo step.
+- **Links** (Review › Links, or the toolbar, N): drag a box over what should be a link (a click makes a line-sized one),
+  then choose a web or email address (example.com becomes https://, name@example.com becomes mailto:) or a page of this
+  document. With the Links tool the document's links show as dashed boxes: click one to select it, drag to move it, drag
+  its corner to resize it, double-click or Enter to change where it leads, Delete removes it; with any tool, right-click
+  a link for Edit Link… / Delete Link. Addresses other than http, https and mailto ask before they are added (and, as
+  for any link, before they are opened); script and data addresses are refused. Each change is one undo step.
 - **Comments** (Review menu): highlight / underline / strike out selected text (Ctrl+Shift+H / U / X, or right-click),
   sticky notes (Ctrl+Shift+C), hover to read; the Comments pane lists them by page with replies, filter, edit and delete
   (undoable).
@@ -173,8 +183,8 @@ Manager. The installers don't remove an install made under the old names: uninst
 | Path | What |
 |---|---|
 | `src/InkvoltPdf.Core` | `PdfEngine` (MuPDF: render, text, links, outline), `PageEditor` (PDFsharp page edits, bytes in → bytes out), `DocumentSession` (bytes + undo snapshots), `PageText`, `PageRange` |
-| `src/InkvoltPdf.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments, drawings) + `DrawingGeometry` (hit-testing, resize handles), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` + `BookmarkTree` (outline editing), `Flattener` (annotations/fields into page content), `HeaderFooter`, `Watermarks` + `PageMarks` (headers, footers, Bates numbers and watermarks written into pages, removable), `KeptProtection` (edits keep the encryption), `ReadAloudText` (paragraphs for speech), `PasswordStrength`; helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
-| `src/InkvoltPdf.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing`, `.Drawing` overlays; `DrawTools`); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Drawing.cs`: drawing edits and the style bar; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` / `FileTools.cs` / `SecurityActions.cs` / `PageMarkActions.cs` are the commands; `DocumentTab.Bookmarks.cs` the bookmark editor; `ReadAloud.cs` Read Aloud |
+| `src/InkvoltPdf.Core` (features) | `FormEditor` + `FormScripts` (form fields, AF calculations), `TextStamps` + `SignatureStamps` (Fill & Sign, placed pictures), `Signing` + `DigitalIds` (digital signing), `Annotations` (comments, drawings) + `DrawingGeometry` (hit-testing, resize handles), `Links` (link annotations), `Attachments`, `Layers`, `Signatures` (verification), `Redaction`, `DocumentFeatures` (page labels, opening settings), `PdfSecurity` (AES-256 protect/unprotect), `Optimizer` (reduce size), `ImageImport` (images to PDF), `Bookmarks` + `BookmarkTree` (outline editing), `Flattener` (annotations/fields into page content), `HeaderFooter`, `Watermarks` + `PageMarks` (headers, footers, Bates numbers and watermarks written into pages, removable), `KeptProtection` (edits keep the encryption), `ReadAloudText` (paragraphs for speech), `PasswordStrength`; helpers `Appearances`, `FontKit`, `PdfObj` (incl. XMP-preserving save) |
+| `src/InkvoltPdf.App` | WPF UI. `Viewer/PageViewer*.cs` is the virtualized page view (`.Forms`, `.Text`, `.Review`, `.Signing` (also pictures), `.Links`, `.Drawing` overlays; `DrawTools`); `DocumentTab` holds panes (`DocumentTab.Review.cs`: comments, attachments, layers, signatures, redaction, labels; `DocumentTab.Drawing.cs`: drawing edits and the style bar; `DocumentTab.Insert.cs`: pictures and links; `DocumentTab.Signing.cs`, `SignDialog.cs`, `SigningLibrary.cs`: signing); `Organize.cs` / `FileActions.cs` / `FileTools.cs` / `SecurityActions.cs` / `PageMarkActions.cs` are the commands; `DocumentTab.Bookmarks.cs` the bookmark editor; `ReadAloud.cs` Read Aloud |
 | `src/InkvoltPdf.App` (Inkvolt suite) | `ScanDialog.cs` (Scan / Insert from Scanner), `Inkvolt.cs` (printer status check, opening Inkvolt Print) |
 | `tests/InkvoltPdf.Tests` | `dotnet test tests/InkvoltPdf.Tests` |
 

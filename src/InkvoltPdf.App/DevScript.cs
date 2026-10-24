@@ -20,7 +20,8 @@ namespace InkvoltPdf.App;
 /// apply-redactions [confirm] · attachments · attach path · extract i path · open-attachment i · remove-attachment i ·
 /// layers · layer name on|off · sigs · bars · labels · gotopage label · title · open path · pane-state</c>. Signing:
 /// <c>makepfx path password name · sign pfx password [box p x y w h | field name | invisible] [ts url] · addsig p x y ·
-/// movesig i p x y w h · delsig i</c>. Inkvolt suite: <c>scandialog</c> (the open Scan dialog's scanners and choices) <c>·
+/// movesig i p x y w h · delsig i</c> (these two move any placed signature or picture). Pictures and links: <c>addimage p x y file ·
+/// placed · tool link · linktarget url|#page|cancel · addlink p x y w h · links · selectlink i|none · editlink i · movelink i p x y w h · dellink i</c>. Inkvolt suite: <c>scandialog</c> (the open Scan dialog's scanners and choices) <c>·
 /// scanpage file.jpg [dpi]</c> (give the open Scan dialog a page, as if scanned) <c>·
 /// printercheck queue[|port]</c> (printer status for a Windows queue) <c>· inkvolt</c> (is Inkvolt Print found).
 /// Mouse (page points, top-left origin): <c>mouse move|down|up|click|dbl|right p x y · drag p x1 y1 x2 y2 · tip</c> (the
@@ -80,7 +81,7 @@ internal static class DevScript
             case "rotateview": v!.SetViewRotation(int.Parse(arg)); break;
             case "tool": v!.Tool = arg switch { "select" => ViewerTool.SelectText, "snapshot" => ViewerTool.Snapshot, "addtext" => ViewerTool.AddText, "check" => ViewerTool.AddCheck, "note" => ViewerTool.AddNote, "redact" => ViewerTool.Redact,
                 "pen" => ViewerTool.Pen, "marker" or "highlighter" => ViewerTool.Highlighter, "rect" or "rectangle" => ViewerTool.Rectangle, "ellipse" => ViewerTool.Ellipse,
-                "line" => ViewerTool.Line, "arrow" => ViewerTool.Arrow, "textbox" => ViewerTool.TextBox, "callout" => ViewerTool.Callout, _ => ViewerTool.Hand }; break;
+                "line" => ViewerTool.Line, "arrow" => ViewerTool.Arrow, "textbox" => ViewerTool.TextBox, "callout" => ViewerTool.Callout, "link" => ViewerTool.AddLink, _ => ViewerTool.Hand }; break;
             case "selectall": v!.SelectAll(); break;
             case "find": Cmd.Find.Execute(null, window); SetFindText(tab!, arg); tab!.FindNext(false); break;
             case "findnext": tab!.FindNext(false); break;
@@ -275,6 +276,43 @@ internal static class DevScript
                 v!.DevChangeSignature(s.Id, cmd == "delsig" ? s.PageIndex : int.Parse(a[1]) - 1, cmd == "delsig" ? null : new Core.RectD(Num(a[2]), Num(a[3]), Num(a[4]), Num(a[5])));
                 await Task.Delay(800);
                 log.Add($"signature stamps: {string.Join("; ", tab.DevSignatureStamps.Select(x => $"p{x.PageIndex + 1} {x.Rect.X:0},{x.Rect.Y:0} {x.Rect.Width:0}x{x.Rect.Height:0}"))}");
+                break;
+            }
+            case "addimage":
+            {
+                // addimage p x y file: pick a picture (as the Image tool's file dialog would) and click it onto the page there.
+                var a = arg.Split(' ', 4);
+                log.Add($"addimage armed: {await tab!.BeginAddImage(a[3])}");
+                v!.DevPlaceSignature(int.Parse(a[0]) - 1, Num(a[1]), Num(a[2]));
+                await Task.Delay(800);
+                log.Add(Placed(tab));
+                break;
+            }
+            case "placed": log.Add(Placed(tab!)); break;
+            case "linktarget":
+                // linktarget url | #N | cancel: the answer the next Add/Edit Link dialog gives (#N: page N).
+                LinkTargets.Enqueue(arg == "cancel" ? null : arg.StartsWith('#') ? (null, int.Parse(arg[1..]) - 1) : (Core.Links.Normalize(arg), -1));
+                break;
+            case "addlink":
+            {
+                // addlink p x y w h: draw a link box with the Link tool (queue its target with "linktarget" first).
+                var a = arg.Split(' ');
+                v!.DevDrawLink(int.Parse(a[0]) - 1, new Core.RectD(Num(a[1]), Num(a[2]), Num(a[3]), Num(a[4])));
+                await Task.Delay(800);
+                log.Add(LinkList(tab!));
+                break;
+            }
+            case "links": log.Add(LinkList(tab!)); break;
+            case "selectlink": v!.DevSelectLink(arg == "none" ? null : tab!.DevLinks[int.Parse(arg)].Id); break;
+            case "editlink": log.Add($"editlink: {await tab!.EditLink(tab.DevLinks[int.Parse(arg)])}"); break;
+            case "movelink" or "dellink":
+            {
+                // movelink i p x y w h · dellink i
+                var a = arg.Split(' ');
+                var l = tab!.DevLinks[int.Parse(a[0])];
+                v!.DevChangeLink(l.Id, cmd == "dellink" ? l.PageIndex : int.Parse(a[1]) - 1, cmd == "dellink" ? null : new Core.RectD(Num(a[2]), Num(a[3]), Num(a[4]), Num(a[5])));
+                await Task.Delay(800);
+                log.Add(LinkList(tab));
                 break;
             }
             case "bars":
@@ -533,6 +571,17 @@ internal static class DevScript
     }
 
     private static string Trunc(string s) => (s.Length > 120 ? s[..120] + "…" : s).Replace("\r\n", " ⏎ ");
+
+    private static string Placed(DocumentTab tab) =>
+        $"placed: {string.Join("; ", tab.DevSignatureStamps.Select(s => $"{s.Kind} '{s.Text}' p{s.PageIndex + 1} {s.Rect.X:0},{s.Rect.Y:0} {s.Rect.Width:0}x{s.Rect.Height:0}"))}";
+
+    private static string LinkList(DocumentTab tab) =>
+        $"links: {string.Join("; ", tab.DevLinks.Select(l => $"p{l.PageIndex + 1} {l.Rect.X:0},{l.Rect.Y:0} {l.Rect.Width:0}x{l.Rect.Height:0} → {l.Describe()}"))}";
+
+    private static readonly Queue<(string? Uri, int Page)?> LinkTargets = new();
+
+    /// <summary>The scripted answer to the next Add/Edit Link dialog (<c>linktarget</c>), if any (null = cancel).</summary>
+    internal static bool TakeLinkTarget(out (string? Uri, int Page)? target) => LinkTargets.TryDequeue(out target);
 
     private static void SetFindText(DocumentTab tab, string text)
     {

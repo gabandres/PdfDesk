@@ -15,13 +15,17 @@ public sealed record StampImage(int Width, int Height, byte[] Rgb, byte[]? Alpha
 }
 
 /// <summary>
-/// "Fill &amp; Sign" handwritten signatures and initials: an image placed on a page as a standard Stamp annotation with
-/// an image appearance (transparency kept with a soft mask), so every viewer shows it. Not a digital signature.
-/// Read back as <see cref="TextStamp"/> with <see cref="StampKind.Signature"/>; removed with <see cref="TextStamps.Remove"/>.
+/// "Fill &amp; Sign" handwritten signatures and initials, and pictures placed with the Image tool: an image placed on a
+/// page as a standard Stamp annotation with an image appearance (transparency kept with a soft mask), so every viewer
+/// shows it. Not a digital signature. Read back as <see cref="TextStamp"/> with <see cref="StampKind.Signature"/> or
+/// <see cref="StampKind.Image"/>; moved and resized with <see cref="Put"/>, removed with <see cref="TextStamps.Remove"/>.
 /// </summary>
 public static class SignatureStamps
 {
     private const string IdPrefix = "InkvoltPdf-signature-";
+
+    /// <summary>Id prefix of pictures placed with the Image tool.</summary>
+    private const string ImagePrefix = "InkvoltPdf-image-";
 
     /// <summary>Id prefix of signature stamps made before the Inkvolt rename; still recognized.</summary>
     private const string LegacyIdPrefix = "PdfDesk-signature-";
@@ -35,34 +39,57 @@ public static class SignatureStamps
             if (PdfObj.Array(doc.Pages[p].Elements["/Annots"]) is not { } annots) continue;
             foreach (var a in annots.Elements.Select(PdfObj.Dict).OfType<PdfDictionary>())
             {
-                if (PdfObj.NameOf(a, "/Subtype") != "/Stamp" || PdfObj.Str(a.Elements["/NM"]) is not { } nm || !nm.StartsWith(IdPrefix, StringComparison.Ordinal) && !nm.StartsWith(LegacyIdPrefix, StringComparison.Ordinal)) continue;
+                if (PdfObj.NameOf(a, "/Subtype") != "/Stamp" || PdfObj.Str(a.Elements["/NM"]) is not { } nm || KindOf(nm) is not { } kind) continue;
                 if (PdfObj.Array(a.Elements["/Rect"]) is not { Elements.Count: >= 4 } r) continue;
-                list.Add(new TextStamp(nm, p, PdfObj.RectToPage(doc.Pages[p], r), StampKind.Signature, PdfObj.Text(a.Elements["/Contents"]) ?? "", 0));
+                list.Add(new TextStamp(nm, p, PdfObj.RectToPage(doc.Pages[p], r), kind, PdfObj.Text(a.Elements["/Contents"]) ?? "", 0));
             }
         }
         return list;
     }
 
+    /// <summary>The kind of stamp an /NM this class gives belongs to; null for any other.</summary>
+    internal static StampKind? KindOf(string nm) =>
+        nm.StartsWith(IdPrefix, StringComparison.Ordinal) || nm.StartsWith(LegacyIdPrefix, StringComparison.Ordinal) ? StampKind.Signature
+        : nm.StartsWith(ImagePrefix, StringComparison.Ordinal) ? StampKind.Image
+        : null;
+
     /// <summary>
     /// Places <paramref name="image"/> in <paramref name="rect"/> (page space). With <paramref name="replaceId"/> the
-    /// existing stamp is moved/resized instead (its image kept when <paramref name="image"/> is null).
+    /// existing stamp (a signature or a picture) is moved/resized instead (its image kept when <paramref name="image"/> is null).
     /// </summary>
-    public static byte[] Put(byte[] data, string? password, int pageIndex, RectD rect, StampImage? image, string? replaceId = null, string label = "Signature")
+    public static byte[] Put(byte[] data, string? password, int pageIndex, RectD rect, StampImage? image, string? replaceId = null, string label = "Signature") =>
+        Place(data, password, pageIndex, rect, image, replaceId, label, IdPrefix, "/InkvoltPdfSignature", null);
+
+    /// <summary>Places a picture (the Image tool) in <paramref name="rect"/> (page space); <see cref="Put"/> moves it later.</summary>
+    public static byte[] PutImage(byte[] data, string? password, int pageIndex, RectD rect, StampImage image, string label, string? author = null) =>
+        Place(data, password, pageIndex, rect, image, null, label, ImagePrefix, "/InkvoltPdfImage", author, "Image");
+
+    /// <summary>
+    /// Places an image stamp. <paramref name="idPrefix"/>, <paramref name="name"/> (/Name), <paramref name="author"/> (/T)
+    /// and <paramref name="subject"/> (/Subj) are for a new stamp; a replaced one keeps its own, and its creation date.
+    /// </summary>
+    internal static byte[] Place(byte[] data, string? password, int pageIndex, RectD rect, StampImage? image, string? replaceId, string label,
+        string idPrefix, string name, string? author, string? subject = null)
     {
-        if (rect.IsEmpty) throw new ArgumentException("The signature needs a size.");
+        if (rect.IsEmpty) throw new ArgumentException("The stamp needs a size.");
         using var doc = PdfObj.Open(data, password, PdfDocumentOpenMode.Modify, "This PDF can't be edited");
         if (pageIndex < 0 || pageIndex >= doc.PageCount) throw new ArgumentOutOfRangeException(nameof(pageIndex));
         PdfItem? imageRef = null;
+        PdfItem? oldSubject = null, created = null;
         if (replaceId is not null)
         {
-            var old = Find(doc, replaceId) ?? throw new InvalidOperationException("The signature is no longer in the document.");
+            var old = Find(doc, replaceId) ?? throw new InvalidOperationException("The stamp is no longer in the document.");
             if (image is null)
                 imageRef = PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(PdfObj.Dict(old.Annot.Elements["/AP"])?.Elements["/N"])?.Elements["/Resources"])?.Elements["/XObject"])?.Elements["/Im1"];
             label = PdfObj.Text(old.Annot.Elements["/Contents"]) ?? label;
+            if (PdfObj.Resolve(old.Annot.Elements["/Name"]) is PdfName oldName) name = oldName.Value;
+            author = PdfObj.Str(old.Annot.Elements["/T"]);
+            oldSubject = old.Annot.Elements["/Subj"];
+            created = old.Annot.Elements["/CreationDate"];
             PdfObj.Array(doc.Pages[old.Page].Elements["/Annots"])!.Elements.RemoveAt(old.Index);
         }
         if (image is not null) imageRef = ImageXObject(doc, image).Reference;
-        if (imageRef is null) throw new InvalidOperationException("The signature image is missing.");
+        if (imageRef is null) throw new InvalidOperationException("The stamp's image is missing.");
 
         var page = doc.Pages[pageIndex];
         var (x1, y1, x2, y2) = TextStamps.FromPageSpace(page, rect);
@@ -74,10 +101,14 @@ public static class SignatureStamps
         var annot = new PdfDictionary(doc);
         annot.Elements["/Type"] = new PdfName("/Annot");
         annot.Elements["/Subtype"] = new PdfName("/Stamp");
-        annot.Elements["/Name"] = new PdfName("/InkvoltPdfSignature");
+        annot.Elements["/Name"] = new PdfName(name);
         annot.Elements["/Rect"] = PdfObj.Reals(doc, x1, y1, x2, y2);
         annot.Elements["/Contents"] = PdfObj.MakeString(label);
-        annot.Elements["/NM"] = new PdfString(replaceId ?? $"{IdPrefix}{Guid.NewGuid():N}");
+        annot.Elements["/NM"] = new PdfString(replaceId ?? $"{idPrefix}{Guid.NewGuid():N}");
+        if (author is not null) annot.Elements["/T"] = PdfObj.MakeString(author);
+        if (oldSubject is not null) annot.Elements["/Subj"] = oldSubject;
+        else if (replaceId is null && subject is not null) annot.Elements["/Subj"] = PdfObj.MakeString(subject);
+        if (created is not null) annot.Elements["/CreationDate"] = created;
         annot.Elements["/F"] = new PdfInteger(4); // print
         annot.Elements["/M"] = PdfObj.DateString(DateTimeOffset.Now);
         annot.Elements["/AP"] = new PdfDictionary(doc) { Elements = { ["/N"] = ap.Reference! } };

@@ -428,6 +428,9 @@
                               AutomationProperties.Name="Document pages">
                     <v:PageViewer.ContextMenu>
                         <ContextMenu>
+                            <MenuItem x:Name="CtxEditLink" Header="_Edit Link…" />
+                            <MenuItem x:Name="CtxDeleteLink" Header="_Delete Link" />
+                            <Separator x:Name="CtxLinkSeparator" />
                             <MenuItem x:Name="CtxHighlight" Command="app:Cmd.Highlight" />
                             <MenuItem x:Name="CtxUnderline" Command="app:Cmd.Underline" />
                             <MenuItem x:Name="CtxStrikeOut" Command="app:Cmd.StrikeOut" />

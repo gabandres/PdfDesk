@@ -6,8 +6,11 @@ using PdfSharp.Pdf.IO;
 
 namespace InkvoltPdf.Core;
 
-/// <summary>Fill &amp; Sign items. <see cref="Signature"/>: a handwritten signature or initials image (see <see cref="SignatureStamps"/>).</summary>
-public enum StampKind { Text, Check, Cross, Signature }
+/// <summary>
+/// Fill &amp; Sign items. <see cref="Signature"/>: a handwritten signature or initials image; <see cref="Image"/>: a picture
+/// placed with the Image tool (both see <see cref="SignatureStamps"/>).
+/// </summary>
+public enum StampKind { Text, Check, Cross, Signature, Image }
 
 /// <summary>Text or a mark placed on a page by "Fill &amp; Sign" (a FreeText annotation Inkvolt PDF created).</summary>
 public sealed record TextStamp(string Id, int PageIndex, RectD Rect, StampKind Kind, string Text, double FontSize);

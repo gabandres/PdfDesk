@@ -12,6 +12,8 @@ public enum ZoomMode { Custom, FitWidth, FitPage }
 public enum ViewerTool
 {
     Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact, PlaceSignature, AddSignature,
+    // Pictures and links (see PageViewer.Signing, PageViewer.Links)
+    AddImage, AddLink,
     // Drawing (see DrawTools)
     Pen, Highlighter, Rectangle, Ellipse, Line, Arrow, TextBox, Callout,
 }
@@ -230,6 +232,7 @@ public sealed partial class PageViewer : ScrollViewer
             IsManipulationEnabled = value == ViewerTool.Hand;
             if (value != ViewerTool.SelectText && !_caretBrowsing) ClearSelection();
             OnDrawToolChanged();
+            if (value != ViewerTool.AddLink) _selectedLink = null;
             UpdateCursor(Mouse.GetPosition(_surface));
             ToolChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -1096,6 +1099,7 @@ public sealed partial class PageViewer : ScrollViewer
             PaintForms(dc, i);
             PaintReview(dc, i);
             PaintSigning(dc, i);
+            PaintLinks(dc, i);
             PaintDrawing(dc, i);
             PaintSpeech(dc, i);
 
@@ -1266,6 +1270,7 @@ public sealed partial class PageViewer : ScrollViewer
         ClearFocusLink();
         if (e.ChangedButton == MouseButton.Left && HandleFormMouseDown(e, page, sp)) return;
         CommitEditor();
+        if (HandleLinkDown(e, page, sp)) return;
         if (HandleSigningDown(e, page, sp)) return;
         if (HandleDrawingDown(e, page, sp, hadTextEditor)) return;
         if (HandleReviewDown(e, page, sp)) return;
@@ -1332,7 +1337,7 @@ public sealed partial class PageViewer : ScrollViewer
             }
 
             AutoScroll(vpPos);
-            if (MoveSigningDrag(sp)) return;
+            if (MoveSigningDrag(sp) || MoveLinkDrag(sp)) return;
             if (MoveDrawing(e, sp)) return;
             if (_selecting && _dragged)
             {
@@ -1388,7 +1393,7 @@ public sealed partial class PageViewer : ScrollViewer
             _surface.Cursor = formCursor;
             return;
         }
-        if (SigningCursor(page, sp) is { } signCursor)
+        if ((SigningCursor(page, sp) ?? LinkToolCursor(page, sp)) is { } signCursor)
         {
             HideLinkTip();
             _surface.Cursor = signCursor;
@@ -1421,7 +1426,7 @@ public sealed partial class PageViewer : ScrollViewer
     private void OnSurfaceUp(object sender, MouseButtonEventArgs e)
     {
         var sp = e.GetPosition(_surface);
-        if (EndSigningDrag() || EndDrawingDrag(sp))
+        if (EndSigningDrag() || EndLinkDrag() || EndDrawingDrag(sp))
         {
             EndDrag();
             UpdateCursor(sp);
@@ -1458,6 +1463,7 @@ public sealed partial class PageViewer : ScrollViewer
     {
         _panning = _selecting = false;
         CancelSigningDrag();
+        CancelLinkDrag();
         CancelDrawingDrag();
         if (_markPage >= 0)
         {
@@ -1572,7 +1578,7 @@ public sealed partial class PageViewer : ScrollViewer
         // Keys typed into a field or Fill & Sign editor bubble up here. Leave them alone: handling KeyDown makes WPF
         // drop the character, so viewer shortcuts (H, A, T, Space…) would eat letters from the user's text.
         if (IsEditorKey(e)) return;
-        if (_engine is not null && (HandleFormKey(e) || HandleSigningKey(e) || HandleDrawingKey(e) || HandleCaretKey(e)))
+        if (_engine is not null && (HandleFormKey(e) || HandleSigningKey(e) || HandleLinkKey(e) || HandleDrawingKey(e) || HandleCaretKey(e)))
         {
             e.Handled = true;
             return;
@@ -1633,6 +1639,12 @@ public sealed partial class PageViewer : ScrollViewer
                 break;
             case var k when CanAnnotate && DrawTools.ToolForKey(k) is { } drawTool:
                 Tool = drawTool;
+                break;
+            case Key.I when CanAnnotate:
+                Tool = ViewerTool.AddImage; // the host asks for the picture first
+                break;
+            case Key.N when CanAnnotate:
+                Tool = ViewerTool.AddLink;
                 break;
             case Key.Escape when DrawTools.IsDrawTool(_tool):
                 Tool = ViewerTool.Hand;

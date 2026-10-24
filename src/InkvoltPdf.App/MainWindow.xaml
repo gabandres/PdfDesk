@@ -220,6 +220,9 @@
                                     <MenuItem x:Name="NoteMenu" Command="app:Cmd.AddNote" />
                                     <!-- Pen, highlighter, shapes, lines, text boxes: filled in code (MainWindow.BuildDrawMenu) -->
                                     <MenuItem x:Name="DrawMenu" Header="_Draw" />
+                                    <MenuItem Command="app:Cmd.AddImage" InputGestureText="I" />
+                                    <MenuItem Command="app:Cmd.AddImageFromClipboard" />
+                                    <MenuItem x:Name="LinkMenu" Command="app:Cmd.ToolLink" InputGestureText="N" />
                                     <Separator />
                                     <MenuItem x:Name="AttachMenu" Header="Attach a _File…" Click="OnAttachFile" />
                                     <MenuItem Command="app:Cmd.RecognizeText" />
@@ -274,6 +277,10 @@
                                 <Border Style="{StaticResource BarSeparator}" />
                                 <Button Style="{StaticResource IconButton}" Command="app:Cmd.Highlight" Content="&#xE7E6;" ToolTip="Highlight the selected text" AutomationProperties.Name="Highlight" />
                                 <ToggleButton x:Name="NoteButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddNote" Content="&#xE90A;" ToolTip="Add a note: click on the page where it goes" AutomationProperties.Name="Add note" />
+                                <ToggleButton x:Name="ImageButton" Style="{StaticResource IconButton}" Command="app:Cmd.AddImage" Content="&#xE91B;"
+                                              ToolTip="Add an image: pick a picture, then click where it goes (I)" AutomationProperties.Name="Add image" />
+                                <ToggleButton x:Name="LinkButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolLink" Content="&#xE71B;"
+                                              ToolTip="Links: drag a box to add one; click a link to move, resize, edit or delete it (N)" AutomationProperties.Name="Links" />
                                 <!-- Drawing tools: one dropdown keeps the bar to one row; the icon is the last tool used -->
                                 <ToggleButton x:Name="DrawButton" Style="{StaticResource CommandButton}" Click="OnDrawClick" AutomationProperties.Name="Draw"
                                               ToolTip="Draw: pen, highlighter, rectangle, ellipse, line, arrow, text box, callout">

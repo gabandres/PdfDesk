@@ -1377,6 +1377,13 @@ public partial class MainWindow : Window
         Bind(Cmd.Underline, t => _ = t.MarkupSelection(TextMarkupKind.Underline), t => t.CanMarkup);
         Bind(Cmd.StrikeOut, t => _ = t.MarkupSelection(TextMarkupKind.StrikeOut), t => t.CanMarkup);
         Bind(Cmd.AddNote, t => ToggleTool(t, ViewerTool.AddNote), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.AddImage, t =>
+        {
+            if (t.PageView.Tool == ViewerTool.AddImage) t.PageView.Tool = ViewerTool.Hand;
+            else _ = t.BeginAddImage(null);
+        }, t => t.Session.IsPdf && t.PageView.PageCount > 0);
+        Bind(Cmd.AddImageFromClipboard, t => _ = t.BeginAddImage(null, fromClipboard: true), t => t.Session.IsPdf && t.PageView.PageCount > 0);
+        Bind(Cmd.ToolLink, t => ToggleTool(t, ViewerTool.AddLink), t => !t.IsOrganizing && t.Session.IsPdf);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
         foreach (var tool in DrawTools.All)
             Bind(Cmd.DrawTool(tool), t => ToggleTool(t, tool), t => !t.IsOrganizing && t.Session.IsPdf);
@@ -1455,6 +1462,7 @@ public partial class MainWindow : Window
             ViewerTool.AddText => "Click on the page where the text should go, then type",
             ViewerTool.AddCheck => "Click where each check mark should go; click a mark again to remove it",
             ViewerTool.AddNote => "Click on the page where the note should go",
+            ViewerTool.AddLink => "Drag a box over what should be a link; click a link to move or resize it, double-click to change where it leads",
             ViewerTool.Redact => "Drag over the areas to black out; nothing is removed until you apply the redactions",
             ViewerTool.Pen or ViewerTool.Highlighter => "Draw on the page with the mouse, pen or a finger; Esc goes back to the hand tool",
             ViewerTool.Rectangle or ViewerTool.Ellipse => "Drag to draw; Shift makes a square or circle. Esc goes back to the hand tool",
@@ -1793,6 +1801,8 @@ public partial class MainWindow : Window
         CrossButton.IsChecked = CrossMenu.IsChecked = v?.Tool == ViewerTool.AddCross;
         AddSignatureButton.IsChecked = v?.Tool is ViewerTool.AddSignature or ViewerTool.PlaceSignature;
         NoteButton.IsChecked = NoteMenu.IsChecked = v?.Tool == ViewerTool.AddNote;
+        ImageButton.IsChecked = v?.Tool == ViewerTool.AddImage;
+        LinkButton.IsChecked = LinkMenu.IsChecked = v?.Tool == ViewerTool.AddLink;
         RedactButton.IsChecked = RedactMenu.IsChecked = v?.Tool == ViewerTool.Redact;
         var drawTool = v is not null && DrawTools.IsDrawTool(v.Tool) ? v.Tool : (ViewerTool?)null;
         DrawButton.IsChecked = drawTool is not null;

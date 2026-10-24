@@ -68,6 +68,11 @@ public static class Cmd
     public static readonly RoutedUICommand ToolCheck = Make("Add Chec_k Mark", nameof(ToolCheck));
     public static readonly RoutedUICommand ToolCross = Make("Add C_ross", nameof(ToolCross));
     public static readonly RoutedUICommand AddSignature = Make("Add _Signature or Initials…", nameof(AddSignature));
+
+    // Pictures and links (Review menu). Their keys (I, N) are page-view keys like H and T.
+    public static readonly RoutedUICommand AddImage = Make("Add _Image…", nameof(AddImage));
+    public static readonly RoutedUICommand AddImageFromClipboard = Make("Add Image from Clip_board", nameof(AddImageFromClipboard));
+    public static readonly RoutedUICommand ToolLink = Make("_Links (Add or Edit)", nameof(ToolLink));
     public static readonly RoutedUICommand HighlightFields = Make("_Highlight Form Fields", nameof(HighlightFields));
 
     // View
