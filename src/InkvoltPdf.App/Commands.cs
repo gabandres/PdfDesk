@@ -127,6 +127,8 @@ public static class Cmd
     // Organize: text and images written into the pages (see PageMarkActions)
     public static readonly RoutedUICommand AddHeaderFooter = Make("Add _Header & Footer…", nameof(AddHeaderFooter));
     public static readonly RoutedUICommand RemoveHeaderFooter = Make("Remove Header & Foo_ter", nameof(RemoveHeaderFooter));
+    public static readonly RoutedUICommand AddWatermark = Make("Add _Watermark…", nameof(AddWatermark));
+    public static readonly RoutedUICommand RemoveWatermark = Make("Remove Watermar_k", nameof(RemoveWatermark));
 
     // Review: panes and markup (bound by MainWindow when the UI for them lands)
     public static readonly RoutedUICommand ShowComments = Make("_Comments", nameof(ShowComments));

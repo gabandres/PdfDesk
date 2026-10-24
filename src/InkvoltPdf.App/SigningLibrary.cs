@@ -127,6 +127,29 @@ public static class SignatureImages
         return FromBgra(w, h, px);
     }
 
+    /// <summary>An image file to put on a page (a watermark, a picture, a stamp), scaled down to at most <paramref name="maxSide"/> px.</summary>
+    public static BitmapSource LoadImage(string path, int maxSide = 2000)
+    {
+        var bmp = new BitmapImage();
+        bmp.BeginInit();
+        bmp.CacheOption = BitmapCacheOption.OnLoad;
+        bmp.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
+        bmp.UriSource = new Uri(path);
+        bmp.EndInit();
+        bmp.Freeze();
+        return Fit(bmp, maxSide);
+    }
+
+    /// <summary>Scales <paramref name="src"/> down to at most <paramref name="maxSide"/> px on its longer side (never up).</summary>
+    public static BitmapSource Fit(BitmapSource src, int maxSide)
+    {
+        var scale = Math.Min(1.0, (double)maxSide / Math.Max(1, Math.Max(src.PixelWidth, src.PixelHeight)));
+        if (scale >= 1) return src;
+        var scaled = new TransformedBitmap(src, new ScaleTransform(scale, scale));
+        scaled.Freeze();
+        return scaled;
+    }
+
     public static StampImage ToStampImage(BitmapSource src)
     {
         var (w, h, px) = Bgra(src);

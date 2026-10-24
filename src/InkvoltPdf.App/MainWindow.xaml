@@ -202,6 +202,8 @@
                                     <Separator />
                                     <MenuItem Command="app:Cmd.AddHeaderFooter" />
                                     <MenuItem Command="app:Cmd.RemoveHeaderFooter" />
+                                    <MenuItem Command="app:Cmd.AddWatermark" />
+                                    <MenuItem Command="app:Cmd.RemoveWatermark" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Combine" />
                                 </MenuItem>

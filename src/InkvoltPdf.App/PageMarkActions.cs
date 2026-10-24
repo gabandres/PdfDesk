@@ -10,8 +10,9 @@ using InkvoltPdf.Core;
 namespace InkvoltPdf.App;
 
 /// <summary>
-/// Organize › Add Header &amp; Footer (page numbers, dates, Bates numbers): a dialog with a live preview of the first page
-/// in the range, then one undoable edit that writes the text into the pages. Remove takes off what Inkvolt PDF added.
+/// Organize › Add Header &amp; Footer (page numbers, dates, Bates numbers) and Add Watermark (text or image): a dialog
+/// with a live preview of the first page in the range, then one undoable edit that writes into the pages. Remove takes
+/// off what Inkvolt PDF added.
 /// </summary>
 public static class PageMarkActions
 {
@@ -200,6 +201,170 @@ public static class PageMarkActions
         if (await tab.TryEdit("Remove header & footer", HeaderFooter.Remove) == EditOutcome.NoChange)
             tab.ShowNotice("No header or footer added by Inkvolt PDF was found. Headers made by other apps are part of the page and can't be told apart.");
     }
+
+    // ───────────────────────────── Watermark ─────────────────────────────
+
+    private static readonly int[] Opacities = [10, 20, 30, 40, 50, 60, 75, 100];
+
+    /// <summary>The last watermark applied (this session), its color and image file: the dialog opens with them.</summary>
+    private static WatermarkOptions _lastWatermark = new() { Text = "CONFIDENTIAL" };
+    private static int _lastWatermarkColor = 3;
+    private static string _lastWatermarkImage = "";
+
+    public static async Task AddWatermark(Window owner, DocumentTab tab)
+    {
+        if (!tab.Session.IsPdf || !await tab.SettleAsync()) return;
+        var last = _lastWatermark;
+        var dlg = new FormDialog(owner, "Add Watermark", "Apply", 820);
+        dlg.AddNote("Written into the pages, so it prints and shows in every viewer. Applying again replaces the watermark on those pages; Organize › Remove Watermark takes it off.");
+
+        var group = $"wm{dlg.GetHashCode()}";
+        var useText = new RadioButton { Content = "Text", GroupName = group, IsChecked = last.Image is null, Margin = new Thickness(0, 4, 0, 4) };
+        var useImage = new RadioButton { Content = "Image", GroupName = group, IsChecked = last.Image is not null, Margin = new Thickness(0, 8, 0, 4) };
+
+        var text = new TextBox { Text = last.Text ?? "CONFIDENTIAL", Margin = new Thickness(24, 0, 0, 0) };
+        AutomationProperties.SetName(text, "Watermark text");
+        var textLook = new Grid { Margin = new Thickness(24, 4, 0, 0) };
+        var size = Field(textLook, "Font size (pt)", last.FontSize.ToString("0.#"), 0, 0);
+        var color = new ComboBox { ItemsSource = Colors.Select(c => c.Name).ToList(), SelectedIndex = _lastWatermarkColor, Margin = new Thickness(0, 3, 0, 3) };
+        AutomationProperties.SetName(color, "Text color");
+        Labeled(textLook, "Color", color, 0, 2);
+
+        var imageRow = new DockPanel { Margin = new Thickness(24, 0, 0, 0) };
+        var browse = new Button { Content = "Browse…", Margin = new Thickness(6, 0, 0, 0), Padding = new Thickness(10, 4, 10, 4) };
+        DockPanel.SetDock(browse, Dock.Right);
+        var path = new TextBox { Text = _lastWatermarkImage };
+        AutomationProperties.SetName(path, "Image file");
+        imageRow.Children.Add(browse);
+        imageRow.Children.Add(path);
+        browse.Click += (_, _) =>
+        {
+            var pick = new Microsoft.Win32.OpenFileDialog { Title = "Watermark image", Filter = FileTools.ImageFilter };
+            if (pick.ShowDialog(dlg) != true) return;
+            path.Text = pick.FileName;
+        };
+        var imageLook = new Grid { Margin = new Thickness(24, 4, 0, 0) };
+        var scale = Field(imageLook, "Width (% of page)", (last.ImageScale * 100).ToString("0"), 0, 0);
+
+        var common = new Grid { Margin = new Thickness(0, 4, 0, 0) };
+        var angle = Field(common, "Angle (°)", last.Rotation.ToString("0.#"), 0, 0);
+        var opacity = Labeled(common, "Opacity", new ComboBox
+        {
+            ItemsSource = Opacities.Select(o => $"{o}%").ToList(),
+            SelectedIndex = Math.Max(0, Array.IndexOf(Opacities, (int)Math.Round(last.Opacity * 100))),
+            Margin = new Thickness(0, 3, 0, 3),
+        }, 0, 2);
+        var layout = Labeled(common, "Layout", new ComboBox
+        {
+            ItemsSource = new[] { "Centered", "Tiled" },
+            SelectedIndex = (int)last.Layout,
+            Margin = new Thickness(0, 3, 0, 3),
+        }, 1, 0);
+        var where = Labeled(common, "Position", new ComboBox
+        {
+            ItemsSource = new[] { "Over content", "Behind content" },
+            SelectedIndex = last.Behind ? 1 : 0,
+            Margin = new Thickness(0, 3, 0, 3),
+            ToolTip = "Behind: opaque parts of the page (a scanned page, a filled background) hide it",
+        }, 1, 2);
+
+        var range = new PageRangePicker(tab, preferSelection: false);
+        var form = new StackPanel();
+        form.Children.Add(useText);
+        form.Children.Add(text);
+        form.Children.Add(textLook);
+        form.Children.Add(useImage);
+        form.Children.Add(imageRow);
+        form.Children.Add(imageLook);
+        form.Children.Add(Heading("Look"));
+        form.Children.Add(common);
+        form.Children.Add(Heading("Pages"));
+        form.Children.Add(range);
+        var preview = new PagePreview(tab);
+        dlg.Add(null, SideBySide(form, preview));
+        text.TextChanged += (_, _) => useText.IsChecked = true;
+        path.TextChanged += (_, _) => useImage.IsChecked = true;
+
+        // The image is decoded once per file name.
+        (string Path, StampImage? Image, string? Error) loaded = ("", null, null);
+        StampImage? Image(string file, out string? error)
+        {
+            file = file.Trim().Trim('"');
+            if (loaded.Path != file)
+            {
+                try
+                {
+                    loaded = System.IO.File.Exists(file)
+                        ? (file, SignatureImages.ToStampImage(SignatureImages.LoadImage(file)), null)
+                        : (file, null, "Choose an image file (Browse…).");
+                }
+                catch (Exception ex) when (ex is System.IO.IOException or NotSupportedException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+                {
+                    loaded = (file, null, $"That image can't be read: {ex.Message}");
+                }
+            }
+            error = loaded.Error;
+            return loaded.Image;
+        }
+
+        bool TryRead(out WatermarkOptions options, out int[] pages, out string? error)
+        {
+            options = last;
+            if (!range.TryGet(out pages, out error)) return false;
+            if (!FormDialog.TryNumber(angle.Text, -360, 360, out var degrees)) return Fail("The angle must be a number of degrees from -360 to 360.", out error);
+            options = new WatermarkOptions
+            {
+                Rotation = degrees,
+                Opacity = Opacities[Math.Max(0, opacity.SelectedIndex)] / 100.0,
+                Layout = (WatermarkLayout)Math.Max(0, layout.SelectedIndex),
+                Behind = where.SelectedIndex == 1,
+            };
+            if (useImage.IsChecked == true)
+            {
+                if (Image(path.Text, out error) is not { } image) return false;
+                if (!FormDialog.TryNumber(scale.Text, 1, 400, out var percent)) return Fail("The width must be from 1 to 400% of the page.", out error);
+                options = options with { Image = image, ImageScale = percent / 100 };
+                return true;
+            }
+            if (string.IsNullOrWhiteSpace(text.Text)) return Fail("Type the watermark's text.", out error);
+            if (!FormDialog.TryNumber(size.Text, 4, 500, out var fontSize)) return Fail("The font size must be from 4 to 500 points.", out error);
+            options = options with { Text = text.Text.Trim(), FontSize = fontSize, Color = Colors[Math.Max(0, color.SelectedIndex)].Color };
+            return true;
+        }
+
+        void Refresh()
+        {
+            textLook.IsEnabled = useText.IsChecked == true;
+            imageLook.IsEnabled = useImage.IsChecked == true;
+            if (!TryRead(out var o, out var pages, out var error))
+            {
+                preview.Show(error ?? "");
+                return;
+            }
+            preview.Request(pages.Min(), page => Watermarks.Apply(page, null, [0], o));
+        }
+        WatchChanges(dlg, Refresh);
+        dlg.Loaded += (_, _) => Refresh();
+
+        WatermarkOptions chosen = last;
+        int[] chosenPages = [];
+        dlg.Validate(() => TryRead(out chosen, out chosenPages, out var error) ? null : error);
+        if (!dlg.ShowModal() || !await tab.SettleAsync()) return;
+        _lastWatermark = chosen;
+        _lastWatermarkColor = Math.Max(0, color.SelectedIndex);
+        if (chosen.Image is not null) _lastWatermarkImage = path.Text.Trim().Trim('"');
+        var targets = chosenPages.Where(p => p < tab.PageView.PageCount).ToArray();
+        if (targets.Length == 0) return;
+        await tab.RunEdit($"Add watermark to {Pages(targets.Length)}", (d, pw) => Watermarks.Apply(d, pw, targets, chosen));
+    }
+
+    public static async Task RemoveWatermark(DocumentTab tab)
+    {
+        if (!tab.Session.IsPdf || !await tab.SettleAsync()) return;
+        if (await tab.TryEdit("Remove watermark", Watermarks.Remove) == EditOutcome.NoChange)
+            tab.ShowNotice("No watermark added by Inkvolt PDF was found. Watermarks made by other apps are part of the page and can't be told apart.");
+    }
+
 
     // ───────────────────────────── Dialog helpers ─────────────────────────────
 
