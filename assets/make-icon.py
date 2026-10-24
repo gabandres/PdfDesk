@@ -1,129 +1,88 @@
 """Generates the Inkvolt PDF icons (16-256 px) and 512 px previews.
 
-  assets/InkvoltPdf.ico          app icon: Fluent-style rounded tile in PDF red, a white page with a folded corner,
-                              text lines, and a "PDF" label (same visual family as Inkvolt Print's blue tile).
-  assets/PdfDocument.ico      file-type icon for .pdf in Explorer: a white page with a red "PDF" band.
+  assets/InkvoltPdf.ico       app icon ("Vivid Fold", shared with Inkvolt Print): no tile, per Windows 11 app icon
+                              guidance; one bold folded sheet in amber to coral to pink with a white bolt.
+  assets/PdfDocument.ico      file-type icon for .pdf in Explorer: a white page with a "PDF" band in the same colors.
 
   packaging/Assets/*.png     MSIX images (tiles, Start/taskbar icons per target size, store logo, splash screen, file-type
                               logo), named with MRT qualifiers (scale-N, targetsize-N, altform-unplated) that makepri
                               indexes into resources.pri (packaging/pack-msix.ps1).
 
-Every size is drawn at 8x and downsampled, so edges stay clean at each size; tiny sizes drop detail.
+Shapes are drawn in a 48-unit grid (assets/iconkit.py, shared with Inkvolt Print) at about 1024 px and box-downsampled
+to each size; 24 px and below use bolder shapes.
 Run:  python -I assets/make-icon.py   (needs Pillow)
 """
 import os
+import sys
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)  # python -I leaves the script's folder off the path
+from iconkit import Canvas, Grad, bolt_pts, page_pts  # noqa: E402
+
 SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 FONT = "C:/Windows/Fonts/segoeuib.ttf"
 
-RED_TOP, RED_BOTTOM = (240, 72, 64, 255), (196, 30, 36, 255)
-WHITE = (255, 255, 255, 255)
-PAPER_EDGE = (238, 214, 214, 255)
-FOLD = (252, 200, 196, 255)
-INK = (214, 120, 118, 255)
+SHEET = [(0, "#FF9248"), (0.55, "#FF4558"), (1, "#D9206F")]  # amber -> coral -> pink (Inkvolt Print: cyan -> blue)
 
 
-def lerp(a, b, t):
-    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(len(a)))
+def small(size):
+    return size <= 24
 
 
-def gradient(n, top, bottom):
-    g = Image.new("RGBA", (n, n))
-    d = ImageDraw.Draw(g)
-    for y in range(n):
-        d.line([(0, y), (n, y)], fill=lerp(top, bottom, y / n))
-    return g
-
-
-def font(px):
-    try:
-        return ImageFont.truetype(FONT, max(1, px))
-    except OSError:
-        return ImageFont.load_default()
-
-
-def page(img, u, x0, y0, x1, y1, fold, tiny, edge=PAPER_EDGE):
-    """White page with a folded top-right corner."""
-    d = ImageDraw.Draw(img)
-    f = fold * u
-    X0, Y0, X1, Y1 = x0 * u, y0 * u, x1 * u, y1 * u
-    r = 3.5 * u
-    # Body as a polygon with the corner cut, plus rounded other corners approximated by a rounded rect underlay.
-    d.rounded_rectangle([X0, Y0 + f, X1, Y1], radius=r, fill=WHITE)
-    d.rounded_rectangle([X0, Y0, X1 - f, Y1], radius=r, fill=WHITE)
-    d.polygon([(X1 - f, Y0), (X1, Y0 + f), (X1 - f, Y0 + f)], fill=WHITE)
-    if not tiny:
-        w = max(1, round(1.2 * u))
-        d.line([(X0 + r, Y0), (X1 - f, Y0)], fill=edge, width=w)
-        d.line([(X1, Y0 + f), (X1, Y1 - r)], fill=edge, width=w)
-        d.line([(X1 - f, Y0), (X1, Y0 + f)], fill=edge, width=w)
-    # The fold itself.
-    d.polygon([(X1 - f, Y0), (X1 - f, Y0 + f), (X1, Y0 + f)], fill=FOLD)
-    return d
+def fold_shadowed(c, box, f, pg, shade):
+    """The folded corner, white, casting a soft shadow onto the sheet."""
+    x0, y0, x1, y1 = box
+    fold = c.poly([(x1 - f, y0), (x1 - f, y0 + f), (x1, y0 + f)], [0.6, 2.0, 0.6])
+    c.shadow(fold, dy=0.8, dx=-0.6, blur=1.0, color=shade, alpha=0.35, clip=pg)
+    c.fill(fold, Grad((x1 - f, y0), (x1, y0 + f), [(0, (255, 255, 255, 235)), (1, (255, 255, 255, 150))]))
 
 
 def draw_app(size):
-    ss = 8
-    n = size * ss
-    u = n / 100.0
-    tiny, small = size <= 24, size <= 48
-    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-
-    margin = 0 if tiny else 2
-    mask = Image.new("L", (n, n), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([margin * u, margin * u, (100 - margin) * u, (100 - margin) * u], radius=round(22 * u), fill=255)
-    img.paste(gradient(n, RED_TOP, RED_BOTTOM), (0, 0), mask)
-
-    if not small:
-        hl = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-        ImageDraw.Draw(hl).rounded_rectangle([margin * u, margin * u, (100 - margin) * u, 52 * u], radius=round(22 * u), fill=(255, 255, 255, 24))
-        img = Image.alpha_composite(img, Image.composite(hl, Image.new("RGBA", (n, n)), mask))
-
-    # Soft shadow under the page.
-    sh = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    ImageDraw.Draw(sh).rounded_rectangle([25 * u, 17 * u, 75 * u, 87 * u], radius=round(4 * u), fill=(90, 0, 0, 70))
-    img = Image.alpha_composite(img, sh.transform((n, n), Image.AFFINE, (1, 0, 0, 0, 1, -round(2 * u))))
-
-    if tiny:
-        d = page(img, u, 22, 12, 78, 88, 16, True)
-    else:
-        d = page(img, u, 25, 14, 75, 84, 14, False)
-        for i, w in enumerate([34, 28, 34]):
-            y = 28 + i * 7
-            d.rounded_rectangle([32 * u, y * u, (32 + w * 0.92) * u, (y + 2.6) * u], radius=round(1.3 * u), fill=INK)
-
-    # "PDF" label band across the lower page, overhanging both sides like a ribbon.
-    band = (14, 56, 86, 78) if not tiny else (10, 52, 90, 82)
-    d.rounded_rectangle([band[0] * u, band[1] * u, band[2] * u, band[3] * u], radius=round(5 * u), fill=(176, 20, 28, 255))
-    if size >= 20:
-        f = font(round((band[3] - band[1]) * 0.78 * u))
-        d.text(((band[0] + band[2]) / 2 * u, (band[1] + band[3]) / 2 * u + 0.5 * u), "PDF", font=f, fill=WHITE, anchor="mm")
-    return img.resize((size, size), Image.LANCZOS)
+    c = Canvas(size)
+    s = small(size)
+    box, f, bolt_h = ((6, 2, 42, 46), 13, 24) if s else ((8, 3, 40, 45), 12, 21)
+    x0, y0, x1, y1 = box
+    pg = c.poly(page_pts(*box, f), [2.4, 0.8, 0.8, 2.4, 2.4])
+    c.shadow(pg, dy=0.9, blur=1.2, alpha=0.22)
+    c.fill(pg, Grad((x0, y0), (x1, y1), SHEET))
+    fold_shadowed(c, box, f, pg, (90, 0, 40))
+    bolt = c.poly(bolt_pts((x0 + x1) / 2, (y0 + y1) / 2 + 2.5, bolt_h), 0.7)
+    if not s:
+        c.shadow(bolt, dy=0.8, blur=0.9, color=(60, 0, 40), alpha=0.25, clip=pg)
+    c.fill(bolt, "#FFFFFF")
+    return c.out()
 
 
 def draw_doc(size):
-    """File-type icon: a page (no tile), red band with PDF."""
-    ss = 8
-    n = size * ss
-    u = n / 100.0
-    tiny = size <= 24
-    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    sh = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    ImageDraw.Draw(sh).rounded_rectangle([15 * u, 5 * u, 85 * u, 97 * u], radius=round(5 * u), fill=(0, 0, 0, 60))
-    img = Image.alpha_composite(img, sh.transform((n, n), Image.AFFINE, (1, 0, 0, 0, 1, -round(1.5 * u))))
-    d = page(img, u, 15, 3, 85, 95, 20, tiny, edge=(200, 200, 205, 255))
-    if not tiny:
-        for i, w in enumerate([46, 38, 46, 30]):
-            y = 20 + i * 7
-            d.rounded_rectangle([23 * u, y * u, (23 + w * 0.95) * u, (y + 2.6) * u], radius=round(1.3 * u), fill=(196, 198, 204, 255))
-    band = (8, 58, 74, 84)
-    d.rounded_rectangle([band[0] * u, band[1] * u, band[2] * u, band[3] * u], radius=round(4 * u), fill=(208, 36, 40, 255))
-    if size >= 20:
-        f = font(round((band[3] - band[1]) * 0.74 * u))
-        d.text(((band[0] + band[2]) / 2 * u, (band[1] + band[3]) / 2 * u + 0.5 * u), "PDF", font=f, fill=WHITE, anchor="mm")
-    return img.resize((size, size), Image.LANCZOS)
+    """File-type icon: a white page, faint text lines, and a "PDF" band in the app's colors."""
+    c = Canvas(size)
+    s = small(size)
+    box, f = ((7, 1, 41, 47), 12) if s else ((8, 2, 40, 46), 11)
+    x0, y0, x1, y1 = box
+    pg = c.poly(page_pts(*box, f), [2.0, 0.8, 0.8, 2.0, 2.0])
+    c.shadow(pg, dy=0.8, blur=1.0, alpha=0.28)
+    c.fill(pg, Grad((x0, y0), (x1, y1), [(0, "#FFFFFF"), (1, "#EEF0F4")]))
+    fold_shadowed(c, box, f, pg, (40, 40, 60))
+    c.fill(c.poly([(x1 - f, y0), (x1 - f, y0 + f), (x1, y0 + f)], [0.6, 2.0, 0.6]), "#D9DDE5", 0.6)
+    if not s:
+        for i, w in enumerate([22, 17, 22]):
+            y = 16 + i * 4.2
+            c.fill(c.rrect(13, y, 13 + w, y + 1.6, 0.8), "#C3C8D2")
+    band = (4, 29, 36, 41) if not s else (3, 27, 37, 42)
+    b = c.rrect(*band, 2.2)
+    c.shadow(b, dy=0.6, blur=0.8, color=(90, 0, 40), alpha=0.3)
+    c.fill(b, Grad((band[0], band[1]), (band[2], band[3]), SHEET))
+    img = c.out()
+    if size >= 32:  # smaller, the letters blur into the band
+        d = ImageDraw.Draw(img)
+        k = size / 48
+        try:
+            fnt = ImageFont.truetype(FONT, max(1, round((band[3] - band[1]) * 0.72 * k)))
+        except OSError:
+            fnt = ImageFont.load_default()
+        d.text(((band[0] + band[2]) / 2 * k, (band[1] + band[3]) / 2 * k + 0.3 * k), "PDF", font=fnt, fill="#FFFFFF", anchor="mm")
+    return img
 
 
 def save(draw, name):
@@ -134,7 +93,7 @@ def save(draw, name):
 
 # MSIX images. Base sizes are the scale-100 sizes; each is written at these scales.
 SCALES = [100, 125, 150, 200, 400]
-TARGET_SIZES = [16, 20, 24, 32, 40, 48, 64, 256]
+TARGET_SIZES = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256]  # every size Windows asks for
 # name: (width, height, icon size as a fraction of the shorter side)
 TILES = {
     "Square44x44Logo": (44, 44, 1.0),
@@ -165,8 +124,8 @@ def save_msix(folder):
         for scale in SCALES:
             centered(draw_app, round(w * scale / 100), round(h * scale / 100), frac).save(os.path.join(folder, f"{name}.scale-{scale}.png"))
             count += 1
-    # Taskbar, Start list and title bar pick an exact pixel size; the app tile has its own background, so plated and
-    # unplated (light and dark taskbar) look the same. File-type logo: the document icon.
+    # Taskbar, Start list and title bar pick an exact pixel size. No tile, so plated and unplated are one image; its
+    # colors keep their contrast on both the light and the dark taskbar. File-type logo: the document icon.
     for size in TARGET_SIZES:
         app, doc = draw_app(size), draw_doc(size)
         for suffix in ("", "_altform-unplated", "_altform-lightunplated"):
