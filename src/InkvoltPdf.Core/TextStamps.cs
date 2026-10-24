@@ -8,9 +8,9 @@ namespace InkvoltPdf.Core;
 
 /// <summary>
 /// Fill &amp; Sign items. <see cref="Signature"/>: a handwritten signature or initials image; <see cref="Image"/>: a picture
-/// placed with the Image tool (both see <see cref="SignatureStamps"/>).
+/// placed with the Image tool (both see <see cref="SignatureStamps"/>); <see cref="Stamp"/>: a stamp (see <see cref="RubberStamps"/>).
 /// </summary>
-public enum StampKind { Text, Check, Cross, Signature, Image }
+public enum StampKind { Text, Check, Cross, Signature, Image, Stamp }
 
 /// <summary>Text or a mark placed on a page by "Fill &amp; Sign" (a FreeText annotation Inkvolt PDF created).</summary>
 public sealed record TextStamp(string Id, int PageIndex, RectD Rect, StampKind Kind, string Text, double FontSize);

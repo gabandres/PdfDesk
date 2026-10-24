@@ -21,7 +21,8 @@ namespace InkvoltPdf.App;
 /// layers · layer name on|off · sigs · bars · labels · gotopage label · title · open path · pane-state</c>. Signing:
 /// <c>makepfx path password name · sign pfx password [box p x y w h | field name | invisible] [ts url] · addsig p x y ·
 /// movesig i p x y w h · delsig i</c> (these two move any placed signature or picture). Pictures and links: <c>addimage p x y file ·
-/// placed · tool link · linktarget url|#page|cancel · addlink p x y w h · links · selectlink i|none · editlink i · movelink i p x y w h · dellink i</c>. Inkvolt suite: <c>scandialog</c> (the open Scan dialog's scanners and choices) <c>·
+/// placed · tool link · linktarget url|#page|cancel · addlink p x y w h · links · selectlink i|none · editlink i · movelink i p x y w h · dellink i</c>.
+/// Stamps: <c>addstamp p x y Approved|Rejected|…|approvedby|custom:file</c> (moved and deleted with movesig / delsig). Inkvolt suite: <c>scandialog</c> (the open Scan dialog's scanners and choices) <c>·
 /// scanpage file.jpg [dpi]</c> (give the open Scan dialog a page, as if scanned) <c>·
 /// printercheck queue[|port]</c> (printer status for a Windows queue) <c>· inkvolt</c> (is Inkvolt Print found).
 /// Mouse (page points, top-left origin): <c>mouse move|down|up|click|dbl|right p x y · drag p x1 y1 x2 y2 · tip</c> (the
@@ -289,6 +290,20 @@ internal static class DevScript
                 break;
             }
             case "placed": log.Add(Placed(tab!)); break;
+            case "addstamp":
+            {
+                // addstamp p x y name|approvedby|custom:file: arm a stamp (built-in by label, "Approved by", or a new custom
+                // stamp made from an image file, saved in the data folder) and click it onto the page there.
+                var a = arg.Split(' ', 4);
+                if (a[3] == "approvedby") tab!.BeginPlaceStamp(DocumentTab.ApprovedByNow());
+                else if (a[3].StartsWith("custom:", StringComparison.Ordinal)) window.AddCustomStamp(tab!, a[3][7..], Path.GetFileNameWithoutExtension(a[3][7..]));
+                else tab!.BeginPlaceStamp(Core.RubberStamps.BuiltIn.First(d => d.Label.Equals(a[3], StringComparison.OrdinalIgnoreCase)));
+                log.Add($"stamp armed: {tab!.DevPendingStamp}, tool {v!.Tool}");
+                v.DevPlaceSignature(int.Parse(a[0]) - 1, Num(a[1]), Num(a[2]));
+                await Task.Delay(800);
+                log.Add(Placed(tab));
+                break;
+            }
             case "linktarget":
                 // linktarget url | #N | cancel: the answer the next Add/Edit Link dialog gives (#N: page N).
                 LinkTargets.Enqueue(arg == "cancel" ? null : arg.StartsWith('#') ? (null, int.Parse(arg[1..]) - 1) : (Core.Links.Normalize(arg), -1));

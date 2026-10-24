@@ -12,8 +12,8 @@ public enum ZoomMode { Custom, FitWidth, FitPage }
 public enum ViewerTool
 {
     Hand, SelectText, Snapshot, AddText, AddCheck, AddCross, AddNote, Redact, PlaceSignature, AddSignature,
-    // Pictures and links (see PageViewer.Signing, PageViewer.Links)
-    AddImage, AddLink,
+    // Pictures, links and stamps (see PageViewer.Signing, PageViewer.Links)
+    AddImage, AddLink, AddStamp,
     // Drawing (see DrawTools)
     Pen, Highlighter, Rectangle, Ellipse, Line, Arrow, TextBox, Callout,
 }
@@ -1645,6 +1645,9 @@ public sealed partial class PageViewer : ScrollViewer
                 break;
             case Key.N when CanAnnotate:
                 Tool = ViewerTool.AddLink;
+                break;
+            case Key.S when CanAnnotate:
+                Tool = ViewerTool.AddStamp; // the host arms the stamp used last
                 break;
             case Key.Escape when DrawTools.IsDrawTool(_tool):
                 Tool = ViewerTool.Hand;

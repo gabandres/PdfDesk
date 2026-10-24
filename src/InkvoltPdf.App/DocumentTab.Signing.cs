@@ -37,7 +37,12 @@ public partial class DocumentTab
             }
             if (Viewer.Tool != ViewerTool.AddSignature) _pendingSigImage = null;
         };
-        Viewer.SignatureStampPlaced += (_, p) => _ = Viewer.Tool == ViewerTool.AddImage ? PlaceImage(p) : PlaceSignatureStamp(p);
+        Viewer.SignatureStampPlaced += (_, p) => _ = Viewer.Tool switch
+        {
+            ViewerTool.AddImage => PlaceImage(p),
+            ViewerTool.AddStamp => PlaceStamp(p),
+            _ => PlaceSignatureStamp(p),
+        };
         Viewer.SignatureStampChanged += (_, c) => _ = ChangeSignatureStamp(c);
     }
 
@@ -156,13 +161,15 @@ public partial class DocumentTab
             (d, pw) => SignatureStamps.Put(d, pw, p.PageIndex, p.Rect, image, null, label));
     }
 
-    /// <summary>A placed signature or picture moved, resized or deleted on the page.</summary>
+    /// <summary>A placed signature, picture or stamp moved, resized or deleted on the page.</summary>
     private Task ChangeSignatureStamp(SignatureStampChange c)
     {
-        var what = Viewer.PlacedStampKind(c.Id) == StampKind.Image ? "image" : "signature";
-        return c.Rect is { } r
-            ? RunStampEdit($"Move {what}", (d, pw) => SignatureStamps.Put(d, pw, c.PageIndex, r, null, c.Id))
-            : RunStampEdit($"Remove {what}", (d, pw) => TextStamps.Remove(d, pw, c.Id));
+        var kind = Viewer.PlacedStampKind(c.Id);
+        var what = kind switch { StampKind.Image => "image", StampKind.Stamp => "stamp", _ => "signature" };
+        if (c.Rect is not { } r) return RunStampEdit($"Remove {what}", (d, pw) => TextStamps.Remove(d, pw, c.Id));
+        return kind == StampKind.Stamp
+            ? RunStampEdit($"Move {what}", (d, pw) => RubberStamps.Move(d, pw, c.Id, c.PageIndex, r))
+            : RunStampEdit($"Move {what}", (d, pw) => SignatureStamps.Put(d, pw, c.PageIndex, r, null, c.Id));
     }
 
     /// <summary>An undoable stamp edit; waits while another edit (or its prompt) holds the tab.</summary>

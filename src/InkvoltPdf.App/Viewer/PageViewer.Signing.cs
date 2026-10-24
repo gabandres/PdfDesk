@@ -13,8 +13,9 @@ public sealed record SignatureStampChange(string Id, int PageIndex, RectD? Rect)
 
 /// <summary>
 /// Signing on top of the page view: dragging the box of a visible digital signature (<see cref="ViewerTool.PlaceSignature"/>),
-/// and placing, selecting, moving, resizing and deleting image stamps: handwritten signatures (<see cref="ViewerTool.AddSignature"/>)
-/// and pictures (<see cref="ViewerTool.AddImage"/>). The placing tools put the host's pending item where the page is clicked.
+/// and placing, selecting, moving, resizing and deleting stamps: handwritten signatures (<see cref="ViewerTool.AddSignature"/>),
+/// pictures (<see cref="ViewerTool.AddImage"/>) and stamps (<see cref="ViewerTool.AddStamp"/>). The placing tools put the
+/// host's pending item where the page is clicked.
 /// </summary>
 public sealed partial class PageViewer
 {
@@ -71,8 +72,8 @@ public sealed partial class PageViewer
         return Math.Abs(sp.X - h.X) <= HandleSize && Math.Abs(sp.Y - h.Y) <= HandleSize;
     }
 
-    /// <summary>A tool whose click places the host's pending stamp (a signature, a picture).</summary>
-    public bool IsPlacingTool => _tool is ViewerTool.AddSignature or ViewerTool.AddImage;
+    /// <summary>A tool whose click places the host's pending stamp (a signature, a picture, a stamp).</summary>
+    public bool IsPlacingTool => _tool is ViewerTool.AddSignature or ViewerTool.AddImage or ViewerTool.AddStamp;
 
     private bool SigStampsActive => _tool == ViewerTool.Hand || IsPlacingTool;
 

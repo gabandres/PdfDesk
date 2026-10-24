@@ -73,6 +73,7 @@ public static class Cmd
     public static readonly RoutedUICommand AddImage = Make("Add _Image…", nameof(AddImage));
     public static readonly RoutedUICommand AddImageFromClipboard = Make("Add Image from Clip_board", nameof(AddImageFromClipboard));
     public static readonly RoutedUICommand ToolLink = Make("_Links (Add or Edit)", nameof(ToolLink));
+    public static readonly RoutedUICommand AddStamp = Make("S_tamp…", nameof(AddStamp));
     public static readonly RoutedUICommand HighlightFields = Make("_Highlight Form Fields", nameof(HighlightFields));
 
     // View

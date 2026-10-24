@@ -223,6 +223,7 @@
                                     <MenuItem Command="app:Cmd.AddImage" InputGestureText="I" />
                                     <MenuItem Command="app:Cmd.AddImageFromClipboard" />
                                     <MenuItem x:Name="LinkMenu" Command="app:Cmd.ToolLink" InputGestureText="N" />
+                                    <MenuItem Command="app:Cmd.AddStamp" InputGestureText="S" />
                                     <Separator />
                                     <MenuItem x:Name="AttachMenu" Header="Attach a _File…" Click="OnAttachFile" />
                                     <MenuItem Command="app:Cmd.RecognizeText" />
@@ -281,6 +282,14 @@
                                               ToolTip="Add an image: pick a picture, then click where it goes (I)" AutomationProperties.Name="Add image" />
                                 <ToggleButton x:Name="LinkButton" Style="{StaticResource IconButton}" Command="app:Cmd.ToolLink" Content="&#xE71B;"
                                               ToolTip="Links: drag a box to add one; click a link to move, resize, edit or delete it (N)" AutomationProperties.Name="Links" />
+                                <ToggleButton x:Name="StampButton" Style="{StaticResource CommandButton}" Command="app:Cmd.AddStamp" AutomationProperties.Name="Stamp"
+                                              ToolTip="Stamp: Approved, Rejected, Draft, Final, Confidential and more, or your own from an image (S places the last one)">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xEB95;" FontSize="15" />
+                                        <TextBlock Text="Stamp" Margin="8,0,0,0" VerticalAlignment="Center" app:ToolbarPanel.IsLabel="True" />
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE70D;" FontSize="9" Margin="6,2,0,0" />
+                                    </StackPanel>
+                                </ToggleButton>
                                 <!-- Drawing tools: one dropdown keeps the bar to one row; the icon is the last tool used -->
                                 <ToggleButton x:Name="DrawButton" Style="{StaticResource CommandButton}" Click="OnDrawClick" AutomationProperties.Name="Draw"
                                               ToolTip="Draw: pen, highlighter, rectangle, ellipse, line, arrow, text box, callout">

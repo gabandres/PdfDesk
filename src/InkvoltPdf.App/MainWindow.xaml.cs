@@ -1384,6 +1384,7 @@ public partial class MainWindow : Window
         }, t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.AddImageFromClipboard, t => _ = t.BeginAddImage(null, fromClipboard: true), t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.ToolLink, t => ToggleTool(t, ViewerTool.AddLink), t => !t.IsOrganizing && t.Session.IsPdf);
+        Bind(Cmd.AddStamp, ShowStampMenu, t => t.Session.IsPdf && t.PageView.PageCount > 0);
         Bind(Cmd.Redact, t => ToggleTool(t, ViewerTool.Redact), t => !t.IsOrganizing && t.Session.IsPdf);
         foreach (var tool in DrawTools.All)
             Bind(Cmd.DrawTool(tool), t => ToggleTool(t, tool), t => !t.IsOrganizing && t.Session.IsPdf);
@@ -1803,6 +1804,7 @@ public partial class MainWindow : Window
         NoteButton.IsChecked = NoteMenu.IsChecked = v?.Tool == ViewerTool.AddNote;
         ImageButton.IsChecked = v?.Tool == ViewerTool.AddImage;
         LinkButton.IsChecked = LinkMenu.IsChecked = v?.Tool == ViewerTool.AddLink;
+        StampButton.IsChecked = v?.Tool == ViewerTool.AddStamp;
         RedactButton.IsChecked = RedactMenu.IsChecked = v?.Tool == ViewerTool.Redact;
         var drawTool = v is not null && DrawTools.IsDrawTool(v.Tool) ? v.Tool : (ViewerTool?)null;
         DrawButton.IsChecked = drawTool is not null;

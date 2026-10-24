@@ -18,7 +18,8 @@ public sealed record StampImage(int Width, int Height, byte[] Rgb, byte[]? Alpha
 /// "Fill &amp; Sign" handwritten signatures and initials, and pictures placed with the Image tool: an image placed on a
 /// page as a standard Stamp annotation with an image appearance (transparency kept with a soft mask), so every viewer
 /// shows it. Not a digital signature. Read back as <see cref="TextStamp"/> with <see cref="StampKind.Signature"/> or
-/// <see cref="StampKind.Image"/>; moved and resized with <see cref="Put"/>, removed with <see cref="TextStamps.Remove"/>.
+/// <see cref="StampKind.Image"/> (and <see cref="StampKind.Stamp"/> for <see cref="RubberStamps"/>); moved and resized
+/// with <see cref="Put"/>, removed with <see cref="TextStamps.Remove"/>.
 /// </summary>
 public static class SignatureStamps
 {
@@ -51,6 +52,7 @@ public static class SignatureStamps
     internal static StampKind? KindOf(string nm) =>
         nm.StartsWith(IdPrefix, StringComparison.Ordinal) || nm.StartsWith(LegacyIdPrefix, StringComparison.Ordinal) ? StampKind.Signature
         : nm.StartsWith(ImagePrefix, StringComparison.Ordinal) ? StampKind.Image
+        : nm.StartsWith(RubberStamps.IdPrefix, StringComparison.Ordinal) ? StampKind.Stamp
         : null;
 
     /// <summary>
