@@ -518,9 +518,34 @@ internal static class DevScript
             case "time": log.Add($"time: {Environment.TickCount64 - Started} ms since start"); break;
             case "xps":
             {
+                // xps <file> [fill | nup <n> [down] [borders] | booklet [right] | poster <percent> [overlap DIPs] [nomarks]]:
+                // the print pipeline into an XPS file (Letter), with a page handling; each sheet also as <file>.<n>.png.
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var n = await FileActions.WriteXps(tab!.Session.Engine, [.. Enumerable.Range(0, Math.Min(6, v!.PageCount))], arg);
-                log.Add($"xps: {n} pages, {new FileInfo(arg).Length / 1024} KB in {sw.ElapsedMilliseconds} ms");
+                var a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var setup = a.Length < 2 ? new Core.PrintSetup() : a[1] switch
+                {
+                    "fill" => new Core.PrintSetup { Sizing = Core.PrintSizing.FitToPaper },
+                    "nup" => new Core.PrintSetup { Handling = Core.PrintHandling.PagesPerSheet, PagesPerSheet = int.Parse(a[2]), Order = a.Contains("down") ? Core.PagesOrder.Down : Core.PagesOrder.Across, Borders = a.Contains("borders") },
+                    "booklet" => new Core.PrintSetup { Handling = Core.PrintHandling.Booklet, RightBinding = a.Contains("right") },
+                    "poster" => new Core.PrintSetup { Handling = Core.PrintHandling.Poster, PosterScale = Num(a[2]) / 100, Overlap = a.Length > 3 && a[3] != "nomarks" ? Num(a[3]) : 0, CutMarks = !a.Contains("nomarks") },
+                    _ => new Core.PrintSetup(),
+                };
+                var all = setup.Handling == Core.PrintHandling.Fit ? Math.Min(6, v!.PageCount) : v!.PageCount;
+                var n = await FileActions.WriteXps(tab!.Session.Engine, [.. Enumerable.Range(0, all)], a[0], setup);
+                log.Add($"xps: {n} sheets, {new FileInfo(a[0]).Length / 1024} KB in {sw.ElapsedMilliseconds} ms");
+                using (var xps = Core.PdfEngine.Open(File.ReadAllBytes(a[0]), MuPDFCore.InputFileTypes.XPS, null))
+                    for (var i = 0; i < xps.PageCount; i++) xps.SaveImage(i, 40, $"{a[0]}.{i + 1}.png", jpeg: false);
+                break;
+            }
+            case "printhandling":
+            {
+                // printhandling <Fit|PagesPerSheet|Booklet|Poster> [duplex]: the Page Sizing & Handling dialog for the
+                // document on Letter paper, opened on that choice (answer it with "later … shotwin / dialogok / closedialog").
+                var a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                AppSettings.Current.PrintHandling = a[0];
+                var chosen = PrintHandlingDialog.Ask(window, [.. Enumerable.Range(0, v!.PageCount)], FileActions.SizesOf(tab!.Session.Engine),
+                    new Size(816, 1056), new Core.RectD(24, 24, 768, 1008), a.Contains("duplex"));
+                log.Add($"printhandling: {(chosen is null ? "cancelled" : $"{chosen.Handling} {chosen.Sizing} n={chosen.PagesPerSheet} {chosen.Order} borders={chosen.Borders} right={chosen.RightBinding} poster={chosen.PosterScale:P0} overlap={chosen.Overlap} marks={chosen.CutMarks}")}");
                 break;
             }
             case "dialog":

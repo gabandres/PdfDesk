@@ -367,6 +367,16 @@ public sealed class AppSettings
     public int ScanResolution { get; set; } = 300;
     public string ScanPageSize { get; set; } = "";
     public bool ScanOcr { get; set; } = true;
+    /// <summary>Print: page sizing &amp; handling last chosen (<see cref="Core.PrintHandling"/> and its options).</summary>
+    public string PrintHandling { get; set; } = "Fit";
+    public bool PrintFitToPaper { get; set; }
+    public int PrintPagesPerSheet { get; set; } = 2;
+    public bool PrintOrderDown { get; set; }
+    public bool PrintBorders { get; set; }
+    public bool PrintRightBinding { get; set; }
+    public int PrintPosterPercent { get; set; } = 200;
+    public int PrintPosterOverlap { get; set; } = 1;
+    public bool PrintCutMarks { get; set; } = true;
 
     /// <summary>Each drawing tool's last look, by tool name ("Pen", "Rectangle"…); see <c>DrawStyles</c>.</summary>
     public Dictionary<string, DrawStyleSetting> DrawStyles { get; set; } = [];

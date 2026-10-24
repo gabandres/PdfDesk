@@ -45,11 +45,23 @@ public static class FileActions
         pages = [.. pages.Where(p => p >= 0 && p < count)];
         if (pages.Length == 0) return;
 
+        // Page sizing & handling: fit, pages per sheet, booklet, poster (the paper is known now).
+        var (origin, area) = ImageableArea(dlg);
+        var paper = new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight);
+        var printable = new RectD(origin.X, origin.Y, area.Width, area.Height);
+        var duplex = CanPrintBothSides(dlg);
+        if (PrintHandlingDialog.Ask(owner, pages, SizesOf(tab.ViewEngine), paper, printable, duplex) is not { } setup || !await tab.SettleAsync()) return;
+        if (pages.Any(p => p >= tab.PageView.PageCount)) return; // the document changed meanwhile
+        if (setup.Handling == PrintHandling.Booklet && duplex) dlg.PrintTicket.Duplexing = Duplexing.TwoSidedShortEdge;
+
         // Busy before anything else can run: the print holds this engine until it is done.
         using var busy = tab.BeginBusy($"Printing {Pages(pages.Length)}…");
-        var (origin, area) = ImageableArea(dlg);
+        var engine = tab.ViewEngine;
+        var plan = new PrintPlan(pages, SizesOf(engine), printable, setup);
+        var sheets = plan.SheetCount;
+        var unit = setup.Handling == PrintHandling.Fit ? "page" : "sheet";
         using var progress = new ProgressPrompt(owner, "Printing", $"Preparing {Pages(pages.Length)}…");
-        var paginator = new PdfPaginator(tab.ViewEngine, pages, new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight), origin, area, progress.Token);
+        var paginator = new PdfPaginator(engine, plan, paper, progress.Token);
         try
         {
             // Pages render on a background thread (PdfPaginator.GetPageAsync), so the window stays responsive.
@@ -61,10 +73,10 @@ public static class FileActions
             writer.WritingProgressChanged += (_, e) =>
             {
                 if (e.WritingLevel == System.Windows.Documents.Serialization.WritingProgressChangeLevel.FixedPageWritingProgress)
-                    progress.Report($"Sending page {Math.Min(e.Number, pages.Length)} of {pages.Length} to the printer…", (double)e.Number / pages.Length);
+                    progress.Report($"Sending {unit} {Math.Min(e.Number, sheets)} of {sheets} to the printer…", (double)e.Number / sheets);
             };
             await WriteAsync(writer, paginator, dlg.PrintTicket);
-            Log.Write($"Printed {Pages(pages.Length)}");
+            Log.Write($"Printed {Pages(pages.Length)} ({setup.Handling}, {sheets} {unit}s)");
         }
         catch (Exception ex) when (ex is OperationCanceledException || progress.Token.IsCancellationRequested)
         {
@@ -79,6 +91,27 @@ public static class FileActions
     }
 
     private static string Pages(int n) => n == 1 ? "1 page" : $"{n} pages";
+
+    /// <summary>Page sizes as shown, in DIPs, for the print layout.</summary>
+    internal static Func<int, (double W, double H)> SizesOf(PdfEngine engine) => p =>
+    {
+        var g = engine.GetPage(p);
+        return (g.Width * 96 / 72, g.Height * 96 / 72);
+    };
+
+    /// <summary>True when the chosen printer prints both sides flipping on the short edge (what a booklet needs).</summary>
+    private static bool CanPrintBothSides(PrintDialog dlg)
+    {
+        try
+        {
+            return dlg.PrintQueue.GetPrintCapabilities(dlg.PrintTicket).DuplexingCapability.Contains(Duplexing.TwoSidedShortEdge);
+        }
+        catch (Exception ex) when (ex is PrintQueueException or PrintSystemException or InvalidOperationException)
+        {
+            Log.Write($"Printer capabilities unavailable: {ex.Message}");
+            return false;
+        }
+    }
 
     /// <summary>
     /// Inkvolt suite: when the chosen queue is a printer Inkvolt Print knows, shows its status (ready, sleeping, toner) and asks
@@ -117,10 +150,11 @@ public static class FileActions
     }
 
     /// <summary>Dev check: runs the print pipeline into an XPS file (Letter paper, quarter-inch margins).</summary>
-    internal static async Task<int> WriteXps(PdfEngine engine, int[] pages, string path)
+    internal static async Task<int> WriteXps(PdfEngine engine, int[] pages, string path, PrintSetup? setup = null)
     {
         var paper = new Size(816, 1056);
-        var paginator = new PdfPaginator(engine, pages, paper, new Point(24, 24), new Size(768, 1008));
+        var plan = new PrintPlan(pages, SizesOf(engine), new RectD(24, 24, 768, 1008), setup ?? new PrintSetup());
+        var paginator = new PdfPaginator(engine, plan, paper);
         File.Delete(path);
         using var xps = new System.Windows.Xps.Packaging.XpsDocument(path, FileAccess.ReadWrite);
         await WriteAsync(System.Windows.Xps.Packaging.XpsDocument.CreateXpsDocumentWriter(xps), paginator, null);
@@ -144,73 +178,88 @@ public static class FileActions
         return (new Point(24, 24), new Size(Math.Max(1, paper.Width - 48), Math.Max(1, paper.Height - 48)));
     }
 
-    /// <summary>Renders each page at print resolution on demand, shrinking oversized pages and auto-rotating to fit the paper.</summary>
-    private sealed class PdfPaginator(PdfEngine engine, int[] pages, Size paper, Point origin, Size area, CancellationToken cancel = default) : DocumentPaginator
+    /// <summary>
+    /// Renders each sheet of a <see cref="PrintPlan"/> at print resolution when the printer asks for it (one page, several,
+    /// two booklet pages or a poster tile: only the part of the page that sheet shows), so memory stays bounded by a sheet.
+    /// </summary>
+    private sealed class PdfPaginator(PdfEngine engine, PrintPlan plan, Size paper, CancellationToken cancel = default) : DocumentPaginator
     {
         private const double Dpi = 300;
 
         public override bool IsPageCountValid => true;
-        public override int PageCount => pages.Length;
+        public override int PageCount => plan.SheetCount;
         public override Size PageSize { get => paper; set { } }
         public override IDocumentPaginatorSource? Source => null;
 
-        private sealed record Placed(BitmapSource Image, bool Rotate, double X, double Y, double W, double H);
+        private sealed record Rendered(PrintSheet Sheet, BitmapSource[] Images);
 
-        public override DocumentPage GetPage(int pageNumber) => Build(Place(pageNumber));
+        public override DocumentPage GetPage(int pageNumber) => Build(Render(pageNumber));
 
         /// <summary>Renders on a worker thread and completes on the UI thread (used by XpsDocumentWriter.WriteAsync).</summary>
         public override void GetPageAsync(int pageNumber, object userState)
         {
-            Task.Run(() => Place(pageNumber), cancel).ContinueWith(t => OnGetPageCompleted(
+            Task.Run(() => Render(pageNumber), cancel).ContinueWith(t => OnGetPageCompleted(
                     t.IsCanceled || cancel.IsCancellationRequested ? new GetPageCompletedEventArgs(null, pageNumber, null, true, userState)
                     : t.IsFaulted ? new GetPageCompletedEventArgs(null, pageNumber, t.Exception!.InnerException, false, userState)
                     : new GetPageCompletedEventArgs(Build(t.Result), pageNumber, null, false, userState)),
                 CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        private Placed Place(int pageNumber)
+        private Rendered Render(int sheetNumber)
         {
             cancel.ThrowIfCancellationRequested();
-            var index = pages[pageNumber];
-            var g = engine.GetPage(index);
-            var wDip = g.Width * 96 / 72;
-            var hDip = g.Height * 96 / 72;
-
-            // Rotate landscape pages onto portrait paper (and vice versa) when that fits better.
-            var rotate = (wDip > hDip) != (area.Width > area.Height) && Math.Abs(wDip - hDip) > 1;
-            var (fw, fh) = rotate ? (hDip, wDip) : (wDip, hDip);
-            var fit = Math.Min(area.Width / fw, area.Height / fh);
-            var scale = Math.Min(1, fit); // shrink oversized pages; never enlarge small ones
-
-            var pxScale = Dpi / 72 * scale;
-            while (g.Width * g.Height * pxScale * pxScale > 60_000_000) pxScale *= 0.85;
-            var bmp = PageViewer.ToBitmap(engine.Render(index, pxScale, null, cancel));
-
-            var dw = fw * scale;
-            var dh = fh * scale;
-            return new Placed(bmp, rotate, origin.X + (area.Width - dw) / 2, origin.Y + (area.Height - dh) / 2, dw, dh);
+            var sheet = plan.Sheet(sheetNumber);
+            var images = new BitmapSource[sheet.Pages.Count];
+            for (var i = 0; i < images.Length; i++)
+            {
+                var p = sheet.Pages[i];
+                var g = engine.GetPage(p.Page);
+                // The part of the page shown, in points (the plan works in DIPs).
+                var region = p.Source is { } src ? new RectD(src.X * 0.75, src.Y * 0.75, src.Width * 0.75, src.Height * 0.75) : new RectD(0, 0, g.Width, g.Height);
+                // Its size on paper (DIPs) over its size on the page (points), at printer resolution.
+                var across = p.Turns == 1 ? p.Box.Height : p.Box.Width;
+                var pxScale = Dpi / 96 * across / region.Width;
+                while (region.Width * region.Height * pxScale * pxScale > 60_000_000) pxScale *= 0.85;
+                images[i] = PageViewer.ToBitmap(engine.Render(p.Page, pxScale, p.Source is null ? null : region, cancel));
+            }
+            return new Rendered(sheet, images);
         }
 
-        private DocumentPage Build(Placed p)
+        private DocumentPage Build(Rendered r)
         {
             var visual = new DrawingVisual();
+            var content = Rect.Empty;
             using (var dc = visual.RenderOpen())
             {
-                if (p.Rotate)
+                var border = new Pen(Brushes.Gray, 0.75);
+                for (var i = 0; i < r.Images.Length; i++)
                 {
-                    // Turn the page 90° clockwise into the (W × H) box.
-                    dc.PushTransform(new TranslateTransform(p.X + p.W, p.Y));
-                    dc.PushTransform(new RotateTransform(90));
-                    dc.DrawImage(p.Image, new Rect(0, 0, p.H, p.W));
-                    dc.Pop();
-                    dc.Pop();
+                    var p = r.Sheet.Pages[i];
+                    var box = new Rect(p.Box.X, p.Box.Y, p.Box.Width, p.Box.Height);
+                    content.Union(box);
+                    if (p.Turns == 1)
+                    {
+                        // Turn the page 90° clockwise into the (W × H) box.
+                        dc.PushTransform(new TranslateTransform(box.X + box.Width, box.Y));
+                        dc.PushTransform(new RotateTransform(90));
+                        dc.DrawImage(r.Images[i], new Rect(0, 0, box.Height, box.Width));
+                        dc.Pop();
+                        dc.Pop();
+                    }
+                    else
+                    {
+                        dc.DrawImage(r.Images[i], box);
+                    }
+                    if (r.Sheet.Borders) dc.DrawRectangle(null, border, box);
                 }
-                else
+                var mark = new Pen(Brushes.Black, 0.75);
+                foreach (var m in r.Sheet.Marks)
                 {
-                    dc.DrawImage(p.Image, new Rect(p.X, p.Y, p.W, p.H));
+                    dc.DrawLine(mark, new Point(m.X1, m.Y1), new Point(m.X2, m.Y2));
+                    content.Union(new Rect(new Point(m.X1, m.Y1), new Point(m.X2, m.Y2)));
                 }
             }
-            return new DocumentPage(visual, paper, new Rect(paper), new Rect(p.X, p.Y, p.W, p.H));
+            return new DocumentPage(visual, paper, new Rect(paper), content.IsEmpty ? new Rect(paper) : content);
         }
     }
 
