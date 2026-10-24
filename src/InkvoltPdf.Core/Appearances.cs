@@ -96,29 +96,46 @@ internal sealed class TextPainter
     /// <summary>The text-drawing operators and the resources they need (font under <paramref name="resourceName"/>).</summary>
     public (byte[] Ops, PdfDictionary Resources) Build(PdfDocument doc, double width, double height, string resourceName, PdfColorValue color)
     {
+        var ops = Ops(resourceName, color);
+        return (ops, Resources(doc, resourceName));
+    }
+
+    private CidFontWriter? _writer;
+
+    /// <summary>
+    /// The operators drawing the text queued since the last call, which is then forgotten. Text on many pages can share
+    /// one painter this way: each page's operators, then one <see cref="Resources"/> after the last, so the document
+    /// embeds each font once, subset to every page's glyphs.
+    /// </summary>
+    public byte[] Ops(string resourceName, PdfColorValue color)
+    {
+        var sb = new StringBuilder();
         if (!Unicode)
-        {
-            var sb = new StringBuilder();
             foreach (var (text, x, y, size) in _items)
                 sb.Append(CultureInfo.InvariantCulture, $"BT {color.Fill} {resourceName} {PdfObj.F(size)} Tf 1 0 0 1 {PdfObj.F(x)} {PdfObj.F(y)} Tm ({WinAnsi.Literal(text)}) Tj ET\n");
-            var fonts = new PdfDictionary(doc);
-            fonts.Elements[resourceName] = FontResources.Standard(doc, _std.BaseFont);
-            var res = new PdfDictionary(doc);
-            res.Elements["/Font"] = fonts;
-            return (Encoding.Latin1.GetBytes(sb.ToString()), res);
-        }
-
-        var writer = new CidFontWriter();
-        var ops = new StringBuilder();
-        foreach (var (text, x, y, size) in _items)
+        else
         {
-            ops.Append(CultureInfo.InvariantCulture, $"BT {color.Fill} 1 0 0 1 {PdfObj.F(x)} {PdfObj.F(y)} Tm ");
-            writer.Emit(ops, TextShaper.Shape(text, _primary), size);
-            ops.Append("ET\n");
+            _writer ??= new CidFontWriter();
+            foreach (var (text, x, y, size) in _items)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"BT {color.Fill} 1 0 0 1 {PdfObj.F(x)} {PdfObj.F(y)} Tm ");
+                _writer.Emit(sb, TextShaper.Shape(text, _primary), size);
+                sb.Append("ET\n");
+            }
         }
-        var resources = new PdfDictionary(doc);
-        resources.Elements["/Font"] = writer.BuildFonts(doc);
-        return (Encoding.ASCII.GetBytes(ops.ToString()), resources);
+        _items.Clear();
+        return Unicode ? Encoding.ASCII.GetBytes(sb.ToString()) : Encoding.Latin1.GetBytes(sb.ToString());
+    }
+
+    /// <summary>The resources every <see cref="Ops"/> so far needs (call once, after the last).</summary>
+    public PdfDictionary Resources(PdfDocument doc, string resourceName)
+    {
+        var fonts = new PdfDictionary(doc);
+        if (!Unicode) fonts.Elements[resourceName] = FontResources.Standard(doc, _std.BaseFont);
+        else if (_writer is not null) fonts = _writer.BuildFonts(doc);
+        var res = new PdfDictionary(doc);
+        res.Elements["/Font"] = fonts;
+        return res;
     }
 
     /// <summary>Greedy word wrap to <paramref name="maxWidth"/> (honors explicit line breaks; splits words that don't fit).</summary>

@@ -151,28 +151,38 @@ public static class HeaderFooter
         var color = new PdfColorValue([options.Color.R, options.Color.G, options.Color.B]);
         var size = options.FontSize;
         var k = 0;
+        var todo = new List<(int Page, Dictionary<HeaderFooterSlot, string> Texts)>();
         foreach (var p in pages.Where(p => p >= 0 && p < doc.PageCount).Distinct().Order())
+        {
+            var bates = options.Bates?.Format(options.BatesOffset + k++);
+            todo.Add((p, Enum.GetValues<HeaderFooterSlot>().ToDictionary(s => s, s =>
+                Expand(options.Text(s), p + 1 + options.PageNumberOffset, count, bates, options.FileName, options.Date, options.Culture)
+                    .Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ').Trim())));
+        }
+
+        // One painter and one resource dictionary for every page: text in other scripts embeds its font once, subset to
+        // the glyphs of all pages (filled in after the last page).
+        var painter = new TextPainter(StdFont.Helvetica, todo.SelectMany(t => t.Texts.Values));
+        var resources = new PdfDictionary(doc);
+        doc.Internals.AddObject(resources);
+        foreach (var (p, texts) in todo)
         {
             var page = doc.Pages[p];
             PageMarks.Remove(doc, page, Kind);
-            var bates = options.Bates?.Format(options.BatesOffset + k++);
-            var texts = Enum.GetValues<HeaderFooterSlot>().ToDictionary(s => s, s =>
-                Expand(options.Text(s), p + 1 + options.PageNumberOffset, count, bates, options.FileName, options.Date, options.Culture)
-                    .Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ').Trim());
             if (texts.Values.All(t => t.Length == 0)) continue;
 
             var (w, h, matrix) = PageMarks.Frame(doc, page);
-            var painter = new TextPainter(StdFont.Helvetica, texts.Values);
             foreach (var (slot, text) in texts)
             {
                 if (text.Length == 0) continue;
                 var (x, y) = Position(slot, painter.Measure(text) * size, w, h, painter.Ascent * size, painter.Descent * size, options);
                 painter.Draw(text, x, y, size);
             }
-            var (ops, resources) = painter.Build(doc, w, h, "/Helv", color);
-            var form = PdfObj.FormXObject(doc, ops, 0, 0, w, h, resources, matrix);
+            var form = PdfObj.FormXObject(doc, painter.Ops("/Helv", color), 0, 0, w, h, null, matrix);
+            form.Elements["/Resources"] = resources.Reference!;
             PageMarks.Add(doc, page, form, Kind, behind: false, "<</Type /Pagination>>");
         }
+        foreach (var (key, value) in painter.Resources(doc, "/Helv").Elements) resources.Elements[key] = value;
         doc.Info.ModificationDate = DateTime.Now;
         return PdfObj.Save(doc);
     }
