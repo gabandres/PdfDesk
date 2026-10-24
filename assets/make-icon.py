@@ -2,6 +2,8 @@
 
   assets/InkvoltPdf.ico       app icon ("Vivid Fold", shared with Inkvolt Print): no tile, per Windows 11 app icon
                               guidance; one bold folded sheet in amber to coral to pink with a white bolt.
+  assets/Inkvolt-512.png      the suite's mark (website, README): an ink drop with a white bolt, amber to pink to
+                              violet, spanning both apps' colors.
   assets/PdfDocument.ico      file-type icon for .pdf in Explorer: a white page with a "PDF" band in the same colors.
 
   packaging/Assets/*.png     MSIX images (tiles, Start/taskbar icons per target size, store logo, splash screen, file-type
@@ -18,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I leaves the script's folder off the path
-from iconkit import Canvas, Grad, bolt_pts, page_pts  # noqa: E402
+from iconkit import Canvas, Grad, bolt_pts, drop_pts, page_pts  # noqa: E402
 
 SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 FONT = "C:/Windows/Fonts/segoeuib.ttf"
@@ -85,6 +87,20 @@ def draw_doc(size):
     return img
 
 
+def draw_suite(size):
+    """The Inkvolt mark: an ink drop with a white bolt (ink + volt)."""
+    c = Canvas(size)
+    s = small(size)
+    dp = c.poly(drop_pts(24, 29, 16.5 if s else 15, 0 if s else 2))
+    c.shadow(dp, dy=1.0, blur=1.2, alpha=0.25)
+    c.fill(dp, Grad((12, 6), (36, 44), [(0, "#FF8A4C"), (0.5, "#F2416E"), (1, "#6A5CFF")]))
+    bolt = c.poly(bolt_pts(24, 29.5, 19 if s else 17), 0.5)
+    if not s:
+        c.shadow(bolt, dy=0.8, blur=0.9, color=(60, 0, 40), alpha=0.25, clip=dp)
+    c.fill(bolt, "#FFFFFF")
+    return c.out()
+
+
 def save(draw, name):
     images = [draw(s) for s in SIZES]
     images[-1].save(os.path.join(HERE, f"{name}.ico"), sizes=[(s, s) for s in SIZES], append_images=images[:-1])
@@ -140,5 +156,6 @@ def save_msix(folder):
 if __name__ == "__main__":
     save(draw_app, "InkvoltPdf")
     save(draw_doc, "PdfDocument")
+    draw_suite(512).save(os.path.join(HERE, "Inkvolt-512.png"))
     n = save_msix(os.path.join(HERE, "..", "packaging", "Assets"))
     print(f"wrote InkvoltPdf.ico, PdfDocument.ico, previews and {n} MSIX images in packaging/Assets")
