@@ -12,14 +12,18 @@
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
     <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
   </PropertyGroup>
-  <!-- Desk suite: PdfDesk.App uses PrintDesk's libraries (scanning, printer status) from its own repo. PrintDeskRoot is the
-       PrintDesk checkout: the PrintDeskRoot environment variable if set, else a PrintDesk\ folder beside any folder above
-       this one (Z:\PrintDesk from Z:\PdfDesk and from its worktrees), else Z:\PrintDesk\. PrintDesk's projects build with
-       PrintDesk's own Directory.Build.props (MSBuild picks the nearest one above each project). -->
+  <!-- Inkvolt suite: InkvoltPdf.App uses Inkvolt Print's libraries (scanning, printer status) from its own repo. InkvoltPrintRoot
+       is the Inkvolt Print checkout: the InkvoltPrintRoot environment variable if set, else the first folder named
+       inkvolt-print, InkvoltPrint or PrintDesk (its checkout before the rename) that holds InkvoltPrint.slnx, beside this
+       folder or any folder above it (so worktrees find it too). Inkvolt Print's projects build with Inkvolt Print's own
+       Directory.Build.props (MSBuild picks the nearest one above each project). -->
   <PropertyGroup>
-    <_DeskSiblingRoot Condition="'$(PrintDeskRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildThisFileDirectory)', 'PrintDesk\PrintDesk.slnx'))</_DeskSiblingRoot>
-    <PrintDeskRoot Condition="'$(PrintDeskRoot)' == '' and '$(_DeskSiblingRoot)' != ''">$([System.IO.Path]::Combine('$(_DeskSiblingRoot)', 'PrintDesk'))</PrintDeskRoot>
-    <PrintDeskRoot Condition="'$(PrintDeskRoot)' == ''">Z:\PrintDesk\</PrintDeskRoot>
-    <PrintDeskRoot>$([MSBuild]::EnsureTrailingSlash('$(PrintDeskRoot)'))</PrintDeskRoot>
+    <_InkvoltPrintSibling Condition="'$(InkvoltPrintRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildThisFileDirectory)', 'inkvolt-print\InkvoltPrint.slnx'))</_InkvoltPrintSibling>
+    <InkvoltPrintRoot Condition="'$(InkvoltPrintRoot)' == '' and '$(_InkvoltPrintSibling)' != ''">$([System.IO.Path]::Combine('$(_InkvoltPrintSibling)', 'inkvolt-print'))</InkvoltPrintRoot>
+    <_InkvoltPrintSibling Condition="'$(InkvoltPrintRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildThisFileDirectory)', 'InkvoltPrint\InkvoltPrint.slnx'))</_InkvoltPrintSibling>
+    <InkvoltPrintRoot Condition="'$(InkvoltPrintRoot)' == '' and '$(_InkvoltPrintSibling)' != ''">$([System.IO.Path]::Combine('$(_InkvoltPrintSibling)', 'InkvoltPrint'))</InkvoltPrintRoot>
+    <_InkvoltPrintSibling Condition="'$(InkvoltPrintRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildThisFileDirectory)', 'PrintDesk\InkvoltPrint.slnx'))</_InkvoltPrintSibling>
+    <InkvoltPrintRoot Condition="'$(InkvoltPrintRoot)' == '' and '$(_InkvoltPrintSibling)' != ''">$([System.IO.Path]::Combine('$(_InkvoltPrintSibling)', 'PrintDesk'))</InkvoltPrintRoot>
+    <InkvoltPrintRoot>$([MSBuild]::EnsureTrailingSlash('$(InkvoltPrintRoot)'))</InkvoltPrintRoot>
   </PropertyGroup>
 </Project>

@@ -1,7 +1,7 @@
-"""Generates the PdfDesk icons (16-256 px) and 512 px previews.
+"""Generates the Inkvolt PDF icons (16-256 px) and 512 px previews.
 
-  assets/PdfDesk.ico          app icon: Fluent-style rounded tile in PDF red, a white page with a folded corner,
-                              text lines, and a "PDF" label (same visual family as PrintDesk's blue tile).
+  assets/InkvoltPdf.ico          app icon: Fluent-style rounded tile in PDF red, a white page with a folded corner,
+                              text lines, and a "PDF" label (same visual family as Inkvolt Print's blue tile).
   assets/PdfDocument.ico      file-type icon for .pdf in Explorer: a white page with a red "PDF" band.
 
   packaging/Assets/*.png     MSIX images (tiles, Start/taskbar icons per target size, store logo, splash screen, file-type
@@ -179,7 +179,7 @@ def save_msix(folder):
 
 
 if __name__ == "__main__":
-    save(draw_app, "PdfDesk")
+    save(draw_app, "InkvoltPdf")
     save(draw_doc, "PdfDocument")
     n = save_msix(os.path.join(HERE, "..", "packaging", "Assets"))
-    print(f"wrote PdfDesk.ico, PdfDocument.ico, previews and {n} MSIX images in packaging/Assets")
+    print(f"wrote InkvoltPdf.ico, PdfDocument.ico, previews and {n} MSIX images in packaging/Assets")

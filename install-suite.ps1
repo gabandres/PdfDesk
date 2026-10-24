@@ -1,17 +1,18 @@
-# Installs (or removes) the Desk suite, PdfDesk and PrintDesk, for the current user. No admin rights needed.
-#   pwsh -File install-suite.ps1              publish both (ARM64), install to %LOCALAPPDATA%\Programs\Desk\PdfDesk and \PrintDesk,
-#                                             Start Menu folder "Desk", App Paths (so each app finds the other), PdfDesk "Open with"
+# Installs (or removes) Inkvolt, Inkvolt PDF and Inkvolt Print, for the current user. No admin rights needed.
+#   pwsh -File install-suite.ps1              publish both (ARM64), install to %LOCALAPPDATA%\Programs\Inkvolt\InkvoltPdf and \InkvoltPrint,
+#                                             Start Menu folder "Inkvolt", App Paths (so each app finds the other), Inkvolt PDF "Open with"
 #   pwsh -File install-suite.ps1 -NoBuild     install the existing publish outputs
 #   pwsh -File install-suite.ps1 -Uninstall   remove what this script added, and restore registry values it replaced
-# Each repo's own installer keeps working on its own (PdfDesk: install.ps1 → %LOCALAPPDATA%\Programs\PdfDesk).
-# PrintDeskRoot: the PrintDesk checkout (default: $env:PrintDeskRoot, else a PrintDesk\ folder beside a folder above this
-# script, else Z:\PrintDesk). InstallRoot, StartMenu and RegistryRoot exist for testing on scratch locations.
+# Each repo's own installer keeps working on its own (Inkvolt PDF: install.ps1 → %LOCALAPPDATA%\Programs\InkvoltPdf).
+# InkvoltPrintRoot: the Inkvolt Print checkout (default: $env:InkvoltPrintRoot, else the first folder named inkvolt-print,
+# InkvoltPrint or PrintDesk (its checkout before the rename) holding InkvoltPrint.slnx beside this script's folder or
+# any folder above it). InstallRoot, StartMenu and RegistryRoot exist for testing on scratch locations.
 param(
     [switch]$Uninstall,
     [switch]$NoBuild,
-    [string]$PrintDeskRoot,
-    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\Desk'),
-    [string]$StartMenu = (Join-Path ([Environment]::GetFolderPath('Programs')) 'Desk'),
+    [string]$InkvoltPrintRoot,
+    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\Inkvolt'),
+    [string]$StartMenu = (Join-Path ([Environment]::GetFolderPath('Programs')) 'Inkvolt'),
     [string]$RegistryRoot = 'HKCU:\Software'
 )
 $ErrorActionPreference = 'Stop'
@@ -22,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 if ($RegistryRoot -notmatch '^HKCU:\\(.+)$') { throw "RegistryRoot must be under HKCU:\ (got $RegistryRoot)" }
 $regBase = $Matches[1].TrimEnd('\')
 $hkcu = [Microsoft.Win32.Registry]::CurrentUser
-$manifestPath = Join-Path $InstallRoot 'desk-suite.json'
+$manifestPath = Join-Path $InstallRoot 'inkvolt-suite.json'
 $changes = [System.Collections.Generic.List[object]]::new()
 
 function Read-Manifest {
@@ -112,34 +113,40 @@ function Write-Manifest($registry) {
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 }
 
-$apps = [ordered]@{ PdfDesk = Join-Path $InstallRoot 'PdfDesk'; PrintDesk = Join-Path $InstallRoot 'PrintDesk' }
-$running = Get-Process PdfDesk, PrintDesk -ErrorAction SilentlyContinue |
+$apps = [ordered]@{ InkvoltPdf = Join-Path $InstallRoot 'InkvoltPdf'; InkvoltPrint = Join-Path $InstallRoot 'InkvoltPrint' }
+# Start Menu shortcut name per app
+$titles = @{ InkvoltPdf = 'Inkvolt PDF'; InkvoltPrint = 'Inkvolt Print' }
+$running = Get-Process InkvoltPdf, InkvoltPrint -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($InstallRoot + '\', [StringComparison]::OrdinalIgnoreCase) }
 if ($running) { throw "$(($running.Name | Sort-Object -Unique) -join ' and ') is running from $InstallRoot. Close it (save your work first), then run this again." }
 
 if ($Uninstall) {
     Undo-Registry (Read-Manifest)
-    foreach ($name in $apps.Keys) { Remove-Item -LiteralPath (Join-Path $StartMenu "$name.lnk") -ErrorAction SilentlyContinue }
+    foreach ($name in $apps.Keys) { Remove-Item -LiteralPath (Join-Path $StartMenu "$($titles[$name]).lnk") -ErrorAction SilentlyContinue }
     if ((Test-Path -LiteralPath $StartMenu) -and -not (Get-ChildItem -LiteralPath $StartMenu -Force)) { Remove-Item -LiteralPath $StartMenu }
     foreach ($dir in $apps.Values) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $manifestPath -ErrorAction SilentlyContinue
     if ((Test-Path -LiteralPath $InstallRoot) -and -not (Get-ChildItem -LiteralPath $InstallRoot -Force)) { Remove-Item -LiteralPath $InstallRoot }
-    Write-Host 'Desk suite removed. (Settings and logs in %LOCALAPPDATA%\PdfDesk and \PrintDesk are kept.)'
+    Write-Host 'Inkvolt removed. (Settings and logs in %LOCALAPPDATA%\InkvoltPdf and \InkvoltPrint are kept.)'
     return
 }
 
 # --- Build ---
-if (-not $PrintDeskRoot) { $PrintDeskRoot = $env:PrintDeskRoot }
-if (-not $PrintDeskRoot) {
-    for ($dir = $PSScriptRoot; $dir; $dir = Split-Path $dir -Parent) {
-        if (Test-Path -LiteralPath (Join-Path $dir 'PrintDesk\PrintDesk.slnx')) { $PrintDeskRoot = Join-Path $dir 'PrintDesk'; break }
+if (-not $InkvoltPrintRoot) { $InkvoltPrintRoot = $env:InkvoltPrintRoot }
+if (-not $InkvoltPrintRoot) {
+    # Same order as Directory.Build.props: the GitHub repo name, the project name, then the checkout's pre-rename name.
+    :search foreach ($folder in 'inkvolt-print', 'InkvoltPrint', 'PrintDesk') {
+        for ($dir = $PSScriptRoot; $dir; $dir = Split-Path $dir -Parent) {
+            if (Test-Path -LiteralPath (Join-Path $dir "$folder\InkvoltPrint.slnx")) { $InkvoltPrintRoot = Join-Path $dir $folder; break search }
+        }
     }
 }
-if (-not $PrintDeskRoot) { $PrintDeskRoot = 'Z:\PrintDesk' }
-if (-not (Test-Path -LiteralPath (Join-Path $PrintDeskRoot 'PrintDesk.slnx'))) { throw "PrintDesk not found at $PrintDeskRoot (pass -PrintDeskRoot)" }
+if (-not $InkvoltPrintRoot -or -not (Test-Path -LiteralPath (Join-Path $InkvoltPrintRoot 'InkvoltPrint.slnx'))) {
+    throw "Inkvolt Print not found$(if ($InkvoltPrintRoot) { " at $InkvoltPrintRoot" }) (pass -InkvoltPrintRoot)"
+}
 
-$publish = @{ PdfDesk = Join-Path $PSScriptRoot 'publish\win-arm64'; PrintDesk = Join-Path $PrintDeskRoot 'publish\win-arm64' }
-$projects = @{ PdfDesk = Join-Path $PSScriptRoot 'src\PdfDesk.App'; PrintDesk = Join-Path $PrintDeskRoot 'src\PrintDesk.App' }
+$publish = @{ InkvoltPdf = Join-Path $PSScriptRoot 'publish\win-arm64'; InkvoltPrint = Join-Path $InkvoltPrintRoot 'publish\win-arm64' }
+$projects = @{ InkvoltPdf = Join-Path $PSScriptRoot 'src\InkvoltPdf.App'; InkvoltPrint = Join-Path $InkvoltPrintRoot 'src\InkvoltPrint.App' }
 if (-not $NoBuild) {
     foreach ($name in $apps.Keys) {
         # Start clean, so nothing left over from an older build ends up installed.
@@ -159,17 +166,17 @@ foreach ($name in $apps.Keys) {
     Copy-Item -LiteralPath (Join-Path $publish[$name] "$name.exe") -Destination $dest -Force
     Get-ChildItem -LiteralPath $publish[$name] -File -Filter *.dll | Copy-Item -Destination $dest -Force
 }
-$pdfExe = Join-Path $apps.PdfDesk 'PdfDesk.exe'
-$printExe = Join-Path $apps.PrintDesk 'PrintDesk.exe'
-$docIcon = Join-Path $apps.PdfDesk 'PdfDocument.ico'
+$pdfExe = Join-Path $apps.InkvoltPdf 'InkvoltPdf.exe'
+$printExe = Join-Path $apps.InkvoltPrint 'InkvoltPrint.exe'
+$docIcon = Join-Path $apps.InkvoltPdf 'PdfDocument.ico'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets\PdfDocument.ico') -Destination $docIcon -Force
 
-# --- Start Menu folder "Desk" (each shortcut carries its exe's own icon) ---
+# --- Start Menu folder "Inkvolt" (each shortcut carries its exe's own icon) ---
 New-Item -ItemType Directory -Force $StartMenu | Out-Null
 $shell = New-Object -ComObject WScript.Shell
 foreach ($s in @(
-        @{ Name = 'PdfDesk'; Exe = $pdfExe; Text = 'View, search, print, scan and organize PDF files' },
-        @{ Name = 'PrintDesk'; Exe = $printExe; Text = 'Printers and scanners: status, scan, print, settings' })) {
+        @{ Name = $titles.InkvoltPdf; Exe = $pdfExe; Text = 'View, search, print, scan and organize PDF files' },
+        @{ Name = $titles.InkvoltPrint; Exe = $printExe; Text = 'Printers and scanners: status, scan, print, settings' })) {
     $l = $shell.CreateShortcut((Join-Path $StartMenu "$($s.Name).lnk"))
     $l.TargetPath = $s.Exe
     $l.WorkingDirectory = Split-Path $s.Exe
@@ -185,22 +192,22 @@ foreach ($exe in $pdfExe, $printExe) {
     Set-Value $key '' $exe
     Set-Value $key 'Path' (Split-Path $exe)
 }
-# PdfDesk "Open with" + Default Apps, as install.ps1 registers it (same ProgId, so either install serves).
+# Inkvolt PDF "Open with" + Default Apps, as install.ps1 registers it (same ProgId, so either install serves).
 $classes = 'Classes'
-$progId = 'PdfDesk.Document'
+$progId = 'InkvoltPdf.Document'
 $open = "`"$pdfExe`" `"%1`""
 Set-Value "$classes\$progId" '' 'PDF Document'
 Set-Value "$classes\$progId\shell\open\command" '' $open
 Set-Value "$classes\$progId\DefaultIcon" '' "`"$docIcon`""
-Set-Value "$classes\Applications\PdfDesk.exe\shell\open\command" '' $open
-Set-Value 'PdfDesk\Capabilities' 'ApplicationName' 'PdfDesk'
-Set-Value 'PdfDesk\Capabilities' 'ApplicationDescription' 'View, search, print and organize PDF files'
+Set-Value "$classes\Applications\InkvoltPdf.exe\shell\open\command" '' $open
+Set-Value 'InkvoltPdf\Capabilities' 'ApplicationName' 'Inkvolt PDF'
+Set-Value 'InkvoltPdf\Capabilities' 'ApplicationDescription' 'View, search, print and organize PDF files'
 foreach ($t in '.pdf', '.xps', '.oxps', '.epub', '.cbz') {
     Set-Value "$classes\$t\OpenWithProgids" $progId ''
-    Set-Value "$classes\Applications\PdfDesk.exe\SupportedTypes" $t ''
-    Set-Value 'PdfDesk\Capabilities\FileAssociations' $t $progId
+    Set-Value "$classes\Applications\InkvoltPdf.exe\SupportedTypes" $t ''
+    Set-Value 'InkvoltPdf\Capabilities\FileAssociations' $t $progId
 }
-Set-Value 'RegisteredApplications' 'PdfDesk' 'Software\PdfDesk\Capabilities'
+Set-Value 'RegisteredApplications' 'Inkvolt PDF' 'Software\InkvoltPdf\Capabilities'
 
 # Keep what an earlier run recorded (a re-run finds its own values in place and records nothing new).
 Write-Manifest (@(Read-Manifest) + @($changes))
@@ -213,4 +220,4 @@ if ($RegistryRoot -eq 'HKCU:\Software') {
 Write-Host "Installed $pdfExe"
 Write-Host "Installed $printExe"
 Write-Host "Start Menu: $StartMenu"
-Write-Host 'To make PdfDesk the default PDF app: Settings > Apps > Default apps > PdfDesk > .pdf'
+Write-Host 'To make Inkvolt PDF the default PDF app: Settings > Apps > Default apps > Inkvolt PDF > .pdf'

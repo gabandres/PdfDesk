@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/PdfDesk.App/PdfDesk.App.csproj" />
-    <Project Path="src/PdfDesk.Core/PdfDesk.Core.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/PdfDesk.Tests/PdfDesk.Tests.csproj" />
-  </Folder>
-</Solution>

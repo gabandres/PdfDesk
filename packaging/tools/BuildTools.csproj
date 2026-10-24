@@ -1,6 +1,6 @@
 <Project>
   <!-- Restore-only project: downloads the Windows SDK build tools (makeappx, makepri, signtool) into the NuGet cache, so
-       packaging/pack-msix.ps1 needs no Windows SDK install. Not part of PdfDesk.slnx; never built.
+       packaging/pack-msix.ps1 needs no Windows SDK install. Not part of InkvoltPdf.slnx; never built.
          dotnet restore packaging/tools/BuildTools.csproj -->
   <PropertyGroup>
     <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>

@@ -1,7 +1,7 @@
 # Third-party notices
 
-PdfDesk includes the following third-party software. Each component is used under the license named here; the
-license texts are at the links given. Versions are the ones PdfDesk builds with (license data read from each NuGet
+Inkvolt PDF includes the following third-party software. Each component is used under the license named here; the
+license texts are at the links given. Versions are the ones Inkvolt PDF builds with (license data read from each NuGet
 package's metadata).
 
 | Component | Version | License | Copyright | Source |

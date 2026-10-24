@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  MSIX manifest for PdfDesk. packaging/pack-msix.ps1 fills the {{...}} tokens (XML-escaped) per architecture and writes
+  MSIX manifest for Inkvolt PDF. packaging/pack-msix.ps1 fills the {{...}} tokens (XML-escaped) per architecture and writes
   AppxManifest.xml into each package layout. Store values (Identity Name, Publisher, PublisherDisplayName) come from
   Partner Center > Product identity; see packaging/README.md.
-  File types match install.ps1's "Open with" list plus .fb2 (PdfDesk opens it too). No protocol: PdfDesk handles none.
+  File types match install.ps1's "Open with" list plus .fb2 (Inkvolt PDF opens it too). No protocol: Inkvolt PDF handles none.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -35,7 +35,7 @@
   </Resources>
 
   <Applications>
-    <Application Id="App" Executable="PdfDesk.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="App" Executable="InkvoltPdf.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="{{DisplayName}}"
         Description="View, search, print, sign and organize PDF files"
@@ -81,10 +81,10 @@
             </uap:SupportedFileTypes>
           </uap3:FileTypeAssociation>
         </uap3:Extension>
-        <!-- "pdfdesk" (pdfdesk.exe) from a terminal, Run, or another app such as PrintDesk -->
-        <uap5:Extension Category="windows.appExecutionAlias" Executable="PdfDesk.exe" EntryPoint="Windows.FullTrustApplication">
+        <!-- "inkvoltpdf" (inkvoltpdf.exe) from a terminal, Run, or another app such as Inkvolt Print -->
+        <uap5:Extension Category="windows.appExecutionAlias" Executable="InkvoltPdf.exe" EntryPoint="Windows.FullTrustApplication">
           <uap5:AppExecutionAlias>
-            <uap5:ExecutionAlias Alias="pdfdesk.exe" />
+            <uap5:ExecutionAlias Alias="inkvoltpdf.exe" />
           </uap5:AppExecutionAlias>
         </uap5:Extension>
       </Extensions>

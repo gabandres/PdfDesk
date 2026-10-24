@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>$(WinTfm)</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>InkvoltPdf</AssemblyName>
+    <RootNamespace>InkvoltPdf.App</RootNamespace>
+    <ApplicationIcon>..\..\assets\InkvoltPdf.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- ThemeMode (Fluent) is marked experimental in WPF -->
+    <NoWarn>$(NoWarn);WPF0001</NoWarn>
+    <!-- The UI is English only: skip the framework's translated resource assemblies (~8 MB) -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\InkvoltPdf.Core\InkvoltPdf.Core.csproj" />
+    <!-- Inkvolt suite: eSCL scanning, printer status and discovery from Inkvolt Print (no packages: protocols + WinRT only) -->
+    <ProjectReference Include="$(InkvoltPrintRoot)src\InkvoltPrint.Core\InkvoltPrint.Core.csproj" />
+    <ProjectReference Include="$(InkvoltPrintRoot)src\InkvoltPrint.Windows\InkvoltPrint.Windows.csproj" />
+  </ItemGroup>
+  <!-- Publish: our own symbols are embedded (Directory.Build.props); packages' loose .pdb files (e.g. libHarfBuzzSharp.pdb,
+       23 MB) would land next to the single-file exe, so leave every .pdb out of the publish output. -->
+  <Target Name="DropPdbsFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+      <!-- Native PDB writer the runtime pack carries for debugging tools; the app never writes PDBs -->
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.arm64.dll' or '%(Filename)%(Extension)' == 'Microsoft.DiaSymReader.Native.amd64.dll'" />
+    </ItemGroup>
+  </Target>
+  <ItemGroup>
+    <Resource Include="..\..\assets\InkvoltPdf.ico" Link="InkvoltPdf.ico" />
+    <Resource Include="..\..\assets\InkvoltPdf-512.png" Link="InkvoltPdfLogo.png" />
+    <!-- Shown by Help > About > Third-party notices; packaging/pack-msix.ps1 also copies it into the MSIX -->
+    <Resource Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" />
+  </ItemGroup>
+</Project>

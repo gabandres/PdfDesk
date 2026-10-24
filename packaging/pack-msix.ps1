@@ -1,23 +1,24 @@
-# Builds PdfDesk as MSIX packages (x64 + ARM64) and a bundle for the Microsoft Store. No Windows SDK install needed:
+# Builds Inkvolt PDF as MSIX packages (x64 + ARM64) and a bundle for the Microsoft Store. No Windows SDK install needed:
 # makeappx/makepri/signtool come from the Microsoft.Windows.SDK.BuildTools NuGet package (packaging/tools).
 #
-#   pwsh -File packaging/pack-msix.ps1                              placeholder identity, unsigned (Store signs uploads)
-#   pwsh -File packaging/pack-msix.ps1 -IdentityName 12345Me.PdfDesk -Publisher 'CN=...' -PublisherDisplayName 'Me' -Version 1.2.0.0
+#   pwsh -File packaging/pack-msix.ps1                              Partner Center identity (Store ID 9MXDTSFJ9W28), unsigned
+#                                                                   (Store signs uploads)
+#   pwsh -File packaging/pack-msix.ps1 -Version 1.2.0.0
 #   pwsh -File packaging/pack-msix.ps1 -SignWithTestCert            also signs with a self-signed test certificate (.pfx in
 #                                                                   the output folder; installed nowhere) for sideloading
 #
-# Output (publish\msix): PdfDesk_<ver>_x64.msix, PdfDesk_<ver>_arm64.msix, PdfDesk_<ver>.msixbundle, PdfDesk_<ver>.msixupload.
+# Output (publish\msix): InkvoltPdf_<ver>_x64.msix, InkvoltPdf_<ver>_arm64.msix, InkvoltPdf_<ver>.msixbundle, InkvoltPdf_<ver>.msixupload.
 # See packaging/README.md.
 [CmdletBinding()]
 param(
     # Partner Center > Product identity > Package/Identity/Name
-    [string]$IdentityName = 'PdfDesk.Placeholder',
+    [string]$IdentityName = 'BermudezSystems.InkvoltPDF',
     # Partner Center > Product identity > Package/Identity/Publisher (the full "CN=..." string)
-    [string]$Publisher = 'CN=PdfDesk Placeholder Publisher',
+    [string]$Publisher = 'CN=1CC7D6EF-8A48-4BDE-AF19-4FEC30D5613B',
     # Partner Center > Product identity > Package/Properties/PublisherDisplayName
-    [string]$PublisherDisplayName = 'PdfDesk (placeholder publisher)',
+    [string]$PublisherDisplayName = 'Bermudez Systems',
     # Package/Properties/DisplayName: must be a name reserved in Partner Center
-    [string]$DisplayName = 'PdfDesk',
+    [string]$DisplayName = 'Inkvolt PDF',
     # Four parts; the Store needs the last one to be 0
     [string]$Version = '1.0.0.0',
     [ValidateSet('x64', 'arm64')]
@@ -40,7 +41,6 @@ if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$' -or ($Version.Split('.') | Where-O
 if (-not $Version.EndsWith('.0')) { Write-Warning "The Store rejects packages whose last version number isn't 0 ($Version)." }
 if ($IdentityName -notmatch '^[A-Za-z0-9.\-]{3,50}$') { throw "IdentityName: 3-50 letters, digits, '.' or '-': $IdentityName" }
 if ($Publisher -notmatch '^CN=') { throw "Publisher must be a distinguished name starting with CN= (copy it from Partner Center): $Publisher" }
-if ($IdentityName -eq 'PdfDesk.Placeholder') { Write-Warning 'Placeholder identity: fine for a local test, not for Store upload (see packaging/README.md).' }
 
 # ───── Tools ─────
 $toolsProj = Join-Path $PSScriptRoot 'tools\BuildTools.csproj'
@@ -105,11 +105,11 @@ foreach ($arch in $Architectures) {
     if (-not $NoBuild) {
         Remove-Item $pub -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "Publishing $rid..."
-        dotnet publish (Join-Path $root 'src\PdfDesk.App') -c Release -r $rid --self-contained true -nologo -v q `
+        dotnet publish (Join-Path $root 'src\InkvoltPdf.App') -c Release -r $rid --self-contained true -nologo -v q `
             -p:PublishSingleFile=false -p:Version=$Version -p:CopyOutputSymbolsToPublishDirectory=false -o $pub | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Publish failed for $rid." }
     }
-    if (-not (Test-Path (Join-Path $pub 'PdfDesk.exe'))) { throw "Not found: $pub\PdfDesk.exe (run without -NoBuild)" }
+    if (-not (Test-Path (Join-Path $pub 'InkvoltPdf.exe'))) { throw "Not found: $pub\InkvoltPdf.exe (run without -NoBuild)" }
     foreach ($native in 'MuPDFWrapper.dll', 'libHarfBuzzSharp.dll') {
         if (-not (Test-Path (Join-Path $pub $native))) { throw "$rid publish lacks its native $native" }
     }
@@ -123,19 +123,19 @@ foreach ($arch in $Architectures) {
     Copy-Item (Join-Path $root 'THIRD-PARTY-NOTICES.md') $layout
     Set-Content (Join-Path $layout 'AppxManifest.xml') (New-Manifest $arch) -Encoding utf8
 
-    $file = Join-Path $packagesDir "PdfDesk_${Version}_$arch.msix"
+    $file = Join-Path $packagesDir "InkvoltPdf_${Version}_$arch.msix"
     Write-Host "Packing $([IO.Path]::GetFileName($file))..."
     Invoke-Tool $makeappx @('pack', '/d', $layout, '/p', $file, '/o')
     $msix[$arch] = $file
 }
 
 # ───── Bundle + Store upload file ─────
-$bundle = Join-Path $OutDir "PdfDesk_$Version.msixbundle"
+$bundle = Join-Path $OutDir "InkvoltPdf_$Version.msixbundle"
 Write-Host "Bundling $([IO.Path]::GetFileName($bundle))..."
 Invoke-Tool $makeappx @('bundle', '/d', $packagesDir, '/p', $bundle, '/bv', $Version, '/o')
 
-# .msixupload = a zip holding the bundle (symbol .appxsym files would go beside it; PdfDesk embeds its PDBs instead).
-$upload = Join-Path $OutDir "PdfDesk_$Version.msixupload"
+# .msixupload = a zip holding the bundle (symbol .appxsym files would go beside it; Inkvolt PDF embeds its PDBs instead).
+$upload = Join-Path $OutDir "InkvoltPdf_$Version.msixupload"
 $zip = "$upload.zip"
 Remove-Item $upload, $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $bundle -DestinationPath $zip -CompressionLevel NoCompression
@@ -146,8 +146,8 @@ foreach ($f in $msix.Values) { Copy-Item $f $OutDir -Force }
 
 # ───── Optional: test signature for sideloading ─────
 if ($SignWithTestCert) {
-    $pfx = Join-Path $OutDir 'PdfDesk-TestSigning.pfx'
-    $cer = Join-Path $OutDir 'PdfDesk-TestSigning.cer'
+    $pfx = Join-Path $OutDir 'InkvoltPdf-TestSigning.pfx'
+    $cer = Join-Path $OutDir 'InkvoltPdf-TestSigning.cer'
     $cert = $null
     if (Test-Path $pfx) {
         $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, [string]$null, 'Exportable')
@@ -171,7 +171,7 @@ if ($SignWithTestCert) {
         [IO.File]::WriteAllBytes($cer, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
         Write-Host "Created test certificate $([IO.Path]::GetFileName($pfx)) ($Publisher, thumbprint $($cert.Thumbprint))"
     }
-    $signed = @($bundle) + @($msix.Keys | ForEach-Object { Join-Path $OutDir "PdfDesk_${Version}_$_.msix" })
+    $signed = @($bundle) + @($msix.Keys | ForEach-Object { Join-Path $OutDir "InkvoltPdf_${Version}_$_.msix" })
     foreach ($f in $signed) { Invoke-Tool $signtool @('sign', '/q', '/fd', 'SHA256', '/f', $pfx, $f) }
     Write-Host 'Signed with the test certificate. To sideload, trust it yourself first (see packaging/README.md, "Local test install").'
 }

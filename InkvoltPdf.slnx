@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/InkvoltPdf.App/InkvoltPdf.App.csproj" />
+    <Project Path="src/InkvoltPdf.Core/InkvoltPdf.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/InkvoltPdf.Tests/InkvoltPdf.Tests.csproj" />
+  </Folder>
+</Solution>
