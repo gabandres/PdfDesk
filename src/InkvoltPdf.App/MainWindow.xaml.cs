@@ -1300,6 +1300,7 @@ public partial class MainWindow : Window
             _ = t.ReloadFromDiskAsync($"Reloaded {t.Session.DisplayName}");
         }, t => t.Session.FilePath is not null && !IsSaving(t));
         Bind(Cmd.Print, t => _ = FileActions.Print(this, t), t => t.PageView.PageCount > 0);
+        Bind(Cmd.PrintWithOptions, t => _ = FileActions.Print(this, t, withOptions: true), t => t.PageView.PageCount > 0);
         BindAlways(Cmd.Scan, () => Scanning.ScanToNewTab(this));
         Bind(Cmd.ExportImages, t => _ = FileActions.ExportImages(this, t, this), t => t.PageView.PageCount > 0);
         Bind(Cmd.Properties, t => _ = FileActions.ShowProperties(this, t));

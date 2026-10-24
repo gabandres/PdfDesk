@@ -101,6 +101,7 @@
                                     <MenuItem Command="app:Cmd.ReloadFromDisk" />
                                     <Separator />
                                     <MenuItem Command="app:Cmd.Print" />
+                                    <MenuItem Command="app:Cmd.PrintWithOptions" Header="Print with _Options…" />
                                     <MenuItem Command="app:Cmd.Scan" />
                                     <MenuItem x:Name="InkvoltPrintMenu" Header="Printer Settings (In_kvolt Print)" Click="OnOpenInkvoltPrint" Visibility="Collapsed" />
                                     <MenuItem Command="app:Cmd.ExportImages" />

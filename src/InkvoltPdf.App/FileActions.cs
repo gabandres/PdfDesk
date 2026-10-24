@@ -13,7 +13,12 @@ namespace InkvoltPdf.App;
 /// <summary>Print, export to images, and document properties.</summary>
 public static class FileActions
 {
-    public static async Task Print(Window owner, DocumentTab tab)
+    /// <summary>
+    /// Print: the Windows dialog, then straight to the printer, each page fit to the paper the way the last
+    /// Page Sizing &amp; Handling chose (actual size or fit to paper). <paramref name="withOptions"/> asks for
+    /// Page Sizing &amp; Handling (pages per sheet, booklet, poster) once the printer and paper are known.
+    /// </summary>
+    public static async Task Print(Window owner, DocumentTab tab, bool withOptions = false)
     {
         // Let a value still being typed land first: the dialog takes focus, which would commit it mid-print.
         if (!await tab.SettleAsync()) return;
@@ -45,12 +50,15 @@ public static class FileActions
         pages = [.. pages.Where(p => p >= 0 && p < count)];
         if (pages.Length == 0) return;
 
-        // Page sizing & handling: fit, pages per sheet, booklet, poster (the paper is known now).
+        // Page sizing & handling (Print with Options): fit, pages per sheet, booklet, poster (the paper is known now).
         var (origin, area) = ImageableArea(dlg);
         var paper = new Size(dlg.PrintableAreaWidth, dlg.PrintableAreaHeight);
         var printable = new RectD(origin.X, origin.Y, area.Width, area.Height);
         var duplex = CanPrintBothSides(dlg);
-        if (PrintHandlingDialog.Ask(owner, pages, SizesOf(tab.ViewEngine), paper, printable, duplex) is not { } setup || !await tab.SettleAsync()) return;
+        var setup = withOptions
+            ? PrintHandlingDialog.Ask(owner, pages, SizesOf(tab.ViewEngine), paper, printable, duplex)
+            : new PrintSetup { Sizing = AppSettings.Current.PrintFitToPaper ? PrintSizing.FitToPaper : PrintSizing.ActualSize };
+        if (setup is null || !await tab.SettleAsync()) return;
         if (pages.Any(p => p >= tab.PageView.PageCount)) return; // the document changed meanwhile
         if (setup.Handling == PrintHandling.Booklet && duplex) dlg.PrintTicket.Duplexing = Duplexing.TwoSidedShortEdge;
 

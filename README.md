@@ -170,8 +170,9 @@ Manager. The installers don't remove an install made under the old names: uninst
   content; a page range and a live preview. Written into the pages like the header and footer, one undo step; applying
   again replaces it, Remove Watermark takes it off.
 - **Print** (renders in the background, one sheet at a time; progress on the taskbar button, as for export, OCR and
-  combine). After the printer is chosen, **Page Sizing & Handling** (remembered, with a sketch of the first sheet and the
-  sheet count): **Fit**, one page per sheet turned to the paper, at actual size (only pages larger than the paper
+  combine). Ctrl+P prints each page fit to the paper as last chosen. **Print with Options…** (Ctrl+Alt+P) adds **Page
+  Sizing & Handling** after the printer is chosen (remembered, with a sketch of the first sheet and the sheet count):
+  **Fit**, one page per sheet turned to the paper, at actual size (only pages larger than the paper
   shrink) or fit to paper (small pages grow too); **Multiple pages per sheet** (2, 4, 6, 9 or 16, across or down,
   optional page borders; the sheet is turned when that shows the pages larger); **Booklet** (saddle stitch: two pages
   per side, sheets ordered so the folded stack reads in order, padded with blank pages to a multiple of 4, binding on

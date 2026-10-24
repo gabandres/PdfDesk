@@ -46,6 +46,7 @@ public static class Cmd
     public static readonly RoutedUICommand CloseDoc = Make("_Close", nameof(CloseDoc), K(Key.W, ModifierKeys.Control), K(Key.F4, ModifierKeys.Control));
     public static readonly RoutedUICommand CloseAll = Make("Close A_ll", nameof(CloseAll), K(Key.W, ModifierKeys.Control | ModifierKeys.Shift));
     public static readonly RoutedUICommand Print = Make("_Print…", nameof(Print), K(Key.P, ModifierKeys.Control));
+    public static readonly RoutedUICommand PrintWithOptions = Make("Print with _Options… (booklet, pages per sheet, poster)", nameof(PrintWithOptions), K(Key.P, ModifierKeys.Control | ModifierKeys.Alt));
     public static readonly RoutedUICommand Scan = Make("Sca_n…", nameof(Scan));
     public static readonly RoutedUICommand ExportImages = Make("Export Pages as _Images…", nameof(ExportImages));
     public static readonly RoutedUICommand Properties = Make("Document P_roperties…", nameof(Properties), K(Key.D, ModifierKeys.Control));
