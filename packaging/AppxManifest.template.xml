@@ -28,6 +28,11 @@
 
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+    <!-- MuPDF's native engine (MuPDFWrapper.dll) links the Visual C++ runtime (MSVCP140, VCRUNTIME140, VCRUNTIME140_1).
+         Windows doesn't ship it; the Store installs this framework package with the app. Without it, opening any file
+         fails on a PC that has no VC++ redistributable (Store certification 10.1.2.10, Oct 2026). -->
+    <PackageDependency Name="Microsoft.VCLibs.140.00.UWPDesktop" MinVersion="14.0.30704.0"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
   </Dependencies>
 
   <Resources>

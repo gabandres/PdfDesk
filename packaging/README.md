@@ -77,6 +77,14 @@ Version: four numbers, the last one 0 (the Store reserves it), higher than every
 6. **Submission options > Restricted capabilities**: explain `runFullTrust` (text below).
 7. Submit. Certification normally takes 1-3 business days.
 
+### Visual C++ runtime
+
+MuPDF's native engine (`MuPDFWrapper.dll`) links MSVCP140, VCRUNTIME140 and (x64) VCRUNTIME140_1. Windows doesn't
+ship them, so the manifest declares the `Microsoft.VCLibs.140.00.UWPDesktop` framework (MinVersion 14.0.30704.0), which
+the Store installs with the app. Without it, every file open fails with "Unable to load DLL 'MuPDFWrapper'" on a PC
+without the VC++ redistributable: certification failed 1.0.0.0 for this (10.1.2.10, Oct 2026). A sideloaded test
+needs the framework installed (`Get-AppxPackage Microsoft.VCLibs.140.00.UWPDesktop`).
+
 ### runFullTrust justification
 
 > Inkvolt PDF is a classic Win32 desktop application (.NET / WPF) packaged with the Desktop Bridge. `runFullTrust` is
